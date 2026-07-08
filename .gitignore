@@ -1,0 +1,27 @@
+# Keep the repository focused on packaged source code.
+# Everything at the repository root is ignored unless explicitly allowed below.
+/*
+
+# Tracked source tree
+!/.gitignore
+!/src/
+!/src/**
+
+# Python runtime caches and local tooling state
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter runtime artifacts
+.ipynb_checkpoints/
+
+# Project outputs and root-level scratch/config files
+/anticomm_graphs/
+/figs/
+/*.ipynb
+/config.yaml
+/plot.config
+/FILE_SPECIFICATIONS.md
