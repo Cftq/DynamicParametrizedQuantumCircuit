@@ -79,6 +79,22 @@ def psd_eigvals_desc(matrix: jnp.ndarray) -> jnp.ndarray:
     return psd_eigvals(matrix)[::-1]
 
 
+def hermitian_eigvals_desc(matrix: jnp.ndarray) -> jnp.ndarray:
+    """Return signed descending eigenvalues of a Hermitian matrix."""
+    evals = jnp.real(jnp.linalg.eigvalsh(hermitian(matrix)))
+    return evals[::-1]
+
+
+def effective_abs_rank_from_eigvals(
+    evals: jnp.ndarray,
+    *,
+    threshold: Optional[float] = None,
+) -> jnp.ndarray:
+    """Count signed eigenvalues whose absolute value exceeds the threshold."""
+    threshold_jnp = rank_threshold_from_eigvals(evals, threshold=threshold)
+    return jnp.sum(jnp.abs(evals) > threshold_jnp)
+
+
 def matrix_rank_psd(
     matrix: jnp.ndarray,
     *,

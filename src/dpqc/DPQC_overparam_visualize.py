@@ -626,6 +626,21 @@ def run_dpqc_overparam_visualize() -> None:
         hs_eigcount_optimization_path_dir,
         "min",
     )
+    hessian_eigs_dir = os.path.join(qfim_fig_dir, "hessian_eigs")
+    hessian_rank_dir = os.path.join(qfim_fig_dir, "hessian_rank")
+    hessian_rank_random_dir = os.path.join(hessian_rank_dir, "random_points")
+    hessian_rank_optimization_path_dir = os.path.join(
+        hessian_rank_dir,
+        "optimization_path",
+    )
+    hessian_rank_optimization_path_mean_dir = os.path.join(
+        hessian_rank_optimization_path_dir,
+        "mean",
+    )
+    hessian_rank_optimization_path_min_dir = os.path.join(
+        hessian_rank_optimization_path_dir,
+        "min",
+    )
     circuit_dir = os.path.join(save_dir, "optimized_circuits")
     numerical_results_dir = os.path.join(save_dir, "numerical_results")
     energy_results_dir = os.path.join(numerical_results_dir, "energy")
@@ -658,6 +673,12 @@ def run_dpqc_overparam_visualize() -> None:
     os.makedirs(hs_eigcount_optimization_path_dir, exist_ok=True)
     os.makedirs(hs_eigcount_optimization_path_mean_dir, exist_ok=True)
     os.makedirs(hs_eigcount_optimization_path_min_dir, exist_ok=True)
+    os.makedirs(hessian_eigs_dir, exist_ok=True)
+    os.makedirs(hessian_rank_dir, exist_ok=True)
+    os.makedirs(hessian_rank_random_dir, exist_ok=True)
+    os.makedirs(hessian_rank_optimization_path_dir, exist_ok=True)
+    os.makedirs(hessian_rank_optimization_path_mean_dir, exist_ok=True)
+    os.makedirs(hessian_rank_optimization_path_min_dir, exist_ok=True)
     os.makedirs(circuit_dir, exist_ok=True)
     os.makedirs(numerical_results_dir, exist_ok=True)
     os.makedirs(energy_results_dir, exist_ok=True)
@@ -1194,6 +1215,185 @@ def run_dpqc_overparam_visualize() -> None:
         save_fig(fig, ax, outpath, outside_legend=True)
 
 
+    def save_signed_eigs_by_index(
+        eigs_sorted_desc: np.ndarray,
+        *,
+        title: str,
+        outpath: str,
+        threshold: float = QFIM_EFFECTIVE_RANK_THRESHOLD,
+        eps: float = QFIM_EIG_PLOT_EPS,
+        point_size: float = 14.0,
+        alpha: float = 0.55,
+        ylabel: str = "Hessian eigenvalue",
+    ) -> None:
+        eigs = np.asarray(eigs_sorted_desc, dtype=NP_REAL_DTYPE)
+
+        if eigs.ndim == 1:
+            eigs = eigs[None, :]
+
+        num_params = int(eigs.shape[1])
+        threshold = float(threshold)
+        linthresh = max(float(eps), threshold)
+
+        fig, ax = new_fig_ax(outside_legend=False)
+        positions = np.arange(1, num_params + 1, dtype=NP_REAL_DTYPE)
+
+        for i, x0 in enumerate(positions):
+            y = eigs[:, i]
+            finite = np.isfinite(y)
+            if not np.any(finite):
+                continue
+            ax.scatter(
+                np.full(np.sum(finite), x0, dtype=NP_REAL_DTYPE),
+                y[finite],
+                s=point_size,
+                color="C6",
+                alpha=alpha,
+                edgecolors="black",
+                linewidths=0.20,
+                rasterized=True,
+            )
+
+        ticks = eigenvalue_index_ticks(num_params, max_ticks=11)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([str(t) for t in ticks])
+        ax.set_xlim(0.5, num_params + 0.5)
+        ax.set_yscale("symlog", linthresh=linthresh)
+        ax.axhline(0.0, linestyle="-", linewidth=0.8, color="black", alpha=0.45)
+
+        if threshold > 0.0:
+            ax.axhline(
+                threshold,
+                linestyle="-",
+                linewidth=1.2,
+                color="red",
+                alpha=0.75,
+                zorder=4,
+            )
+            ax.axhline(
+                -threshold,
+                linestyle="-",
+                linewidth=1.2,
+                color="red",
+                alpha=0.75,
+                zorder=4,
+            )
+
+        finite_vals = eigs[np.isfinite(eigs)]
+        if finite_vals.size > 0:
+            max_abs = max(float(np.max(np.abs(finite_vals))), threshold, linthresh)
+            ax.set_ylim(-1.5 * max_abs, 1.5 * max_abs)
+
+        ax.set_xlabel("Eigenvalue index")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, which="both", alpha=0.3)
+
+        save_fig(fig, ax, outpath, outside_legend=False)
+
+
+    def save_signed_eigs_by_index_colored_by_layer(
+        eigs_sorted_desc_by_layer: dict,
+        layer_list,
+        *,
+        title: str,
+        outpath: str,
+        threshold: float = QFIM_EFFECTIVE_RANK_THRESHOLD,
+        eps: float = QFIM_EIG_PLOT_EPS,
+        cmap=None,
+        alpha: float = 0.50,
+        point_size: float = 10.0,
+        ylabel: str = "Hessian eigenvalue",
+    ) -> None:
+        cmap = matplotlib.colormaps.get_cmap("viridis") if cmap is None else cmap
+
+        layers = [
+            int(L)
+            for L in layer_list
+            if eigs_sorted_desc_by_layer.get(int(L)) is not None
+        ]
+
+        if not layers:
+            return
+
+        max_num_params = max(
+            int(np.asarray(eigs_sorted_desc_by_layer[L]).shape[1])
+            for L in layers
+        )
+        threshold = float(threshold)
+        linthresh = max(float(eps), threshold)
+
+        fig, ax = new_fig_ax(outside_legend=True)
+        handles = []
+        max_abs = max(linthresh, threshold)
+
+        for idx, L in enumerate(layers):
+            color = cmap(idx / max(len(layers) - 1, 1))
+            handles.append(
+                Patch(
+                    facecolor=color,
+                    edgecolor=color,
+                    alpha=0.25,
+                    label=f"L{L}",
+                )
+            )
+
+            eigs = np.asarray(
+                eigs_sorted_desc_by_layer[L],
+                dtype=NP_REAL_DTYPE,
+            )
+            finite_vals = eigs[np.isfinite(eigs)]
+            if finite_vals.size > 0:
+                max_abs = max(max_abs, float(np.max(np.abs(finite_vals))))
+
+            for i in range(max_num_params):
+                if i >= eigs.shape[1]:
+                    continue
+
+                y = eigs[:, i]
+                finite = np.isfinite(y)
+                if not np.any(finite):
+                    continue
+
+                ax.scatter(
+                    np.full(np.sum(finite), i + 1, dtype=NP_REAL_DTYPE),
+                    y[finite],
+                    s=point_size,
+                    color=color,
+                    alpha=alpha,
+                    edgecolors="black",
+                    linewidths=0.15,
+                    rasterized=True,
+                )
+
+        ticks = eigenvalue_index_ticks(max_num_params, max_ticks=11)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([str(t) for t in ticks])
+        ax.set_xlim(0.5, max_num_params + 0.5)
+        ax.set_yscale("symlog", linthresh=linthresh)
+        ax.axhline(0.0, linestyle="-", linewidth=0.8, color="black", alpha=0.45)
+
+        if threshold > 0.0:
+            ax.axhline(threshold, linestyle="-", linewidth=1.2, color="red", alpha=0.75)
+            ax.axhline(-threshold, linestyle="-", linewidth=1.2, color="red", alpha=0.75)
+
+        ax.set_ylim(-1.5 * max_abs, 1.5 * max_abs)
+        ax.set_xlabel("Eigenvalue index")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(
+            handles=handles,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.00),
+            borderaxespad=0.0,
+            frameon=True,
+            framealpha=0.85,
+        )
+
+        save_fig(fig, ax, outpath, outside_legend=True)
+
+
     qfim_random_points_result_path = os.path.join(
         qfim_results_dir,
         f"qfim_random_points_{keep_key}.npz",
@@ -1284,6 +1484,59 @@ def run_dpqc_overparam_visualize() -> None:
         hs_eigsum_reduced_0123_by_layer = {}
         hs_abs_entry_sum_reduced_0123_by_layer = {}
 
+    hessian_random_points_result_path = os.path.join(
+        qfim_results_dir,
+        "hessian_random_points.npz",
+    )
+
+    if os.path.exists(hessian_random_points_result_path):
+        hessian_random_points_results = load_npz_result(
+            hessian_random_points_result_path
+        )
+        hessian_layer_list = [
+            int(L)
+            for L in np.asarray(
+                hessian_random_points_results["layers"],
+                dtype=NP_INT_DTYPE,
+            )
+        ]
+        hessian_rank_by_layer = _load_layer_arrays_from_npz(
+            hessian_random_points_results,
+            hessian_layer_list,
+            "rank",
+            dtype=NP_INT_DTYPE,
+        )
+        hessian_eigs_by_layer = _load_layer_arrays_from_npz(
+            hessian_random_points_results,
+            hessian_layer_list,
+            "eigs_desc",
+            dtype=NP_REAL_DTYPE,
+        )
+        hessian_trace_by_layer = _load_layer_arrays_from_npz(
+            hessian_random_points_results,
+            hessian_layer_list,
+            "trace",
+            dtype=NP_REAL_DTYPE,
+        )
+        hessian_abs_eigsum_by_layer = _load_layer_arrays_from_npz(
+            hessian_random_points_results,
+            hessian_layer_list,
+            "abs_eigsum",
+            dtype=NP_REAL_DTYPE,
+        )
+        hessian_rank_threshold = float(
+            np.asarray(
+                hessian_random_points_results["hessian_effective_rank_threshold"]
+            ).item()
+        )
+    else:
+        hessian_layer_list = []
+        hessian_rank_by_layer = {}
+        hessian_eigs_by_layer = {}
+        hessian_trace_by_layer = {}
+        hessian_abs_eigsum_by_layer = {}
+        hessian_rank_threshold = float(QFIM_EFFECTIVE_RANK_THRESHOLD)
+
     for L in qfim_layer_list:
         save_qfim_eigs_by_index(
             qfim_eigs_reduced_0123_by_layer[L],
@@ -1300,6 +1553,15 @@ def run_dpqc_overparam_visualize() -> None:
             ),
             outpath=os.path.join(hs_eigs_dir_red4, f"L{L}_reduced_0123.pdf"),
             ylabel="HS tangent Gram eigenvalue",
+        )
+
+    for L in hessian_layer_list:
+        save_signed_eigs_by_index(
+            hessian_eigs_by_layer[L],
+            title=rf"Energy Hessian eigenvalues at {NUM_QFIM_SAMPLES} random points (L={L})",
+            outpath=os.path.join(hessian_eigs_dir, f"L{L}.pdf"),
+            threshold=hessian_rank_threshold,
+            ylabel="Energy Hessian eigenvalue",
         )
 
 
@@ -1325,6 +1587,20 @@ def run_dpqc_overparam_visualize() -> None:
             ),
             cmap=cmap,
             ylabel="HS tangent Gram eigenvalue",
+        )
+
+    if hessian_layer_list:
+        save_signed_eigs_by_index_colored_by_layer(
+            hessian_eigs_by_layer,
+            hessian_layer_list,
+            title=rf"Energy Hessian eigenvalues at {NUM_QFIM_SAMPLES} random points",
+            outpath=os.path.join(
+                hessian_eigs_dir,
+                "hessian_eigs_by_index_layers_random_points.pdf",
+            ),
+            threshold=hessian_rank_threshold,
+            cmap=cmap,
+            ylabel="Energy Hessian eigenvalue",
         )
 
 
@@ -1516,6 +1792,111 @@ def run_dpqc_overparam_visualize() -> None:
         save_fig(fig, ax, outpath, outside_legend=False)
 
 
+    def plot_rank_mean_min_max_sem_by_layer(
+        rank_by_layer: dict,
+        layers,
+        *,
+        color_min,
+        color_max,
+        color_mean,
+        title,
+        outpath,
+        ylabel: str,
+        rank_label: str,
+        marker_min: str = "o",
+        marker_max: str = "^",
+        marker_mean: str = "s",
+        lw: float = 1.4,
+    ):
+        valid_items = []
+
+        for L in layers:
+            ranks_L = rank_by_layer.get(int(L))
+            if ranks_L is None:
+                continue
+
+            ranks_arr = np.asarray(ranks_L, dtype=NP_REAL_DTYPE).reshape(-1)
+            ranks_arr = ranks_arr[np.isfinite(ranks_arr)]
+
+            if ranks_arr.size == 0:
+                continue
+
+            valid_items.append((int(L), ranks_arr))
+
+        if not valid_items:
+            return
+
+        valid_layers = [L for L, _ in valid_items]
+        x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
+        min_ranks = np.asarray(
+            [np.min(ranks_arr) for _, ranks_arr in valid_items],
+            dtype=NP_REAL_DTYPE,
+        )
+        max_ranks = np.asarray(
+            [np.max(ranks_arr) for _, ranks_arr in valid_items],
+            dtype=NP_REAL_DTYPE,
+        )
+        mean_ranks = np.asarray(
+            [np.mean(ranks_arr) for _, ranks_arr in valid_items],
+            dtype=NP_REAL_DTYPE,
+        )
+        sem_ranks = np.asarray(
+            [
+                NP_REAL_DTYPE(0.0)
+                if ranks_arr.size <= 1
+                else NP_REAL_DTYPE(np.std(ranks_arr, ddof=1) / np.sqrt(ranks_arr.size))
+                for _, ranks_arr in valid_items
+            ],
+            dtype=NP_REAL_DTYPE,
+        )
+
+        fig, ax = new_fig_ax(outside_legend=False)
+        ax.plot(
+            x,
+            min_ranks,
+            marker=marker_min,
+            linestyle="-",
+            linewidth=lw,
+            markersize=6.0,
+            color=color_min,
+            label=rf"Minimum {rank_label}",
+        )
+        ax.plot(
+            x,
+            max_ranks,
+            marker=marker_max,
+            linestyle="-",
+            linewidth=lw,
+            markersize=6.0,
+            color=color_max,
+            label=rf"Maximum {rank_label}",
+        )
+        ax.errorbar(
+            x,
+            mean_ranks,
+            yerr=sem_ranks,
+            marker=marker_mean,
+            linestyle="-",
+            linewidth=lw,
+            markersize=5.0,
+            capsize=4.0,
+            elinewidth=1.0,
+            color=color_mean,
+            label=rf"Mean {rank_label} $\pm$ SEM",
+        )
+
+        ax.set_xlabel("Number of Layers")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(L) for L in valid_layers])
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.legend(loc="best", frameon=True, framealpha=0.9)
+
+        save_fig(fig, ax, outpath, outside_legend=False)
+
+
     plot_single_qfim_rank_mean_min_max_sem_by_layer(
         qfim_rank_reduced_0123_by_layer,
         qfim_rho_rank_reduced_0123_by_layer,
@@ -1554,6 +1935,29 @@ def run_dpqc_overparam_visualize() -> None:
             ),
             ylabel="HS tangent Gram rank",
             rank_label="HS effective rank",
+            marker_min="o",
+            marker_max="^",
+            marker_mean="s",
+            lw=1.4,
+        )
+
+    if hessian_layer_list:
+        plot_rank_mean_min_max_sem_by_layer(
+            hessian_rank_by_layer,
+            hessian_layer_list,
+            color_min="C6",
+            color_max="C8",
+            color_mean="C7",
+            title=(
+                rf"Energy Hessian rank mean/minimum/maximum at "
+                rf"{NUM_QFIM_SAMPLES} random points"
+            ),
+            outpath=os.path.join(
+                hessian_rank_random_dir,
+                "hessian_rank_mean_min_max_random_points.pdf",
+            ),
+            ylabel="Energy Hessian rank",
+            rank_label="Hessian rank",
             marker_min="o",
             marker_max="^",
             marker_mean="s",
@@ -2483,6 +2887,156 @@ def run_dpqc_overparam_visualize() -> None:
         hs_trace_history_layer_list = []
         hs_trace_history_optimization_path_by_layer = {}
 
+    hessian_rank_history_result_path = os.path.join(
+        qfim_results_dir,
+        "hessian_rank_history_optimization_path.npz",
+    )
+    hessian_eigs_history_result_path = os.path.join(
+        qfim_results_dir,
+        "hessian_eigs_history_optimization_path.npz",
+    )
+    hessian_trace_history_result_path = os.path.join(
+        qfim_results_dir,
+        "hessian_trace_history_optimization_path.npz",
+    )
+    hessian_abs_eigsum_history_result_path = os.path.join(
+        qfim_results_dir,
+        "hessian_abs_eigsum_history_optimization_path.npz",
+    )
+
+    if (
+        os.path.exists(hessian_rank_history_result_path)
+        and os.path.exists(hessian_eigs_history_result_path)
+    ):
+        hessian_rank_history_results = load_npz_result(
+            hessian_rank_history_result_path
+        )
+        hessian_path_layer_list = [
+            int(L)
+            for L in np.asarray(
+                hessian_rank_history_results["layers"],
+                dtype=NP_INT_DTYPE,
+            )
+        ]
+        hessian_sample_iters = np.asarray(
+            hessian_rank_history_results["sample_iters"],
+            dtype=NP_INT_DTYPE,
+        )
+        hessian_rank_history_by_layer = _load_layer_arrays_from_npz(
+            hessian_rank_history_results,
+            hessian_path_layer_list,
+            suffix=None,
+            dtype=NP_REAL_DTYPE,
+        )
+        hessian_path_rank_threshold = float(
+            np.asarray(
+                hessian_rank_history_results["hessian_effective_rank_threshold"]
+            ).item()
+        )
+
+        plot_qfim_rank_history_mean_by_layer(
+            hessian_rank_history_by_layer,
+            hessian_path_layer_list,
+            hessian_sample_iters,
+            title="Mean energy Hessian rank along optimization path",
+            outpath=os.path.join(
+                hessian_rank_optimization_path_mean_dir,
+                "hessian_rank_mean_history_optimization_path.pdf",
+            ),
+            ylabel="Mean energy Hessian rank",
+            cmap=cmap,
+        )
+
+        plot_qfim_rank_history_min_by_layer(
+            hessian_rank_history_by_layer,
+            hessian_path_layer_list,
+            hessian_sample_iters,
+            title="Minimum energy Hessian rank along optimization path",
+            outpath=os.path.join(
+                hessian_rank_optimization_path_min_dir,
+                "hessian_rank_min_history_optimization_path.pdf",
+            ),
+            ylabel="Minimum energy Hessian rank",
+            cmap=cmap,
+        )
+
+        hessian_eigs_history_results = load_npz_result(
+            hessian_eigs_history_result_path
+        )
+        hessian_eigs_history_optimization_path_by_layer = (
+            _load_layer_arrays_from_npz(
+                hessian_eigs_history_results,
+                hessian_path_layer_list,
+                suffix=None,
+                dtype=NP_REAL_DTYPE,
+            )
+        )
+
+        if os.path.exists(hessian_trace_history_result_path):
+            hessian_trace_history_results = load_npz_result(
+                hessian_trace_history_result_path
+            )
+            hessian_trace_history_layer_list = [
+                int(L)
+                for L in np.asarray(
+                    hessian_trace_history_results["layers"],
+                    dtype=NP_INT_DTYPE,
+                )
+            ]
+            hessian_trace_history_optimization_path_by_layer = (
+                _load_layer_arrays_from_npz(
+                    hessian_trace_history_results,
+                    hessian_trace_history_layer_list,
+                    suffix=None,
+                    dtype=NP_REAL_DTYPE,
+                )
+            )
+        else:
+            hessian_trace_history_layer_list = list(hessian_path_layer_list)
+            hessian_trace_history_optimization_path_by_layer = {
+                int(L): np.sum(np.asarray(eigs, dtype=NP_REAL_DTYPE), axis=2)
+                for L, eigs in hessian_eigs_history_optimization_path_by_layer.items()
+            }
+
+        if os.path.exists(hessian_abs_eigsum_history_result_path):
+            hessian_abs_eigsum_history_results = load_npz_result(
+                hessian_abs_eigsum_history_result_path
+            )
+            hessian_abs_eigsum_history_layer_list = [
+                int(L)
+                for L in np.asarray(
+                    hessian_abs_eigsum_history_results["layers"],
+                    dtype=NP_INT_DTYPE,
+                )
+            ]
+            hessian_abs_eigsum_history_optimization_path_by_layer = (
+                _load_layer_arrays_from_npz(
+                    hessian_abs_eigsum_history_results,
+                    hessian_abs_eigsum_history_layer_list,
+                    suffix=None,
+                    dtype=NP_REAL_DTYPE,
+                )
+            )
+        else:
+            hessian_abs_eigsum_history_layer_list = list(hessian_path_layer_list)
+            hessian_abs_eigsum_history_optimization_path_by_layer = {
+                int(L): np.sum(
+                    np.abs(np.asarray(eigs, dtype=NP_REAL_DTYPE)),
+                    axis=2,
+                )
+                for L, eigs in hessian_eigs_history_optimization_path_by_layer.items()
+            }
+    else:
+        hessian_path_layer_list = []
+        hessian_sample_iters = np.asarray([], dtype=NP_INT_DTYPE)
+        hessian_rank_history_by_layer = {}
+        hessian_eigs_history_optimization_path_by_layer = {}
+        hessian_path_rank_threshold = hessian_rank_threshold
+        hessian_trace_history_layer_list = []
+        hessian_trace_history_optimization_path_by_layer = {}
+        hessian_abs_eigsum_history_layer_list = []
+        hessian_abs_eigsum_history_optimization_path_by_layer = {}
+
 
     def qfim_path_eig_target_iterations(
         sample_iters_for_labels,
@@ -2595,6 +3149,92 @@ def run_dpqc_overparam_visualize() -> None:
         return saved_paths
 
 
+    def save_signed_eigs_optimization_path_by_iteration(
+        eigs_history_by_layer: dict,
+        layers,
+        sample_iters_for_labels,
+        *,
+        outdir: str,
+        target_iterations=None,
+        threshold: float = QFIM_EFFECTIVE_RANK_THRESHOLD,
+        eps: float = QFIM_EIG_PLOT_EPS,
+        quantity_name: str = "Energy Hessian",
+        ylabel: str = "Energy Hessian eigenvalue",
+    ):
+        os.makedirs(outdir, exist_ok=True)
+
+        sample_iters_arr = np.asarray(sample_iters_for_labels, dtype=NP_INT_DTYPE)
+        if target_iterations is None:
+            target_iterations = qfim_path_eig_target_iterations(sample_iters_arr)
+
+        target_iterations = np.asarray(target_iterations, dtype=NP_INT_DTYPE)
+        if target_iterations.size == 0:
+            return []
+
+        saved_paths = []
+
+        for L in tqdm(
+            layers,
+            desc=f"{quantity_name} eig distributions along optimization path",
+            unit="layer",
+        ):
+            L_int = int(L)
+            if eigs_history_by_layer.get(L_int) is None:
+                continue
+
+            eigs_L = np.asarray(
+                eigs_history_by_layer[L_int],
+                dtype=NP_REAL_DTYPE,
+            )
+
+            if eigs_L.ndim != 3:
+                raise ValueError(
+                    "Each Hessian eigenvalue history array must be 3D: "
+                    "(num_runs, num_sample_iters, num_params)."
+                )
+
+            if (
+                eigs_L.shape[1] != sample_iters_arr.size
+                and eigs_L.shape[0] == sample_iters_arr.size
+            ):
+                eigs_L = np.transpose(eigs_L, (1, 0, 2))
+
+            if eigs_L.shape[1] != sample_iters_arr.size:
+                raise ValueError(
+                    f"Shape mismatch for L={L_int}: "
+                    f"eigs_L.shape={eigs_L.shape}, len(sample_iters)={sample_iters_arr.size}."
+                )
+
+            layer_outdir = os.path.join(outdir, f"L{L_int}")
+            os.makedirs(layer_outdir, exist_ok=True)
+
+            for iteration in target_iterations:
+                iteration_int = int(iteration)
+                time_idx = _sample_time_index_for_iteration(
+                    sample_iters_arr,
+                    iteration_int,
+                )
+                outpath = os.path.join(
+                    layer_outdir,
+                    f"iter{iteration_int:06d}.pdf",
+                )
+
+                save_signed_eigs_by_index(
+                    eigs_L[:, time_idx, :],
+                    title=(
+                        rf"{quantity_name} eigenvalues along optimization path "
+                        rf"(L={L_int}, iteration={iteration_int})"
+                    ),
+                    outpath=outpath,
+                    threshold=threshold,
+                    eps=eps,
+                    ylabel=ylabel,
+                )
+                saved_paths.append(outpath)
+
+        return saved_paths
+
+
     qfim_eigs_optimization_path_target_iterations = qfim_path_eig_target_iterations(
         sample_iters,
         every=sample_every,
@@ -2637,6 +3277,29 @@ def run_dpqc_overparam_visualize() -> None:
         )
     else:
         hs_eigs_optimization_path_files = []
+
+    if hessian_path_layer_list:
+        hessian_eigs_optimization_path_target_iterations = (
+            qfim_path_eig_target_iterations(
+                hessian_sample_iters,
+                every=sample_every,
+            )
+        )
+        hessian_eigs_optimization_path_files = (
+            save_signed_eigs_optimization_path_by_iteration(
+                hessian_eigs_history_optimization_path_by_layer,
+                hessian_path_layer_list,
+                hessian_sample_iters,
+                outdir=os.path.join(hessian_eigs_dir, "optimization_path"),
+                target_iterations=hessian_eigs_optimization_path_target_iterations,
+                threshold=hessian_path_rank_threshold,
+                eps=QFIM_EIG_PLOT_EPS,
+                quantity_name="Energy Hessian",
+                ylabel="Energy Hessian eigenvalue",
+            )
+        )
+    else:
+        hessian_eigs_optimization_path_files = []
 
 
     def _sample_mean_sem(samples: np.ndarray) -> Tuple[NP_REAL_DTYPE, NP_REAL_DTYPE]:
@@ -3192,6 +3855,59 @@ def run_dpqc_overparam_visualize() -> None:
             ),
             label=r"$\sum_{i,j} |G_{ij}|$",
             color="C4",
+            marker="s",
+            log_scale=False,
+        )
+
+    if hessian_path_layer_list:
+        plot_metric_mean_sem_by_layer(
+            hessian_trace_history_optimization_path_by_layer,
+            hessian_trace_history_layer_list,
+            ylabel="Mean energy Hessian trace",
+            title="Energy Hessian trace mean $\\pm$ SEM vs Layers along optimization path",
+            outpath=os.path.join(
+                qfim_fig_dir,
+                "hessian_trace_mean_errorbar_optimization_path.pdf",
+            ),
+            label=r"$\sum_k \eta_k(\nabla^2 E)$",
+            color="C6",
+            marker="o",
+            log_scale=False,
+        )
+
+        plot_metric_mean_sem_by_layer(
+            hessian_abs_eigsum_history_optimization_path_by_layer,
+            hessian_abs_eigsum_history_layer_list,
+            ylabel="Mean Hessian absolute eigenvalue sum",
+            title=(
+                "Energy Hessian absolute-eigenvalue-sum mean $\\pm$ SEM "
+                "vs Layers along optimization path"
+            ),
+            outpath=os.path.join(
+                qfim_fig_dir,
+                "hessian_abs_eigsum_mean_errorbar_optimization_path.pdf",
+            ),
+            label=r"$\sum_k |\eta_k(\nabla^2 E)|$",
+            color="C7",
+            marker="s",
+            log_scale=False,
+        )
+
+    if hessian_layer_list:
+        plot_metric_mean_sem_by_layer(
+            hessian_abs_eigsum_by_layer,
+            hessian_layer_list,
+            ylabel="Mean Hessian absolute eigenvalue sum",
+            title=(
+                rf"Energy Hessian absolute-eigenvalue-sum mean $\pm$ SEM "
+                rf"vs Layers at {NUM_QFIM_SAMPLES} random points"
+            ),
+            outpath=os.path.join(
+                qfim_fig_dir,
+                "hessian_abs_eigsum_mean_errorbar_random_points.pdf",
+            ),
+            label=r"$\sum_k |\eta_k(\nabla^2 E)|$",
+            color="C8",
             marker="s",
             log_scale=False,
         )

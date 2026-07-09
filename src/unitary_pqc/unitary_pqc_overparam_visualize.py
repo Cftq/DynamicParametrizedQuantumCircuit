@@ -227,6 +227,41 @@ def _load_random_qfim_results() -> None:
             dtype=NP_REAL_DTYPE,
         )
 
+    hessian_path = os.path.join(
+        upqc.qfim_results_dir,
+        "hessian_random_points.npz",
+    )
+    upqc.hessian_rank_by_layer = {}
+    upqc.hessian_eigs_by_layer = {}
+    upqc.hessian_thresh_by_layer = {}
+    upqc.hessian_trace_by_layer = {}
+    upqc.hessian_abs_eigsum_by_layer = {}
+
+    if os.path.exists(hessian_path):
+        hessian_result = load_npz_result(hessian_path)
+
+        for L in layers:
+            upqc.hessian_rank_by_layer[L] = np.asarray(
+                hessian_result[f"L{L}_rank"],
+                dtype=NP_INT_DTYPE,
+            )
+            upqc.hessian_eigs_by_layer[L] = np.asarray(
+                hessian_result[f"L{L}_eigs_desc"],
+                dtype=NP_REAL_DTYPE,
+            )
+            upqc.hessian_thresh_by_layer[L] = np.asarray(
+                hessian_result[f"L{L}_rank_threshold"],
+                dtype=NP_REAL_DTYPE,
+            )
+            upqc.hessian_trace_by_layer[L] = np.asarray(
+                hessian_result[f"L{L}_trace"],
+                dtype=NP_REAL_DTYPE,
+            )
+            upqc.hessian_abs_eigsum_by_layer[L] = np.asarray(
+                hessian_result[f"L{L}_abs_eigsum"],
+                dtype=NP_REAL_DTYPE,
+            )
+
 
 def _plot_random_qfim_results() -> None:
     qfim_eigs_dir = os.path.join(upqc.save_dir, "qfim_eigs")
@@ -237,10 +272,12 @@ def _plot_random_qfim_results() -> None:
     )
     hs_eigs_dir = os.path.join(upqc.save_dir, "hs_eigs")
     hs_eigs_reduced_0123_dir = os.path.join(hs_eigs_dir, "reduced_keep_0123")
+    hessian_eigs_dir = os.path.join(upqc.save_dir, "hessian_eigs")
 
     os.makedirs(qfim_eigs_pure_dir, exist_ok=True)
     os.makedirs(qfim_eigs_reduced_0123_dir, exist_ok=True)
     os.makedirs(hs_eigs_reduced_0123_dir, exist_ok=True)
+    os.makedirs(hessian_eigs_dir, exist_ok=True)
 
     for L in upqc.layer_list:
         upqc._save_qfim_eigs_violinplot_by_index(
@@ -256,6 +293,14 @@ def _plot_random_qfim_results() -> None:
             rank_thresholds=upqc.hs_thresh_reduced_by_layer[L],
             ylabel="HS tangent Gram eigenvalue",
         )
+        if upqc.hessian_eigs_by_layer.get(L) is not None:
+            upqc._save_signed_eigs_scatterplot_by_index(
+                upqc.hessian_eigs_by_layer[L],
+                title=rf"Energy Hessian eigenvalues at {upqc.NUM_QFIM_SAMPLES} random points (L={L})",
+                outpath=os.path.join(hessian_eigs_dir, f"L{L}.pdf"),
+                rank_thresholds=upqc.hessian_thresh_by_layer[L],
+                ylabel="Energy Hessian eigenvalue",
+            )
         if upqc.qfim_eigs_pure_by_layer[L] is not None:
             upqc._save_qfim_eigs_violinplot_by_index(
                 upqc.qfim_eigs_pure_by_layer[L],
@@ -426,6 +471,62 @@ def _plot_random_qfim_results() -> None:
         lw=1.0,
     )
 
+    if upqc.hessian_rank_by_layer:
+        upqc.new_prx_figure(width="double")
+        ax = plt.gca()
+
+        for idx, L in enumerate(upqc.layer_list):
+            if upqc.hessian_rank_by_layer.get(L) is None:
+                continue
+            color = upqc.cmap(idx / num_layers)
+            hessian_dataset = upqc._make_violin_ready(
+                upqc.hessian_rank_by_layer[L],
+                ensure_positive=False,
+                tiny=1e-12,
+            )
+            vp_hessian = plt.violinplot(
+                [hessian_dataset],
+                positions=[float(L)],
+                widths=violin_w_rank,
+                showmeans=False,
+                showmedians=True,
+                showextrema=True,
+            )
+            upqc._style_violin(
+                vp_hessian,
+                facecolor=color,
+                edgecolor=color,
+                alpha=0.18,
+                linewidth=1.0,
+                linecolor=color,
+                linealpha=0.7,
+            )
+
+        ax.set_xticks(x_all)
+        ax.set_xticklabels(x_labels)
+        ax.set_xlabel("Number of Layers")
+        ax.set_ylabel(r"Hessian rank $(|\eta_k| > 10^{-12})$")
+        upqc.set_prx_title(
+            rf"Energy Hessian rank at {upqc.NUM_QFIM_SAMPLES} random points",
+            ax=ax,
+        )
+        ax.grid(True, axis="y", alpha=0.3)
+        upqc.save_current_figure(
+            os.path.join(upqc.save_dir, "hessian_rank_violinplot_random_points.pdf"),
+            outside_legend=False,
+        )
+
+        upqc.plot_qfim_rank_max_by_layer(
+            upqc.hessian_rank_by_layer,
+            upqc.layer_list,
+            color="C6",
+            title=rf"Maximum energy Hessian rank at {upqc.NUM_QFIM_SAMPLES} random points",
+            ylabel=r"Maximum Hessian rank $(|\eta_k| > 10^{-12})$",
+            outpath=os.path.join(upqc.save_dir, "hessian_rank_max_random_points.pdf"),
+            marker="P",
+            lw=1.0,
+        )
+
 
 def _load_optimization_path_results() -> None:
     qfim_rank_path = os.path.join(
@@ -450,6 +551,32 @@ def _load_optimization_path_results() -> None:
         L: np.asarray(hs_result[f"L{L}_rank"], dtype=NP_REAL_DTYPE)
         for L in layers
     }
+
+    hessian_rank_path = os.path.join(
+        upqc.qfim_results_dir,
+        "hessian_rank_history_optimization_path.npz",
+    )
+    upqc.hessian_rank_history_by_layer = {}
+    upqc.hessian_eigs_history_by_layer = {}
+    upqc.hessian_thresh_history_by_layer = {}
+
+    if os.path.exists(hessian_rank_path):
+        hessian_result = load_npz_result(hessian_rank_path)
+        upqc.hessian_rank_history_by_layer = {
+            L: np.asarray(hessian_result[f"L{L}_rank"], dtype=NP_REAL_DTYPE)
+            for L in layers
+        }
+        upqc.hessian_eigs_history_by_layer = {
+            L: np.asarray(hessian_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
+            for L in layers
+        }
+        upqc.hessian_thresh_history_by_layer = {
+            L: np.asarray(
+                hessian_result[f"L{L}_rank_threshold"],
+                dtype=NP_REAL_DTYPE,
+            )
+            for L in layers
+        }
 
 
 def _plot_optimization_path_results() -> None:
@@ -499,6 +626,97 @@ def _plot_optimization_path_results() -> None:
         ylabel=r"Minimum HS effective rank $(\lambda_k > 10^{-12})$",
         cmap=upqc.cmap,
     )
+
+    if upqc.hessian_rank_history_by_layer:
+        upqc.plot_qfim_rank_history_mean_by_layer(
+            upqc.hessian_rank_history_by_layer,
+            upqc.layer_list,
+            upqc.sample_iters,
+            title="Mean energy Hessian rank along optimization path",
+            outpath=os.path.join(
+                upqc.save_dir,
+                "hessian_rank_mean_history_optimization_path.pdf",
+            ),
+            ylabel=r"Mean Hessian rank $(|\eta_k| > 10^{-12})$",
+            cmap=upqc.cmap,
+        )
+        upqc.plot_qfim_rank_history_min_by_layer(
+            upqc.hessian_rank_history_by_layer,
+            upqc.layer_list,
+            upqc.sample_iters,
+            title="Minimum energy Hessian rank along optimization path",
+            outpath=os.path.join(
+                upqc.save_dir,
+                "hessian_rank_min_history_optimization_path.pdf",
+            ),
+            ylabel=r"Minimum Hessian rank $(|\eta_k| > 10^{-12})$",
+            cmap=upqc.cmap,
+        )
+
+        hessian_path_dir = os.path.join(
+            upqc.save_dir,
+            "hessian_eigs",
+            "optimization_path",
+        )
+        os.makedirs(hessian_path_dir, exist_ok=True)
+
+        target_iterations = np.asarray(upqc.sample_iters, dtype=NP_INT_DTYPE)
+
+        for L in upqc.layer_list:
+            eigs_L = upqc.hessian_eigs_history_by_layer.get(L)
+            if eigs_L is None:
+                continue
+
+            eigs_L = np.asarray(eigs_L, dtype=NP_REAL_DTYPE)
+            if eigs_L.ndim != 3:
+                continue
+
+            if (
+                eigs_L.shape[1] != target_iterations.size
+                and eigs_L.shape[0] == target_iterations.size
+            ):
+                eigs_L = np.transpose(eigs_L, (1, 0, 2))
+
+            if eigs_L.shape[1] != target_iterations.size:
+                continue
+
+            layer_dir = os.path.join(hessian_path_dir, f"L{L}")
+            os.makedirs(layer_dir, exist_ok=True)
+            thresholds_L = upqc.hessian_thresh_history_by_layer.get(L)
+            thresholds_L_arr = None
+            if thresholds_L is not None:
+                thresholds_L_arr = np.asarray(thresholds_L, dtype=NP_REAL_DTYPE)
+                if (
+                    thresholds_L_arr.ndim == 2
+                    and thresholds_L_arr.shape[1] != target_iterations.size
+                    and thresholds_L_arr.shape[0] == target_iterations.size
+                ):
+                    thresholds_L_arr = thresholds_L_arr.T
+                if (
+                    thresholds_L_arr.ndim != 2
+                    or thresholds_L_arr.shape[1] != target_iterations.size
+                ):
+                    thresholds_L_arr = None
+
+            for time_idx, iteration in enumerate(target_iterations):
+                iteration_int = int(iteration)
+                upqc._save_signed_eigs_scatterplot_by_index(
+                    eigs_L[:, time_idx, :],
+                    title=(
+                        rf"Energy Hessian eigenvalues along optimization path "
+                        rf"(L={L}, iteration={iteration_int})"
+                    ),
+                    outpath=os.path.join(
+                        layer_dir,
+                        f"iter{iteration_int:06d}.pdf",
+                    ),
+                    rank_thresholds=(
+                        None
+                        if thresholds_L_arr is None
+                        else thresholds_L_arr[:, time_idx]
+                    ),
+                    ylabel="Energy Hessian eigenvalue",
+                )
 
 
 def _plot_qfim_grad_alignment_results() -> None:

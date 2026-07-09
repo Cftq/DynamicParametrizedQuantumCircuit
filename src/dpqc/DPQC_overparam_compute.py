@@ -44,7 +44,9 @@ from plot import (
 )
 from qfim import (
     effective_rank_from_eigvals,
+    effective_abs_rank_from_eigvals,
     hermitian as _hermitian,
+    hermitian_eigvals_desc,
     make_hilbert_schmidt_metric_fn,
     make_mixed_state_qfim_fn,
     psd_eigvals_desc,
@@ -447,6 +449,15 @@ def energy_from_rho_keep(rho_keep: jnp.ndarray) -> jnp.ndarray:
     return jnp.real(jnp.einsum("ij,ji->", rho_keep, H_matrix))
 
 
+def make_energy_fn_for_layer(num_layers: int):
+    def energy_fn(theta: jnp.ndarray) -> jnp.ndarray:
+        return energy_from_rho_keep(
+            rho_keep_sequential_dpqc(theta, num_layers=num_layers)
+        )
+
+    return energy_fn
+
+
 def partial_trace_one_qubit(
     rho: jnp.ndarray,
     num_qubits: int,
@@ -575,11 +586,7 @@ cmap = matplotlib.colormaps.get_cmap("viridis")
 for current_layer in tqdm(vqe_layer_list, desc="Layers (VQE)", unit="layer"):
     num_total_params = num_params_per_layer * current_layer
 
-    def energy_fn(theta: jnp.ndarray) -> jnp.ndarray:
-        return energy_from_rho_keep(
-            rho_keep_sequential_dpqc(theta, num_layers=current_layer)
-        )
-
+    energy_fn = make_energy_fn_for_layer(current_layer)
     energy_and_grad = jax.jit(jax.value_and_grad(energy_fn))
 
     @jax.jit
@@ -876,6 +883,17 @@ def make_reduced0123_rho_rank_fn_for_layer_sequential(num_layers: int):
     return rho_rank_reduced0123
 
 
+def make_energy_hessian_eigvals_fn_for_layer(num_layers: int):
+    energy_fn = make_energy_fn_for_layer(num_layers)
+    hessian_fn = jax.jit(jax.hessian(energy_fn))
+
+    @jax.jit
+    def hessian_eigvals(theta: jnp.ndarray):
+        return hermitian_eigvals_desc(hessian_fn(theta))
+
+    return hessian_eigvals
+
+
 qfim_rank_reduced_0123_by_layer = {}
 qfim_eigs_reduced_0123_by_layer = {}
 qfim_rho_rank_reduced_0123_by_layer = {}
@@ -887,6 +905,10 @@ hs_eigs_reduced_0123_by_layer = {}
 hs_rho_rank_reduced_0123_by_layer = {}
 hs_eigsum_reduced_0123_by_layer = {}
 hs_abs_entry_sum_reduced_0123_by_layer = {}
+hessian_rank_by_layer = {}
+hessian_eigs_by_layer = {}
+hessian_trace_by_layer = {}
+hessian_abs_eigsum_by_layer = {}
 
 qfim_eigs_dir = os.path.join(qfim_fig_dir, "qfim_eigs")
 qfim_eigs_dir_red4 = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
@@ -1021,6 +1043,45 @@ for L in tqdm(
         dtype=NP_REAL_DTYPE,
     )
 
+    hessian_eigvals_fn = make_energy_hessian_eigvals_fn_for_layer(num_layers=L)
+
+    hessian_rank_list = []
+    hessian_eigs_list = []
+    hessian_trace_list = []
+    hessian_abs_eigsum_list = []
+
+    for s in tqdm(
+        range(NUM_QFIM_SAMPLES),
+        desc=f"Energy Hessian samples (rank+eigs) (L={L})",
+        unit="sample",
+        leave=False,
+    ):
+        th = thetas_L[s]
+
+        hessian_eigs_desc = hessian_eigvals_fn(th)
+        hessian_rank = effective_abs_rank_from_eigvals(hessian_eigs_desc)
+
+        hessian_eigs_np = jax_to_np(hessian_eigs_desc, dtype=NP_REAL_DTYPE)
+
+        hessian_rank_list.append(int(jax.device_get(hessian_rank)))
+        hessian_eigs_list.append(hessian_eigs_np)
+        hessian_trace_list.append(NP_REAL_DTYPE(np.sum(hessian_eigs_np)))
+        hessian_abs_eigsum_list.append(NP_REAL_DTYPE(np.sum(np.abs(hessian_eigs_np))))
+
+    hessian_rank_by_layer[L] = np.asarray(
+        hessian_rank_list,
+        dtype=NP_INT_DTYPE,
+    )
+    hessian_eigs_by_layer[L] = np.stack(hessian_eigs_list, axis=0)
+    hessian_trace_by_layer[L] = np.asarray(
+        hessian_trace_list,
+        dtype=NP_REAL_DTYPE,
+    )
+    hessian_abs_eigsum_by_layer[L] = np.asarray(
+        hessian_abs_eigsum_list,
+        dtype=NP_REAL_DTYPE,
+    )
+
 
 
 qfim_random_points_result_path = os.path.join(
@@ -1065,6 +1126,28 @@ save_npz_result(
     **_layer_arrays_for_npz(hs_rho_rank_reduced_0123_by_layer, "rho_rank"),
     **_layer_arrays_for_npz(hs_eigsum_reduced_0123_by_layer, "trace"),
     **_layer_arrays_for_npz(hs_abs_entry_sum_reduced_0123_by_layer, "abs_entry_sum"),
+)
+
+hessian_random_points_result_path = os.path.join(
+    qfim_results_dir,
+    "hessian_random_points.npz",
+)
+
+save_npz_result(
+    hessian_random_points_result_path,
+    h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+    num_hessian_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
+    hessian_sample_seed_base=np.asarray(QFIM_SAMPLE_SEED_BASE, dtype=NP_INT_DTYPE),
+    hessian_effective_rank_threshold=np.asarray(
+        QFIM_EFFECTIVE_RANK_THRESHOLD,
+        dtype=NP_REAL_DTYPE,
+    ),
+    hessian_eig_plot_eps=np.asarray(QFIM_EIG_PLOT_EPS, dtype=NP_REAL_DTYPE),
+    layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
+    **_layer_arrays_for_npz(hessian_rank_by_layer, "rank"),
+    **_layer_arrays_for_npz(hessian_eigs_by_layer, "eigs_desc"),
+    **_layer_arrays_for_npz(hessian_trace_by_layer, "trace"),
+    **_layer_arrays_for_npz(hessian_abs_eigsum_by_layer, "abs_eigsum"),
 )
 
 
@@ -1461,6 +1544,76 @@ def compute_hs_rank_history_by_layer(
     return rank_history_by_layer
 
 
+def compute_hessian_rank_history_by_layer(
+    theta_samples_by_layer: dict,
+    layers,
+    *,
+    return_eigs: bool = False,
+):
+    rank_history_by_layer = {}
+    eigs_history_by_layer = {}
+
+    for L in tqdm(
+        layers,
+        desc="Energy Hessian rank history along optimization path",
+        unit="layer",
+    ):
+        if theta_samples_by_layer.get(L) is None:
+            continue
+
+        theta_samples = np.asarray(
+            theta_samples_by_layer[L],
+            dtype=NP_REAL_DTYPE,
+        )
+
+        if theta_samples.ndim != 3:
+            raise ValueError(
+                "theta_samples must have shape "
+                "(num_runs, num_sample_iters, num_params)."
+            )
+
+        num_runs, num_times, num_params = theta_samples.shape
+        eigvals_fn = make_energy_hessian_eigvals_fn_for_layer(num_layers=int(L))
+
+        ranks_L = np.full((num_runs, num_times), np.nan, dtype=NP_REAL_DTYPE)
+        eigs_L = None
+        if return_eigs:
+            eigs_L = np.full(
+                (num_runs, num_times, num_params),
+                np.nan,
+                dtype=NP_REAL_DTYPE,
+            )
+
+        for run_idx in tqdm(
+            range(num_runs),
+            desc=f"Energy Hessian-rank runs (L={L})",
+            unit="run",
+            leave=False,
+        ):
+            for time_idx in range(num_times):
+                eigs_desc = eigvals_fn(
+                    jnp.asarray(theta_samples[run_idx, time_idx], dtype=REAL_DTYPE)
+                )
+                rank_value = effective_abs_rank_from_eigvals(eigs_desc)
+                ranks_L[run_idx, time_idx] = NP_REAL_DTYPE(
+                    jax.device_get(rank_value)
+                )
+                if return_eigs:
+                    eigs_L[run_idx, time_idx, :] = jax_to_np(
+                        eigs_desc,
+                        dtype=NP_REAL_DTYPE,
+                    )
+
+        rank_history_by_layer[int(L)] = ranks_L
+        if return_eigs:
+            eigs_history_by_layer[int(L)] = eigs_L
+
+    if return_eigs:
+        return rank_history_by_layer, eigs_history_by_layer
+
+    return rank_history_by_layer
+
+
 qfim_rank_history_by_layer, qfim_eigs_history_optimization_path_by_layer = (
     compute_qfim_rank_history_by_layer(
         theta_sample_traces_by_layer,
@@ -1587,6 +1740,91 @@ save_npz_result(
     **{
         f"L{int(L)}": arr
         for L, arr in hs_trace_history_optimization_path_by_layer.items()
+    },
+)
+
+hessian_rank_history_by_layer, hessian_eigs_history_optimization_path_by_layer = (
+    compute_hessian_rank_history_by_layer(
+        theta_sample_traces_by_layer,
+        vqe_layer_list,
+        return_eigs=True,
+    )
+)
+
+hessian_rank_history_result_path = os.path.join(
+    qfim_results_dir,
+    "hessian_rank_history_optimization_path.npz",
+)
+
+save_npz_result(
+    hessian_rank_history_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    hessian_effective_rank_threshold=np.asarray(
+        QFIM_EFFECTIVE_RANK_THRESHOLD,
+        dtype=NP_REAL_DTYPE,
+    ),
+    **{
+        f"L{int(L)}": arr
+        for L, arr in hessian_rank_history_by_layer.items()
+    },
+)
+
+hessian_eigs_history_result_path = os.path.join(
+    qfim_results_dir,
+    "hessian_eigs_history_optimization_path.npz",
+)
+
+save_npz_result(
+    hessian_eigs_history_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    hessian_effective_rank_threshold=np.asarray(
+        QFIM_EFFECTIVE_RANK_THRESHOLD,
+        dtype=NP_REAL_DTYPE,
+    ),
+    **{
+        f"L{int(L)}": arr
+        for L, arr in hessian_eigs_history_optimization_path_by_layer.items()
+    },
+)
+
+hessian_trace_history_optimization_path_by_layer = {
+    int(L): np.sum(np.asarray(arr, dtype=NP_REAL_DTYPE), axis=2)
+    for L, arr in hessian_eigs_history_optimization_path_by_layer.items()
+}
+hessian_abs_eigsum_history_optimization_path_by_layer = {
+    int(L): np.sum(np.abs(np.asarray(arr, dtype=NP_REAL_DTYPE)), axis=2)
+    for L, arr in hessian_eigs_history_optimization_path_by_layer.items()
+}
+
+hessian_trace_history_result_path = os.path.join(
+    qfim_results_dir,
+    "hessian_trace_history_optimization_path.npz",
+)
+
+save_npz_result(
+    hessian_trace_history_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    **{
+        f"L{int(L)}": arr
+        for L, arr in hessian_trace_history_optimization_path_by_layer.items()
+    },
+)
+
+hessian_abs_eigsum_history_result_path = os.path.join(
+    qfim_results_dir,
+    "hessian_abs_eigsum_history_optimization_path.npz",
+)
+
+save_npz_result(
+    hessian_abs_eigsum_history_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    **{
+        f"L{int(L)}": arr
+        for L, arr in hessian_abs_eigsum_history_optimization_path_by_layer.items()
     },
 )
 
