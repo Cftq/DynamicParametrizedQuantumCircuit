@@ -36,6 +36,8 @@ from plot import (
     new_fig_ax,
     plot_qfim_grad_alignment_layer_overlay,
     plot_qfim_grad_alignment_table,
+    save_eigenvalue_histogram_across_trials,
+    save_eigenvalue_histograms_by_trial,
     save_fig,
 )
 from tqdm.auto import tqdm
@@ -570,11 +572,15 @@ def run_dpqc_overparam_visualize() -> None:
 
     save_dir = f"./figs/dpqc/h_{h_param}"
 
-    energy_fig_dir = os.path.join(save_dir, "energy_figures")
-    qfim_fig_dir = os.path.join(save_dir, "qfim_figures")
-    qfim_eigs_dir = os.path.join(qfim_fig_dir, "qfim_eigs")
+    figures_dir = os.path.join(save_dir, "figures")
+    energy_fig_dir = os.path.join(figures_dir, "energy")
+    qfim_fig_dir = os.path.join(figures_dir, "qfim")
+    hs_fig_dir = os.path.join(figures_dir, "hs")
+    ortk_fig_dir = os.path.join(figures_dir, "ortk")
+    hessian_fig_dir = os.path.join(figures_dir, "hessian")
+    qfim_eigs_dir = os.path.join(qfim_fig_dir, "eigs")
     qfim_eigs_dir_red4 = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
-    qfim_rank_dir = os.path.join(qfim_fig_dir, "qfim_rank")
+    qfim_rank_dir = os.path.join(qfim_fig_dir, "rank")
     qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
     qfim_rank_optimization_path_dir = os.path.join(qfim_rank_dir, "optimization_path")
     qfim_rank_optimization_path_mean_dir = os.path.join(
@@ -585,7 +591,7 @@ def run_dpqc_overparam_visualize() -> None:
         qfim_rank_optimization_path_dir,
         "min",
     )
-    qfim_eigcount_dir = os.path.join(qfim_fig_dir, "qfim_eigcount")
+    qfim_eigcount_dir = os.path.join(qfim_fig_dir, "eigcount")
     qfim_eigcount_random_dir = os.path.join(qfim_eigcount_dir, "random_points")
     qfim_eigcount_optimization_path_dir = os.path.join(
         qfim_eigcount_dir,
@@ -599,9 +605,9 @@ def run_dpqc_overparam_visualize() -> None:
         qfim_eigcount_optimization_path_dir,
         "min",
     )
-    hs_eigs_dir = os.path.join(qfim_fig_dir, "hs_eigs")
+    hs_eigs_dir = os.path.join(hs_fig_dir, "eigs")
     hs_eigs_dir_red4 = os.path.join(hs_eigs_dir, "reduced_keep_0123")
-    hs_rank_dir = os.path.join(qfim_fig_dir, "hs_rank")
+    hs_rank_dir = os.path.join(hs_fig_dir, "rank")
     hs_rank_random_dir = os.path.join(hs_rank_dir, "random_points")
     hs_rank_optimization_path_dir = os.path.join(hs_rank_dir, "optimization_path")
     hs_rank_optimization_path_mean_dir = os.path.join(
@@ -612,7 +618,7 @@ def run_dpqc_overparam_visualize() -> None:
         hs_rank_optimization_path_dir,
         "min",
     )
-    hs_eigcount_dir = os.path.join(qfim_fig_dir, "hs_eigcount")
+    hs_eigcount_dir = os.path.join(hs_fig_dir, "eigcount")
     hs_eigcount_random_dir = os.path.join(hs_eigcount_dir, "random_points")
     hs_eigcount_optimization_path_dir = os.path.join(
         hs_eigcount_dir,
@@ -626,8 +632,40 @@ def run_dpqc_overparam_visualize() -> None:
         hs_eigcount_optimization_path_dir,
         "min",
     )
-    hessian_eigs_dir = os.path.join(qfim_fig_dir, "hessian_eigs")
-    hessian_rank_dir = os.path.join(qfim_fig_dir, "hessian_rank")
+    ortk_eigs_dir = os.path.join(ortk_fig_dir, "eigs")
+    ortk_rank_dir = os.path.join(ortk_fig_dir, "rank")
+    ortk_rank_random_dir = os.path.join(ortk_rank_dir, "random_points")
+    ortk_rank_optimization_path_dir = os.path.join(
+        ortk_rank_dir,
+        "optimization_path",
+    )
+    ortk_rank_optimization_path_mean_dir = os.path.join(
+        ortk_rank_optimization_path_dir,
+        "mean",
+    )
+    ortk_rank_optimization_path_min_dir = os.path.join(
+        ortk_rank_optimization_path_dir,
+        "min",
+    )
+    ortk_effective_rank_dir = os.path.join(ortk_fig_dir, "effective_rank")
+    ortk_effective_rank_random_dir = os.path.join(
+        ortk_effective_rank_dir,
+        "random_points",
+    )
+    ortk_effective_rank_optimization_path_dir = os.path.join(
+        ortk_effective_rank_dir,
+        "optimization_path",
+    )
+    ortk_effective_rank_optimization_path_mean_dir = os.path.join(
+        ortk_effective_rank_optimization_path_dir,
+        "mean",
+    )
+    ortk_effective_rank_optimization_path_min_dir = os.path.join(
+        ortk_effective_rank_optimization_path_dir,
+        "min",
+    )
+    hessian_eigs_dir = os.path.join(hessian_fig_dir, "eigs")
+    hessian_rank_dir = os.path.join(hessian_fig_dir, "rank")
     hessian_rank_random_dir = os.path.join(hessian_rank_dir, "random_points")
     hessian_rank_optimization_path_dir = os.path.join(
         hessian_rank_dir,
@@ -641,14 +679,62 @@ def run_dpqc_overparam_visualize() -> None:
         hessian_rank_optimization_path_dir,
         "min",
     )
+    qfim_trace_dir = os.path.join(qfim_fig_dir, "trace")
+    qfim_trace_random_dir = os.path.join(qfim_trace_dir, "random_points")
+    qfim_trace_optimization_path_dir = os.path.join(
+        qfim_trace_dir,
+        "optimization_path",
+    )
+    qfim_abs_entry_sum_dir = os.path.join(qfim_fig_dir, "abs_entry_sum")
+    qfim_abs_entry_sum_random_dir = os.path.join(
+        qfim_abs_entry_sum_dir,
+        "random_points",
+    )
+    hs_trace_dir = os.path.join(hs_fig_dir, "trace")
+    hs_trace_random_dir = os.path.join(hs_trace_dir, "random_points")
+    hs_trace_optimization_path_dir = os.path.join(
+        hs_trace_dir,
+        "optimization_path",
+    )
+    hs_abs_entry_sum_dir = os.path.join(hs_fig_dir, "abs_entry_sum")
+    hs_abs_entry_sum_random_dir = os.path.join(
+        hs_abs_entry_sum_dir,
+        "random_points",
+    )
+    ortk_trace_dir = os.path.join(ortk_fig_dir, "trace")
+    ortk_trace_optimization_path_dir = os.path.join(
+        ortk_trace_dir,
+        "optimization_path",
+    )
+    hessian_trace_dir = os.path.join(hessian_fig_dir, "trace")
+    hessian_trace_optimization_path_dir = os.path.join(
+        hessian_trace_dir,
+        "optimization_path",
+    )
+    hessian_abs_eigsum_dir = os.path.join(hessian_fig_dir, "abs_eigsum")
+    hessian_abs_eigsum_random_dir = os.path.join(
+        hessian_abs_eigsum_dir,
+        "random_points",
+    )
+    hessian_abs_eigsum_optimization_path_dir = os.path.join(
+        hessian_abs_eigsum_dir,
+        "optimization_path",
+    )
     circuit_dir = os.path.join(save_dir, "optimized_circuits")
     numerical_results_dir = os.path.join(save_dir, "numerical_results")
     energy_results_dir = os.path.join(numerical_results_dir, "energy")
     qfim_results_dir = os.path.join(numerical_results_dir, "qfim")
+    hs_results_dir = os.path.join(numerical_results_dir, "hs")
+    ortk_results_dir = os.path.join(numerical_results_dir, "ortk")
+    hessian_results_dir = os.path.join(numerical_results_dir, "hessian")
 
     os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(figures_dir, exist_ok=True)
     os.makedirs(energy_fig_dir, exist_ok=True)
     os.makedirs(qfim_fig_dir, exist_ok=True)
+    os.makedirs(hs_fig_dir, exist_ok=True)
+    os.makedirs(ortk_fig_dir, exist_ok=True)
+    os.makedirs(hessian_fig_dir, exist_ok=True)
     os.makedirs(qfim_eigs_dir, exist_ok=True)
     os.makedirs(qfim_eigs_dir_red4, exist_ok=True)
     os.makedirs(qfim_rank_dir, exist_ok=True)
@@ -673,16 +759,40 @@ def run_dpqc_overparam_visualize() -> None:
     os.makedirs(hs_eigcount_optimization_path_dir, exist_ok=True)
     os.makedirs(hs_eigcount_optimization_path_mean_dir, exist_ok=True)
     os.makedirs(hs_eigcount_optimization_path_min_dir, exist_ok=True)
+    os.makedirs(ortk_eigs_dir, exist_ok=True)
+    os.makedirs(ortk_rank_dir, exist_ok=True)
+    os.makedirs(ortk_rank_random_dir, exist_ok=True)
+    os.makedirs(ortk_rank_optimization_path_dir, exist_ok=True)
+    os.makedirs(ortk_rank_optimization_path_mean_dir, exist_ok=True)
+    os.makedirs(ortk_rank_optimization_path_min_dir, exist_ok=True)
+    os.makedirs(ortk_effective_rank_dir, exist_ok=True)
+    os.makedirs(ortk_effective_rank_random_dir, exist_ok=True)
+    os.makedirs(ortk_effective_rank_optimization_path_dir, exist_ok=True)
+    os.makedirs(ortk_effective_rank_optimization_path_mean_dir, exist_ok=True)
+    os.makedirs(ortk_effective_rank_optimization_path_min_dir, exist_ok=True)
     os.makedirs(hessian_eigs_dir, exist_ok=True)
     os.makedirs(hessian_rank_dir, exist_ok=True)
     os.makedirs(hessian_rank_random_dir, exist_ok=True)
     os.makedirs(hessian_rank_optimization_path_dir, exist_ok=True)
     os.makedirs(hessian_rank_optimization_path_mean_dir, exist_ok=True)
     os.makedirs(hessian_rank_optimization_path_min_dir, exist_ok=True)
+    os.makedirs(qfim_trace_random_dir, exist_ok=True)
+    os.makedirs(qfim_trace_optimization_path_dir, exist_ok=True)
+    os.makedirs(qfim_abs_entry_sum_random_dir, exist_ok=True)
+    os.makedirs(hs_trace_random_dir, exist_ok=True)
+    os.makedirs(hs_trace_optimization_path_dir, exist_ok=True)
+    os.makedirs(hs_abs_entry_sum_random_dir, exist_ok=True)
+    os.makedirs(ortk_trace_optimization_path_dir, exist_ok=True)
+    os.makedirs(hessian_trace_optimization_path_dir, exist_ok=True)
+    os.makedirs(hessian_abs_eigsum_random_dir, exist_ok=True)
+    os.makedirs(hessian_abs_eigsum_optimization_path_dir, exist_ok=True)
     os.makedirs(circuit_dir, exist_ok=True)
     os.makedirs(numerical_results_dir, exist_ok=True)
     os.makedirs(energy_results_dir, exist_ok=True)
     os.makedirs(qfim_results_dir, exist_ok=True)
+    os.makedirs(hs_results_dir, exist_ok=True)
+    os.makedirs(ortk_results_dir, exist_ok=True)
+    os.makedirs(hessian_results_dir, exist_ok=True)
 
 
     def _load_layer_arrays_from_npz(
@@ -1008,6 +1118,8 @@ def run_dpqc_overparam_visualize() -> None:
 
     def _rank_thresholds_for_eigs_sorted_desc(
         eigs_sorted_desc: np.ndarray,
+        *,
+        threshold: Optional[float] = None,
     ) -> np.ndarray:
         eigs_arr = np.asarray(eigs_sorted_desc, dtype=NP_REAL_DTYPE)
 
@@ -1017,7 +1129,10 @@ def run_dpqc_overparam_visualize() -> None:
         eigs_jnp = jnp.asarray(eigs_arr, dtype=REAL_DTYPE)
 
         thresholds = jax.vmap(
-            lambda evals_1d: rank_threshold_from_eigvals(evals_1d)
+            lambda evals_1d: rank_threshold_from_eigvals(
+                evals_1d,
+                threshold=threshold,
+            )
         )(eigs_jnp)
 
         return np.asarray(jax.device_get(thresholds), dtype=NP_REAL_DTYPE)
@@ -1061,6 +1176,7 @@ def run_dpqc_overparam_visualize() -> None:
         point_size: float = 14.0,
         alpha: float = 0.55,
         ylabel: str = "QFIM eigenvalue",
+        rank_threshold: Optional[float] = None,
     ) -> None:
         eigs_raw = np.asarray(eigs_sorted_desc, dtype=NP_REAL_DTYPE)
 
@@ -1072,7 +1188,10 @@ def run_dpqc_overparam_visualize() -> None:
 
         num_params = int(eigs_plot.shape[1])
 
-        rank_thresholds = _rank_thresholds_for_eigs_sorted_desc(eigs_raw)
+        rank_thresholds = _rank_thresholds_for_eigs_sorted_desc(
+            eigs_raw,
+            threshold=rank_threshold,
+        )
         rank_thresholds_plot = np.maximum(rank_thresholds, eps)
 
         fig, ax = new_fig_ax(outside_legend=False)
@@ -1436,7 +1555,7 @@ def run_dpqc_overparam_visualize() -> None:
     )
 
     hs_random_points_result_path = os.path.join(
-        qfim_results_dir,
+        hs_results_dir,
         f"hs_random_points_{keep_key}.npz",
     )
 
@@ -1484,8 +1603,57 @@ def run_dpqc_overparam_visualize() -> None:
         hs_eigsum_reduced_0123_by_layer = {}
         hs_abs_entry_sum_reduced_0123_by_layer = {}
 
+    ortk_random_points_result_path = os.path.join(
+        ortk_results_dir,
+        "ortk_random_points.npz",
+    )
+
+    if os.path.exists(ortk_random_points_result_path):
+        ortk_random_points_results = load_npz_result(ortk_random_points_result_path)
+        ortk_layer_list = [
+            int(L)
+            for L in np.asarray(
+                ortk_random_points_results["layers"],
+                dtype=NP_INT_DTYPE,
+            )
+        ]
+        ortk_rank_by_layer = _load_layer_arrays_from_npz(
+            ortk_random_points_results,
+            ortk_layer_list,
+            "rank",
+            dtype=NP_INT_DTYPE,
+        )
+        ortk_effective_rank_by_layer = _load_layer_arrays_from_npz(
+            ortk_random_points_results,
+            ortk_layer_list,
+            "effective_rank",
+            dtype=NP_REAL_DTYPE,
+        )
+        ortk_eigs_by_layer = _load_layer_arrays_from_npz(
+            ortk_random_points_results,
+            ortk_layer_list,
+            "eigs_desc",
+            dtype=NP_REAL_DTYPE,
+        )
+        ortk_trace_by_layer = _load_layer_arrays_from_npz(
+            ortk_random_points_results,
+            ortk_layer_list,
+            "trace",
+            dtype=NP_REAL_DTYPE,
+        )
+        ortk_rank_threshold = float(
+            np.asarray(ortk_random_points_results["ortk_rank_threshold"]).item()
+        )
+    else:
+        ortk_layer_list = []
+        ortk_rank_by_layer = {}
+        ortk_effective_rank_by_layer = {}
+        ortk_eigs_by_layer = {}
+        ortk_trace_by_layer = {}
+        ortk_rank_threshold = float(QFIM_EFFECTIVE_RANK_THRESHOLD)
+
     hessian_random_points_result_path = os.path.join(
-        qfim_results_dir,
+        hessian_results_dir,
         "hessian_random_points.npz",
     )
 
@@ -1543,6 +1711,23 @@ def run_dpqc_overparam_visualize() -> None:
             title=rf"QFIM eigenvalues at {NUM_QFIM_SAMPLES} random points (L={L})",
             outpath=os.path.join(qfim_eigs_dir_red4, f"L{L}_reduced_0123.pdf"),
         )
+        save_eigenvalue_histograms_by_trial(
+            qfim_eigs_reduced_0123_by_layer[L],
+            outdir=os.path.join(
+                qfim_eigs_dir_red4,
+                "histograms",
+                "random_points",
+                f"L{L}",
+            ),
+            matrix_tag="dpqc_qfim",
+            matrix_label="QFIM",
+            num_layers=L,
+            context_tag="random",
+            context_label="random point",
+            condition_tag="reduced0123",
+            condition_label="reduced keep=(0,1,2,3)",
+            color="C0",
+        )
 
     for L in hs_layer_list:
         save_qfim_eigs_by_index(
@@ -1554,6 +1739,35 @@ def run_dpqc_overparam_visualize() -> None:
             outpath=os.path.join(hs_eigs_dir_red4, f"L{L}_reduced_0123.pdf"),
             ylabel="HS tangent Gram eigenvalue",
         )
+        save_eigenvalue_histograms_by_trial(
+            hs_eigs_reduced_0123_by_layer[L],
+            outdir=os.path.join(
+                hs_eigs_dir_red4,
+                "histograms",
+                "random_points",
+                f"L{L}",
+            ),
+            matrix_tag="dpqc_hs_gram",
+            matrix_label="HS tangent Gram",
+            num_layers=L,
+            context_tag="random",
+            context_label="random point",
+            condition_tag="reduced0123",
+            condition_label="reduced keep=(0,1,2,3)",
+            color="C3",
+        )
+
+    for L in ortk_layer_list:
+        save_qfim_eigs_by_index(
+            ortk_eigs_by_layer[L],
+            title=(
+                rf"Observable-Relevant Tangent Kernel eigenvalues at "
+                rf"{NUM_QFIM_SAMPLES} random points (L={L})"
+            ),
+            outpath=os.path.join(ortk_eigs_dir, f"L{L}.pdf"),
+            ylabel="ORTK eigenvalue",
+            rank_threshold=ortk_rank_threshold,
+        )
 
     for L in hessian_layer_list:
         save_signed_eigs_by_index(
@@ -1562,6 +1776,21 @@ def run_dpqc_overparam_visualize() -> None:
             outpath=os.path.join(hessian_eigs_dir, f"L{L}.pdf"),
             threshold=hessian_rank_threshold,
             ylabel="Energy Hessian eigenvalue",
+        )
+        save_eigenvalue_histograms_by_trial(
+            hessian_eigs_by_layer[L],
+            outdir=os.path.join(
+                hessian_eigs_dir,
+                "histograms",
+                "random_points",
+                f"L{L}",
+            ),
+            matrix_tag="dpqc_energy_hessian",
+            matrix_label="Energy Hessian",
+            num_layers=L,
+            context_tag="random",
+            context_label="random point",
+            color="C6",
         )
 
 
@@ -1587,6 +1816,22 @@ def run_dpqc_overparam_visualize() -> None:
             ),
             cmap=cmap,
             ylabel="HS tangent Gram eigenvalue",
+        )
+
+    if ortk_layer_list:
+        save_qfim_eigs_by_index_colored_by_layer(
+            ortk_eigs_by_layer,
+            ortk_layer_list,
+            title=(
+                rf"Observable-Relevant Tangent Kernel eigenvalues at "
+                rf"{NUM_QFIM_SAMPLES} random points"
+            ),
+            outpath=os.path.join(
+                ortk_eigs_dir,
+                "ortk_eigs_by_index_layers_random_points.pdf",
+            ),
+            cmap=cmap,
+            ylabel="ORTK eigenvalue",
         )
 
     if hessian_layer_list:
@@ -1712,6 +1957,7 @@ def run_dpqc_overparam_visualize() -> None:
         marker_max: str = "^",
         marker_mean: str = "s",
         lw: float = 1.4,
+        integer_y_axis: bool = True,
     ):
         (
             x,
@@ -1785,7 +2031,8 @@ def run_dpqc_overparam_visualize() -> None:
         ax.set_title(title)
         ax.set_xticks(x)
         ax.set_xticklabels([str(L) for L in valid_layers])
-        ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        if integer_y_axis:
+            ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
         ax.grid(True, axis="y", alpha=0.3)
         ax.legend(loc="best", frameon=True, framealpha=0.9)
 
@@ -1939,6 +2186,53 @@ def run_dpqc_overparam_visualize() -> None:
             marker_max="^",
             marker_mean="s",
             lw=1.4,
+        )
+
+    if ortk_layer_list:
+        plot_rank_mean_min_max_sem_by_layer(
+            ortk_rank_by_layer,
+            ortk_layer_list,
+            color_min="C9",
+            color_max="C2",
+            color_mean="C0",
+            title=(
+                rf"Observable-Relevant Tangent Kernel rank "
+                rf"mean/minimum/maximum at {NUM_QFIM_SAMPLES} random points"
+            ),
+            outpath=os.path.join(
+                ortk_rank_random_dir,
+                "ortk_rank_mean_min_max_random_points.pdf",
+            ),
+            ylabel="ORTK rank",
+            rank_label="ORTK rank",
+            marker_min="o",
+            marker_max="^",
+            marker_mean="s",
+            lw=1.4,
+            integer_y_axis=True,
+        )
+
+        plot_rank_mean_min_max_sem_by_layer(
+            ortk_effective_rank_by_layer,
+            ortk_layer_list,
+            color_min="C9",
+            color_max="C2",
+            color_mean="C0",
+            title=(
+                rf"Observable-Relevant Tangent Kernel participation effective "
+                rf"rank mean/minimum/maximum at {NUM_QFIM_SAMPLES} random points"
+            ),
+            outpath=os.path.join(
+                ortk_effective_rank_random_dir,
+                "ortk_effective_rank_mean_min_max_random_points.pdf",
+            ),
+            ylabel="ORTK participation effective rank",
+            rank_label="ORTK effective rank",
+            marker_min="o",
+            marker_max="^",
+            marker_mean="s",
+            lw=1.4,
+            integer_y_axis=False,
         )
 
     if hessian_layer_list:
@@ -2287,7 +2581,7 @@ def run_dpqc_overparam_visualize() -> None:
         qfim_layer_list,
         title=rf"QFIM trace maximum and mean $\pm$ SEM at {NUM_QFIM_SAMPLES} random points",
         outpath=os.path.join(
-            qfim_fig_dir,
+            qfim_trace_random_dir,
             "qfim_trace_max_mean_sem_random_points_reduced_0123.pdf",
         ),
         color_max="C0",
@@ -2307,7 +2601,7 @@ def run_dpqc_overparam_visualize() -> None:
                 rf"{NUM_QFIM_SAMPLES} random points"
             ),
             outpath=os.path.join(
-                qfim_fig_dir,
+                hs_trace_random_dir,
                 "hs_trace_max_mean_sem_random_points_reduced_0123.pdf",
             ),
             ylabel="HS tangent Gram trace",
@@ -2508,6 +2802,7 @@ def run_dpqc_overparam_visualize() -> None:
         outpath: str,
         ylabel: str = "Minimum QFIM rank",
         cmap=None,
+        integer_y_axis: bool = True,
     ):
         valid_layers = [
             int(L)
@@ -2570,7 +2865,8 @@ def run_dpqc_overparam_visualize() -> None:
         ax.set_title(title)
         ax.set_xticks(x)
         ax.set_xticklabels([str(int(t)) for t in x], rotation=45, ha="right")
-        ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        if integer_y_axis:
+            ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
         ax.grid(True, axis="y", alpha=0.3)
         ax.legend(
             loc="upper left",
@@ -2770,7 +3066,7 @@ def run_dpqc_overparam_visualize() -> None:
         sample_iters,
         title=rf"Mean QFIM trace along optimization path ({keep_label})",
         outpath=os.path.join(
-            qfim_fig_dir,
+            qfim_trace_optimization_path_dir,
             f"qfim_trace_mean_history_optimization_path_{keep_key}.pdf",
         ),
         cmap=cmap,
@@ -2778,15 +3074,15 @@ def run_dpqc_overparam_visualize() -> None:
     )
 
     hs_rank_history_result_path = os.path.join(
-        qfim_results_dir,
+        hs_results_dir,
         f"hs_rank_history_optimization_path_{keep_key}.npz",
     )
     hs_eigs_history_result_path = os.path.join(
-        qfim_results_dir,
+        hs_results_dir,
         f"hs_eigs_history_optimization_path_{keep_key}.npz",
     )
     hs_trace_history_result_path = os.path.join(
-        qfim_results_dir,
+        hs_results_dir,
         f"hs_trace_history_optimization_path_{keep_key}.npz",
     )
 
@@ -2872,7 +3168,7 @@ def run_dpqc_overparam_visualize() -> None:
             hs_sample_iters,
             title=rf"Mean HS tangent Gram trace along optimization path ({keep_label})",
             outpath=os.path.join(
-                qfim_fig_dir,
+                hs_trace_optimization_path_dir,
                 f"hs_trace_mean_history_optimization_path_{keep_key}.pdf",
             ),
             ylabel="Mean HS tangent Gram trace",
@@ -2887,20 +3183,185 @@ def run_dpqc_overparam_visualize() -> None:
         hs_trace_history_layer_list = []
         hs_trace_history_optimization_path_by_layer = {}
 
+    ortk_rank_history_result_path = os.path.join(
+        ortk_results_dir,
+        "ortk_rank_history_optimization_path.npz",
+    )
+    ortk_effective_rank_history_result_path = os.path.join(
+        ortk_results_dir,
+        "ortk_effective_rank_history_optimization_path.npz",
+    )
+    ortk_eigs_history_result_path = os.path.join(
+        ortk_results_dir,
+        "ortk_eigs_history_optimization_path.npz",
+    )
+    ortk_trace_history_result_path = os.path.join(
+        ortk_results_dir,
+        "ortk_trace_history_optimization_path.npz",
+    )
+
+    if (
+        os.path.exists(ortk_rank_history_result_path)
+        and os.path.exists(ortk_effective_rank_history_result_path)
+        and os.path.exists(ortk_eigs_history_result_path)
+    ):
+        ortk_rank_history_results = load_npz_result(ortk_rank_history_result_path)
+        ortk_path_layer_list = [
+            int(L)
+            for L in np.asarray(
+                ortk_rank_history_results["layers"],
+                dtype=NP_INT_DTYPE,
+            )
+        ]
+        ortk_sample_iters = np.asarray(
+            ortk_rank_history_results["sample_iters"],
+            dtype=NP_INT_DTYPE,
+        )
+        ortk_rank_history_by_layer = _load_layer_arrays_from_npz(
+            ortk_rank_history_results,
+            ortk_path_layer_list,
+            suffix=None,
+            dtype=NP_REAL_DTYPE,
+        )
+
+        plot_qfim_rank_history_mean_by_layer(
+            ortk_rank_history_by_layer,
+            ortk_path_layer_list,
+            ortk_sample_iters,
+            title="Mean Observable-Relevant Tangent Kernel rank along optimization path",
+            outpath=os.path.join(
+                ortk_rank_optimization_path_mean_dir,
+                "ortk_rank_mean_history_optimization_path.pdf",
+            ),
+            ylabel="Mean ORTK rank",
+            cmap=cmap,
+        )
+
+        plot_qfim_rank_history_min_by_layer(
+            ortk_rank_history_by_layer,
+            ortk_path_layer_list,
+            ortk_sample_iters,
+            title="Minimum Observable-Relevant Tangent Kernel rank along optimization path",
+            outpath=os.path.join(
+                ortk_rank_optimization_path_min_dir,
+                "ortk_rank_min_history_optimization_path.pdf",
+            ),
+            ylabel="Minimum ORTK rank",
+            cmap=cmap,
+            integer_y_axis=True,
+        )
+
+        ortk_effective_rank_history_results = load_npz_result(
+            ortk_effective_rank_history_result_path
+        )
+        ortk_effective_rank_history_by_layer = _load_layer_arrays_from_npz(
+            ortk_effective_rank_history_results,
+            ortk_path_layer_list,
+            suffix=None,
+            dtype=NP_REAL_DTYPE,
+        )
+
+        plot_qfim_rank_history_mean_by_layer(
+            ortk_effective_rank_history_by_layer,
+            ortk_path_layer_list,
+            ortk_sample_iters,
+            title=(
+                "Mean Observable-Relevant Tangent Kernel participation "
+                "effective rank along optimization path"
+            ),
+            outpath=os.path.join(
+                ortk_effective_rank_optimization_path_mean_dir,
+                "ortk_effective_rank_mean_history_optimization_path.pdf",
+            ),
+            ylabel="Mean ORTK participation effective rank",
+            cmap=cmap,
+        )
+
+        plot_qfim_rank_history_min_by_layer(
+            ortk_effective_rank_history_by_layer,
+            ortk_path_layer_list,
+            ortk_sample_iters,
+            title=(
+                "Minimum Observable-Relevant Tangent Kernel participation "
+                "effective rank along optimization path"
+            ),
+            outpath=os.path.join(
+                ortk_effective_rank_optimization_path_min_dir,
+                "ortk_effective_rank_min_history_optimization_path.pdf",
+            ),
+            ylabel="Minimum ORTK participation effective rank",
+            cmap=cmap,
+            integer_y_axis=False,
+        )
+
+        ortk_eigs_history_results = load_npz_result(ortk_eigs_history_result_path)
+        ortk_eigs_history_optimization_path_by_layer = _load_layer_arrays_from_npz(
+            ortk_eigs_history_results,
+            ortk_path_layer_list,
+            suffix=None,
+            dtype=NP_REAL_DTYPE,
+        )
+
+        if os.path.exists(ortk_trace_history_result_path):
+            ortk_trace_history_results = load_npz_result(
+                ortk_trace_history_result_path
+            )
+            ortk_trace_history_layer_list = [
+                int(L)
+                for L in np.asarray(
+                    ortk_trace_history_results["layers"],
+                    dtype=NP_INT_DTYPE,
+                )
+            ]
+            ortk_trace_history_optimization_path_by_layer = _load_layer_arrays_from_npz(
+                ortk_trace_history_results,
+                ortk_trace_history_layer_list,
+                suffix=None,
+                dtype=NP_REAL_DTYPE,
+            )
+        else:
+            ortk_trace_history_layer_list = list(ortk_path_layer_list)
+            ortk_trace_history_optimization_path_by_layer = {
+                int(L): np.sum(np.asarray(eigs, dtype=NP_REAL_DTYPE), axis=2)
+                for L, eigs in ortk_eigs_history_optimization_path_by_layer.items()
+            }
+
+        plot_qfim_trace_history_mean_by_layer(
+            ortk_trace_history_optimization_path_by_layer,
+            ortk_trace_history_layer_list,
+            ortk_sample_iters,
+            title="Mean Observable-Relevant Tangent Kernel trace along optimization path",
+            outpath=os.path.join(
+                ortk_trace_optimization_path_dir,
+                "ortk_trace_mean_history_optimization_path.pdf",
+            ),
+            ylabel="Mean ORTK trace",
+            cmap=cmap,
+            log_scale=False,
+        )
+    else:
+        ortk_path_layer_list = []
+        ortk_sample_iters = np.asarray([], dtype=NP_INT_DTYPE)
+        ortk_rank_history_by_layer = {}
+        ortk_effective_rank_history_by_layer = {}
+        ortk_eigs_history_optimization_path_by_layer = {}
+        ortk_trace_history_layer_list = []
+        ortk_trace_history_optimization_path_by_layer = {}
+
     hessian_rank_history_result_path = os.path.join(
-        qfim_results_dir,
+        hessian_results_dir,
         "hessian_rank_history_optimization_path.npz",
     )
     hessian_eigs_history_result_path = os.path.join(
-        qfim_results_dir,
+        hessian_results_dir,
         "hessian_eigs_history_optimization_path.npz",
     )
     hessian_trace_history_result_path = os.path.join(
-        qfim_results_dir,
+        hessian_results_dir,
         "hessian_trace_history_optimization_path.npz",
     )
     hessian_abs_eigsum_history_result_path = os.path.join(
-        qfim_results_dir,
+        hessian_results_dir,
         "hessian_abs_eigsum_history_optimization_path.npz",
     )
 
@@ -3072,6 +3533,7 @@ def run_dpqc_overparam_visualize() -> None:
         outdir: str,
         target_iterations=None,
         eps: float = QFIM_EIG_PLOT_EPS,
+        matrix_tag: str = "dpqc_qfim",
         quantity_name: str = "QFIM",
         ylabel: str = "QFIM eigenvalue",
     ):
@@ -3144,6 +3606,23 @@ def run_dpqc_overparam_visualize() -> None:
                     eps=eps,
                     ylabel=ylabel,
                 )
+                save_eigenvalue_histogram_across_trials(
+                    eigs_L[:, time_idx, :],
+                    outdir=os.path.join(
+                        outdir,
+                        "histograms",
+                        f"L{L_int}",
+                    ),
+                    matrix_tag=matrix_tag,
+                    matrix_label=quantity_name,
+                    num_layers=L_int,
+                    context_tag="opt_path",
+                    context_label="optimization path",
+                    iteration=iteration_int,
+                    condition_tag="reduced0123",
+                    condition_label="reduced keep=(0,1,2,3)",
+                    color="C3" if "Gram" in quantity_name else "C0",
+                )
                 saved_paths.append(outpath)
 
         return saved_paths
@@ -3158,6 +3637,7 @@ def run_dpqc_overparam_visualize() -> None:
         target_iterations=None,
         threshold: float = QFIM_EFFECTIVE_RANK_THRESHOLD,
         eps: float = QFIM_EIG_PLOT_EPS,
+        matrix_tag: str = "dpqc_energy_hessian",
         quantity_name: str = "Energy Hessian",
         ylabel: str = "Energy Hessian eigenvalue",
     ):
@@ -3230,6 +3710,21 @@ def run_dpqc_overparam_visualize() -> None:
                     eps=eps,
                     ylabel=ylabel,
                 )
+                save_eigenvalue_histogram_across_trials(
+                    eigs_L[:, time_idx, :],
+                    outdir=os.path.join(
+                        outdir,
+                        "histograms",
+                        f"L{L_int}",
+                    ),
+                    matrix_tag=matrix_tag,
+                    matrix_label=quantity_name,
+                    num_layers=L_int,
+                    context_tag="opt_path",
+                    context_label="optimization path",
+                    iteration=iteration_int,
+                    color="C6",
+                )
                 saved_paths.append(outpath)
 
         return saved_paths
@@ -3272,6 +3767,7 @@ def run_dpqc_overparam_visualize() -> None:
             outdir=hs_eigs_optimization_path_dir,
             target_iterations=hs_eigs_optimization_path_target_iterations,
             eps=QFIM_EIG_PLOT_EPS,
+            matrix_tag="dpqc_hs_gram",
             quantity_name="HS tangent Gram",
             ylabel="HS tangent Gram eigenvalue",
         )
@@ -3797,7 +4293,7 @@ def run_dpqc_overparam_visualize() -> None:
         ylabel="Mean QFIM trace",
         title=rf"QFIM trace mean $\pm$ SEM vs Layers along optimization path ({keep_label})",
         outpath=os.path.join(
-            qfim_fig_dir,
+            qfim_trace_optimization_path_dir,
             f"qfim_trace_mean_errorbar_optimization_path_{keep_key}.pdf",
         ),
         label=r"$\sum_k \lambda_k(F)$",
@@ -3812,7 +4308,7 @@ def run_dpqc_overparam_visualize() -> None:
         ylabel="Mean elementwise absolute sum",
         title=rf"QFIM elementwise-absolute-sum mean $\pm$ SEM vs Layers ({keep_label}) at {NUM_QFIM_SAMPLES} random points",
         outpath=os.path.join(
-            qfim_fig_dir,
+            qfim_abs_entry_sum_random_dir,
             f"qfim_abs_entry_sum_mean_errorbar_{keep_key}.pdf",
         ),
         label=r"$\sum_{i,j} |F_{ij}|$",
@@ -3831,7 +4327,7 @@ def run_dpqc_overparam_visualize() -> None:
                 rf"optimization path ({keep_label})"
             ),
             outpath=os.path.join(
-                qfim_fig_dir,
+                hs_trace_optimization_path_dir,
                 f"hs_trace_mean_errorbar_optimization_path_{keep_key}.pdf",
             ),
             label=r"$\sum_k \mu_k(G)$",
@@ -3850,7 +4346,7 @@ def run_dpqc_overparam_visualize() -> None:
                 rf"vs Layers ({keep_label}) at {NUM_QFIM_SAMPLES} random points"
             ),
             outpath=os.path.join(
-                qfim_fig_dir,
+                hs_abs_entry_sum_random_dir,
                 f"hs_abs_entry_sum_mean_errorbar_{keep_key}.pdf",
             ),
             label=r"$\sum_{i,j} |G_{ij}|$",
@@ -3866,7 +4362,7 @@ def run_dpqc_overparam_visualize() -> None:
             ylabel="Mean energy Hessian trace",
             title="Energy Hessian trace mean $\\pm$ SEM vs Layers along optimization path",
             outpath=os.path.join(
-                qfim_fig_dir,
+                hessian_trace_optimization_path_dir,
                 "hessian_trace_mean_errorbar_optimization_path.pdf",
             ),
             label=r"$\sum_k \eta_k(\nabla^2 E)$",
@@ -3884,7 +4380,7 @@ def run_dpqc_overparam_visualize() -> None:
                 "vs Layers along optimization path"
             ),
             outpath=os.path.join(
-                qfim_fig_dir,
+                hessian_abs_eigsum_optimization_path_dir,
                 "hessian_abs_eigsum_mean_errorbar_optimization_path.pdf",
             ),
             label=r"$\sum_k |\eta_k(\nabla^2 E)|$",
@@ -3903,7 +4399,7 @@ def run_dpqc_overparam_visualize() -> None:
                 rf"vs Layers at {NUM_QFIM_SAMPLES} random points"
             ),
             outpath=os.path.join(
-                qfim_fig_dir,
+                hessian_abs_eigsum_random_dir,
                 "hessian_abs_eigsum_mean_errorbar_random_points.pdf",
             ),
             label=r"$\sum_k |\eta_k(\nabla^2 E)|$",
@@ -3972,8 +4468,8 @@ def run_dpqc_overparam_visualize() -> None:
     # in log-scale visualization.
     # ============================================================
 
-    qfim_grad_align_dir = os.path.join(qfim_fig_dir, "qfim_grad_alignment")
-    qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "qfim_grad_alignment")
+    qfim_grad_align_dir = os.path.join(qfim_fig_dir, "grad_alignment")
+    qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "grad_alignment")
     os.makedirs(qfim_grad_align_dir, exist_ok=True)
     os.makedirs(qfim_grad_align_results_dir, exist_ok=True)
 

@@ -10,6 +10,7 @@ from typing import Optional
 
 import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 
 
@@ -532,6 +533,245 @@ def save_current_figure(
         )
 
     plt.close(fig)
+
+
+_MAX_AUTOMATIC_EIGENVALUE_HISTOGRAM_BINS = 256
+
+
+def _resolve_eigenvalue_histogram_bins(
+    values: np.ndarray,
+    bins,
+):
+    """Bound pathological FD-based bin estimates without changing the data.
+
+    Near-rank-deficient spectra can have an order-one range but a machine-scale
+    interquartile range. NumPy's FD and auto estimators then request trillions
+    of bins, so automatic estimates are limited to one bin per value and 256
+    bins overall.
+    """
+    if not isinstance(bins, str) or bins.lower() not in {"auto", "fd"}:
+        return bins
+
+    num_values = int(values.size)
+    if num_values <= 1:
+        return 1
+
+    max_bins = min(
+        num_values,
+        _MAX_AUTOMATIC_EIGENVALUE_HISTOGRAM_BINS,
+    )
+    value_range = float(np.max(values) - np.min(values))
+    if not np.isfinite(value_range) or value_range <= 0.0:
+        return bins
+
+    q25, q75 = np.percentile(values, [25.0, 75.0])
+    iqr = float(q75 - q25)
+    if not np.isfinite(iqr) or iqr <= 0.0:
+        return bins
+
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        fd_width = 2.0 * iqr / np.cbrt(num_values)
+        estimated_fd_bins = value_range / fd_width
+
+    if (
+        not np.isfinite(estimated_fd_bins)
+        or estimated_fd_bins > max_bins
+    ):
+        return max_bins
+
+    return bins
+
+
+def save_eigenvalue_histogram(
+    eigenvalues: np.ndarray,
+    *,
+    title: str,
+    outpath: str,
+    bins="auto",
+    xlabel: str = "Eigenvalue",
+    color: str = "C0",
+) -> None:
+    """Save a count histogram for one matrix's finite eigenvalues.
+
+    Input values are intentionally not transformed here. This preserves any
+    exact zeros supplied by the numerical pipeline and the signs of Hessian
+    eigenvalues.
+    """
+    values = np.asarray(eigenvalues, dtype=np.float64).reshape(-1)
+    if values.size == 0:
+        raise ValueError("eigenvalues must contain at least one value.")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("eigenvalues must contain only finite values.")
+
+    resolved_bins = _resolve_eigenvalue_histogram_bins(values, bins)
+
+    fig, ax = new_fig_ax(outside_legend=False)
+    ax.hist(
+        values,
+        bins=resolved_bins,
+        density=False,
+        color=color,
+        alpha=0.75,
+        edgecolor="black",
+        linewidth=0.6,
+    )
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Count")
+    ax.set_title(title)
+    ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    ax.grid(True, axis="y", alpha=GRID_ALPHA, linewidth=GRID_LINEWIDTH)
+
+    save_fig(fig, ax, outpath, outside_legend=False)
+
+
+def save_eigenvalue_histograms_by_trial(
+    eigenvalues_by_trial: np.ndarray,
+    *,
+    outdir: str,
+    matrix_tag: str,
+    matrix_label: str,
+    num_layers: int,
+    context_tag: str,
+    context_label: str,
+    condition_tag: Optional[str] = None,
+    condition_label: Optional[str] = None,
+    bins="auto",
+    color: str = "C0",
+    trial_index_start: int = 0,
+) -> list[str]:
+    """Save one eigenvalue-count histogram per trial and return its paths.
+
+    The first array axis is the trial/sample axis and the second is the
+    eigenvalue axis. Trial numbers are zero-based by default so filenames map
+    directly to the rows stored in the numerical-result arrays.
+    """
+    eigs = np.asarray(eigenvalues_by_trial, dtype=np.float64)
+    if eigs.ndim == 1:
+        eigs = eigs[None, :]
+    if eigs.ndim != 2:
+        raise ValueError(
+            "eigenvalues_by_trial must have shape (num_trials, num_eigenvalues)."
+        )
+    if eigs.shape[0] == 0 or eigs.shape[1] == 0:
+        return []
+    if not np.all(np.isfinite(eigs)):
+        raise ValueError("eigenvalues_by_trial must contain only finite values.")
+
+    num_layers = int(num_layers)
+    num_params = int(eigs.shape[1])
+    trial_index_start = int(trial_index_start)
+    filename_tags = [
+        str(matrix_tag).strip("_"),
+        "eig_hist",
+        f"L{num_layers:04d}",
+        f"params{num_params:04d}",
+    ]
+
+    os.makedirs(outdir, exist_ok=True)
+    saved_paths = []
+
+    for row_index, trial_eigenvalues in enumerate(eigs):
+        trial_index = trial_index_start + row_index
+        trial_tags = filename_tags + [
+            f"trial{trial_index:04d}",
+            str(context_tag).strip("_"),
+        ]
+        if condition_tag:
+            trial_tags.append(str(condition_tag).strip("_"))
+
+        title_parts = [
+            f"{matrix_label} eigenvalue histogram",
+            f"L={num_layers}",
+            f"parameters={num_params}",
+            f"trial={trial_index}",
+            context_label,
+        ]
+        if condition_label:
+            title_parts.append(condition_label)
+
+        outpath = os.path.join(outdir, "_".join(trial_tags) + ".pdf")
+        save_eigenvalue_histogram(
+            trial_eigenvalues,
+            title=f"{title_parts[0]} ({', '.join(title_parts[1:])})",
+            outpath=outpath,
+            bins=bins,
+            xlabel=f"{matrix_label} eigenvalue",
+            color=color,
+        )
+        saved_paths.append(outpath)
+
+    return saved_paths
+
+
+def save_eigenvalue_histogram_across_trials(
+    eigenvalues_by_trial: np.ndarray,
+    *,
+    outdir: str,
+    matrix_tag: str,
+    matrix_label: str,
+    num_layers: int,
+    context_tag: str,
+    context_label: str,
+    iteration: Optional[int] = None,
+    condition_tag: Optional[str] = None,
+    condition_label: Optional[str] = None,
+    bins="auto",
+    color: str = "C0",
+    trial_index_start: int = 0,
+) -> str:
+    """Save one histogram containing all eigenvalues from several trials."""
+    eigs = np.asarray(eigenvalues_by_trial, dtype=np.float64)
+    if eigs.ndim == 1:
+        eigs = eigs[None, :]
+    if eigs.ndim != 2:
+        raise ValueError(
+            "eigenvalues_by_trial must have shape (num_trials, num_eigenvalues)."
+        )
+    if eigs.shape[0] == 0 or eigs.shape[1] == 0:
+        raise ValueError("eigenvalues_by_trial must not be empty.")
+    if not np.all(np.isfinite(eigs)):
+        raise ValueError("eigenvalues_by_trial must contain only finite values.")
+
+    num_layers = int(num_layers)
+    num_trials, num_params = (int(size) for size in eigs.shape)
+    first_trial = int(trial_index_start)
+    last_trial = first_trial + num_trials - 1
+    filename_tags = [
+        str(matrix_tag).strip("_"),
+        "eig_hist",
+        f"L{num_layers:04d}",
+        f"params{num_params:04d}",
+        f"trials{first_trial:04d}-{last_trial:04d}",
+    ]
+    if iteration is not None:
+        filename_tags.append(f"iter{int(iteration):06d}")
+    filename_tags.append(str(context_tag).strip("_"))
+    if condition_tag:
+        filename_tags.append(str(condition_tag).strip("_"))
+
+    title_parts = [
+        f"{matrix_label} eigenvalue histogram",
+        f"L={num_layers}",
+        f"parameters={num_params}",
+        f"trials={first_trial}-{last_trial}",
+        context_label,
+    ]
+    if iteration is not None:
+        title_parts.append(f"iteration={int(iteration)}")
+    if condition_label:
+        title_parts.append(condition_label)
+
+    os.makedirs(outdir, exist_ok=True)
+    outpath = os.path.join(outdir, "_".join(filename_tags) + ".pdf")
+    save_eigenvalue_histogram(
+        eigs,
+        title=f"{title_parts[0]} ({', '.join(title_parts[1:])})",
+        outpath=outpath,
+        bins=bins,
+        xlabel=f"{matrix_label} eigenvalue",
+        color=color,
+    )
+    return outpath
 
 
 def make_violin_ready(

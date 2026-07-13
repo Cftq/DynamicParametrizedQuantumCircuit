@@ -49,8 +49,10 @@ from qfim import (
     hermitian_eigvals_desc,
     make_hilbert_schmidt_metric_fn,
     make_mixed_state_qfim_fn,
+    participation_effective_rank_from_eigvals,
     psd_eigvals_desc,
 )
+from hamiltonian import local_term_to_matrix
 from tqdm.auto import tqdm as _tqdm
 
 
@@ -193,6 +195,15 @@ def create_dpqc(theta: jnp.ndarray, num_layers: int, num_system: int) -> tc.Circ
 H_terms = tuple(hamiltonian_terms(h_param))
 
 H_matrix = build_H_matrix_jax(H_terms, num_system_qubits)
+
+H_OBSERVABLE_MATRICES = jnp.stack(
+    [
+        jnp.asarray(coef, dtype=REAL_DTYPE)
+        * local_term_to_matrix(local_ops, num_system_qubits)
+        for coef, local_ops in H_terms
+    ],
+    axis=0,
+)
 
 smallest_eigval = float(
     np.linalg.eigvalsh(np.array(H_matrix, dtype=NP_COMPLEX_DTYPE)).min().real
@@ -535,20 +546,34 @@ if not qfim_layer_list:
 
 save_dir = f"./figs/dpqc/h_{h_param}"
 
-energy_fig_dir = os.path.join(save_dir, "energy_figures")
-qfim_fig_dir = os.path.join(save_dir, "qfim_figures")
+figures_dir = os.path.join(save_dir, "figures")
+energy_fig_dir = os.path.join(figures_dir, "energy")
+qfim_fig_dir = os.path.join(figures_dir, "qfim")
+hs_fig_dir = os.path.join(figures_dir, "hs")
+ortk_fig_dir = os.path.join(figures_dir, "ortk")
+hessian_fig_dir = os.path.join(figures_dir, "hessian")
 circuit_dir = os.path.join(save_dir, "optimized_circuits")
 numerical_results_dir = os.path.join(save_dir, "numerical_results")
 energy_results_dir = os.path.join(numerical_results_dir, "energy")
 qfim_results_dir = os.path.join(numerical_results_dir, "qfim")
+hs_results_dir = os.path.join(numerical_results_dir, "hs")
+ortk_results_dir = os.path.join(numerical_results_dir, "ortk")
+hessian_results_dir = os.path.join(numerical_results_dir, "hessian")
 
 os.makedirs(save_dir, exist_ok=True)
+os.makedirs(figures_dir, exist_ok=True)
 os.makedirs(energy_fig_dir, exist_ok=True)
 os.makedirs(qfim_fig_dir, exist_ok=True)
+os.makedirs(hs_fig_dir, exist_ok=True)
+os.makedirs(ortk_fig_dir, exist_ok=True)
+os.makedirs(hessian_fig_dir, exist_ok=True)
 os.makedirs(circuit_dir, exist_ok=True)
 os.makedirs(numerical_results_dir, exist_ok=True)
 os.makedirs(energy_results_dir, exist_ok=True)
 os.makedirs(qfim_results_dir, exist_ok=True)
+os.makedirs(hs_results_dir, exist_ok=True)
+os.makedirs(ortk_results_dir, exist_ok=True)
+os.makedirs(hessian_results_dir, exist_ok=True)
 
 
 def save_npz_result(outpath: str, **arrays) -> None:
@@ -829,6 +854,8 @@ QFIM_EIG_PLOT_EPS = cfg.QFIM_EIG_PLOT_EPS
 NUM_QFIM_SAMPLES = cfg.NUM_QFIM_SAMPLES
 QFIM_SAMPLE_SEED_BASE = cfg.QFIM_SAMPLE_SEED_BASE
 RED_JVP_CHUNK = cfg.RED_JVP_CHUNK
+ORTK_RANK_THRESHOLD = cfg.ORTK_RANK_THRESHOLD
+ORTK_PARTICIPATION_EPS = cfg.ORTK_PARTICIPATION_EPS
 
 # Thresholds used for large-sector gradient-weight diagnostics.
 # Keep this broad set unless you also want to reduce the gradient-sector plots.
@@ -883,6 +910,44 @@ def make_reduced0123_rho_rank_fn_for_layer_sequential(num_layers: int):
     return rho_rank_reduced0123
 
 
+def make_observable_expectation_vector_fn_for_layer(num_layers: int):
+    """Create m(theta)=Tr[(c_a O_a) rho(theta)] for Hamiltonian terms."""
+
+    @jax.jit
+    def observable_expectation_vector(theta: jnp.ndarray) -> jnp.ndarray:
+        rho_keep = rho_keep_sequential_dpqc(theta, num_layers=num_layers)
+        values = jnp.einsum("aij,ji->a", H_OBSERVABLE_MATRICES, rho_keep)
+        return jnp.real(values)
+
+    return observable_expectation_vector
+
+
+def make_observable_tangent_kernel_matrix_fn_for_layer(num_layers: int):
+    """Create K_obs(theta)=J_obs(theta) J_obs(theta)^T."""
+    obs_fn = make_observable_expectation_vector_fn_for_layer(num_layers)
+    obs_jac_fn = jax.jacrev(obs_fn)
+
+    @jax.jit
+    def observable_tangent_kernel(theta: jnp.ndarray) -> jnp.ndarray:
+        jac = obs_jac_fn(theta)
+        kernel = jac @ jac.T
+        return 0.5 * (kernel + kernel.T)
+
+    return observable_tangent_kernel
+
+
+def make_observable_tangent_kernel_eigvals_fn_for_layer(num_layers: int):
+    ortk_fn = make_observable_tangent_kernel_matrix_fn_for_layer(
+        num_layers=num_layers,
+    )
+
+    @jax.jit
+    def observable_tangent_kernel_eigvals(theta: jnp.ndarray):
+        return psd_eigvals_desc(ortk_fn(theta))
+
+    return observable_tangent_kernel_eigvals
+
+
 def make_energy_hessian_eigvals_fn_for_layer(num_layers: int):
     energy_fn = make_energy_fn_for_layer(num_layers)
     hessian_fn = jax.jit(jax.hessian(energy_fn))
@@ -905,14 +970,18 @@ hs_eigs_reduced_0123_by_layer = {}
 hs_rho_rank_reduced_0123_by_layer = {}
 hs_eigsum_reduced_0123_by_layer = {}
 hs_abs_entry_sum_reduced_0123_by_layer = {}
+ortk_rank_by_layer = {}
+ortk_effective_rank_by_layer = {}
+ortk_eigs_by_layer = {}
+ortk_trace_by_layer = {}
 hessian_rank_by_layer = {}
 hessian_eigs_by_layer = {}
 hessian_trace_by_layer = {}
 hessian_abs_eigsum_by_layer = {}
 
-qfim_eigs_dir = os.path.join(qfim_fig_dir, "qfim_eigs")
+qfim_eigs_dir = os.path.join(qfim_fig_dir, "eigs")
 qfim_eigs_dir_red4 = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
-hs_eigs_dir = os.path.join(qfim_fig_dir, "hs_eigs")
+hs_eigs_dir = os.path.join(hs_fig_dir, "eigs")
 hs_eigs_dir_red4 = os.path.join(hs_eigs_dir, "reduced_keep_0123")
 
 os.makedirs(qfim_eigs_dir_red4, exist_ok=True)
@@ -1043,6 +1112,56 @@ for L in tqdm(
         dtype=NP_REAL_DTYPE,
     )
 
+    ortk_eigvals_fn = make_observable_tangent_kernel_eigvals_fn_for_layer(
+        num_layers=L,
+    )
+
+    ortk_rank_list = []
+    ortk_effective_rank_list = []
+    ortk_eigs_list = []
+    ortk_trace_list = []
+
+    for s in tqdm(
+        range(NUM_QFIM_SAMPLES),
+        desc=f"Observable tangent kernel samples (L={L})",
+        unit="sample",
+        leave=False,
+    ):
+        th = thetas_L[s]
+
+        ortk_eigs_desc = ortk_eigvals_fn(th)
+        ortk_rank = effective_rank_from_eigvals(
+            ortk_eigs_desc,
+            threshold=ORTK_RANK_THRESHOLD,
+        )
+        ortk_effective_rank = participation_effective_rank_from_eigvals(
+            ortk_eigs_desc,
+            eps=ORTK_PARTICIPATION_EPS,
+        )
+
+        ortk_eigs_np = jax_to_np(ortk_eigs_desc, dtype=NP_REAL_DTYPE)
+
+        ortk_rank_list.append(int(jax.device_get(ortk_rank)))
+        ortk_effective_rank_list.append(
+            NP_REAL_DTYPE(jax.device_get(ortk_effective_rank))
+        )
+        ortk_eigs_list.append(ortk_eigs_np)
+        ortk_trace_list.append(NP_REAL_DTYPE(np.sum(ortk_eigs_np)))
+
+    ortk_rank_by_layer[L] = np.asarray(
+        ortk_rank_list,
+        dtype=NP_INT_DTYPE,
+    )
+    ortk_effective_rank_by_layer[L] = np.asarray(
+        ortk_effective_rank_list,
+        dtype=NP_REAL_DTYPE,
+    )
+    ortk_eigs_by_layer[L] = np.stack(ortk_eigs_list, axis=0)
+    ortk_trace_by_layer[L] = np.asarray(
+        ortk_trace_list,
+        dtype=NP_REAL_DTYPE,
+    )
+
     hessian_eigvals_fn = make_energy_hessian_eigvals_fn_for_layer(num_layers=L)
 
     hessian_rank_list = []
@@ -1108,7 +1227,7 @@ save_npz_result(
 )
 
 hs_random_points_result_path = os.path.join(
-    qfim_results_dir,
+    hs_results_dir,
     f"hs_random_points_{keep_key}.npz",
 )
 
@@ -1128,8 +1247,31 @@ save_npz_result(
     **_layer_arrays_for_npz(hs_abs_entry_sum_reduced_0123_by_layer, "abs_entry_sum"),
 )
 
+ortk_random_points_result_path = os.path.join(
+    ortk_results_dir,
+    "ortk_random_points.npz",
+)
+
+save_npz_result(
+    ortk_random_points_result_path,
+    h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+    num_ortk_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
+    ortk_sample_seed_base=np.asarray(QFIM_SAMPLE_SEED_BASE, dtype=NP_INT_DTYPE),
+    ortk_rank_threshold=np.asarray(ORTK_RANK_THRESHOLD, dtype=NP_REAL_DTYPE),
+    ortk_participation_eps=np.asarray(ORTK_PARTICIPATION_EPS, dtype=NP_REAL_DTYPE),
+    ortk_num_observables=np.asarray(
+        H_OBSERVABLE_MATRICES.shape[0],
+        dtype=NP_INT_DTYPE,
+    ),
+    layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
+    **_layer_arrays_for_npz(ortk_rank_by_layer, "rank"),
+    **_layer_arrays_for_npz(ortk_effective_rank_by_layer, "effective_rank"),
+    **_layer_arrays_for_npz(ortk_eigs_by_layer, "eigs_desc"),
+    **_layer_arrays_for_npz(ortk_trace_by_layer, "trace"),
+)
+
 hessian_random_points_result_path = os.path.join(
-    qfim_results_dir,
+    hessian_results_dir,
     "hessian_random_points.npz",
 )
 
@@ -1287,19 +1429,6 @@ qfim_gradient_large_sector_weight_by_layer = compute_large_sector_gradient_weigh
     jvp_chunk=RED_JVP_CHUNK,
 )
 
-np.savez(
-    os.path.join(qfim_fig_dir, f"qfim_large_sector_gradient_weight_{keep_key}.npz"),
-    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-    thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
-    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-    **{
-        f"L{int(L)}_thr_{_thr_tag(thr)}": arr
-        for L, data_L in qfim_gradient_large_sector_weight_by_layer.items()
-        for thr, arr in data_L.items()
-    },
-)
-
-
 qfim_large_sector_gradient_weight_result_path = os.path.join(
     qfim_results_dir,
     f"qfim_large_sector_gradient_weight_{keep_key}.npz",
@@ -1396,6 +1525,27 @@ def make_hs_rank_fn_for_layer(
     return hs_rank
 
 
+def make_ortk_rank_effective_eigvals_fn_for_layer(num_layers: int):
+    ortk_eigvals_fn = make_observable_tangent_kernel_eigvals_fn_for_layer(
+        num_layers=num_layers,
+    )
+
+    @jax.jit
+    def ortk_rank_effective_eigvals(theta: jnp.ndarray):
+        eigs_desc = ortk_eigvals_fn(theta)
+        rank_value = effective_rank_from_eigvals(
+            eigs_desc,
+            threshold=ORTK_RANK_THRESHOLD,
+        )
+        effective_rank_value = participation_effective_rank_from_eigvals(
+            eigs_desc,
+            eps=ORTK_PARTICIPATION_EPS,
+        )
+        return rank_value, effective_rank_value, eigs_desc
+
+    return ortk_rank_effective_eigvals
+
+
 def compute_qfim_rank_history_by_layer(
     theta_samples_by_layer: dict,
     layers,
@@ -1468,6 +1618,96 @@ def compute_qfim_rank_history_by_layer(
         return rank_history_by_layer, eigs_history_by_layer
 
     return rank_history_by_layer
+
+
+def compute_ortk_rank_history_by_layer(
+    theta_samples_by_layer: dict,
+    layers,
+    *,
+    return_eigs: bool = False,
+):
+    rank_history_by_layer = {}
+    effective_rank_history_by_layer = {}
+    eigs_history_by_layer = {}
+
+    for L in tqdm(
+        layers,
+        desc="ORTK rank history along optimization path",
+        unit="layer",
+    ):
+        if theta_samples_by_layer.get(L) is None:
+            continue
+
+        theta_samples = np.asarray(
+            theta_samples_by_layer[L],
+            dtype=NP_REAL_DTYPE,
+        )
+
+        if theta_samples.ndim != 3:
+            raise ValueError(
+                "theta_samples must have shape "
+                "(num_runs, num_sample_iters, num_params)."
+            )
+
+        num_runs, num_times, _ = theta_samples.shape
+        rank_effective_eigvals_fn = make_ortk_rank_effective_eigvals_fn_for_layer(
+            num_layers=int(L),
+        )
+
+        ranks_L = np.full((num_runs, num_times), np.nan, dtype=NP_REAL_DTYPE)
+        effective_ranks_L = np.full(
+            (num_runs, num_times),
+            np.nan,
+            dtype=NP_REAL_DTYPE,
+        )
+        eigs_L = None
+        if return_eigs:
+            eigs_L = np.full(
+                (num_runs, num_times, H_OBSERVABLE_MATRICES.shape[0]),
+                np.nan,
+                dtype=NP_REAL_DTYPE,
+            )
+
+        for run_idx in tqdm(
+            range(num_runs),
+            desc=f"ORTK-rank runs (L={L})",
+            unit="run",
+            leave=False,
+        ):
+            for time_idx in range(num_times):
+                rank_value, effective_rank_value, eigs_desc = (
+                    rank_effective_eigvals_fn(
+                        jnp.asarray(
+                            theta_samples[run_idx, time_idx],
+                            dtype=REAL_DTYPE,
+                        )
+                    )
+                )
+                ranks_L[run_idx, time_idx] = NP_REAL_DTYPE(
+                    jax.device_get(rank_value)
+                )
+                effective_ranks_L[run_idx, time_idx] = NP_REAL_DTYPE(
+                    jax.device_get(effective_rank_value)
+                )
+                if return_eigs:
+                    eigs_L[run_idx, time_idx, :] = jax_to_np(
+                        eigs_desc,
+                        dtype=NP_REAL_DTYPE,
+                    )
+
+        rank_history_by_layer[int(L)] = ranks_L
+        effective_rank_history_by_layer[int(L)] = effective_ranks_L
+        if return_eigs:
+            eigs_history_by_layer[int(L)] = eigs_L
+
+    if return_eigs:
+        return (
+            rank_history_by_layer,
+            effective_rank_history_by_layer,
+            eigs_history_by_layer,
+        )
+
+    return rank_history_by_layer, effective_rank_history_by_layer
 
 
 def compute_hs_rank_history_by_layer(
@@ -1623,16 +1863,6 @@ qfim_rank_history_by_layer, qfim_eigs_history_optimization_path_by_layer = (
     )
 )
 
-np.savez(
-    os.path.join(qfim_fig_dir, f"qfim_rank_history_optimization_path_{keep_key}.npz"),
-    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-    **{
-        f"L{int(L)}": arr
-        for L, arr in qfim_rank_history_by_layer.items()
-    },
-)
-
 qfim_rank_history_result_path = os.path.join(
     qfim_results_dir,
     f"qfim_rank_history_optimization_path_{keep_key}.npz",
@@ -1694,7 +1924,7 @@ hs_rank_history_by_layer, hs_eigs_history_optimization_path_by_layer = (
 )
 
 hs_rank_history_result_path = os.path.join(
-    qfim_results_dir,
+    hs_results_dir,
     f"hs_rank_history_optimization_path_{keep_key}.npz",
 )
 
@@ -1709,7 +1939,7 @@ save_npz_result(
 )
 
 hs_eigs_history_result_path = os.path.join(
-    qfim_results_dir,
+    hs_results_dir,
     f"hs_eigs_history_optimization_path_{keep_key}.npz",
 )
 
@@ -1729,7 +1959,7 @@ hs_trace_history_optimization_path_by_layer = {
 }
 
 hs_trace_history_result_path = os.path.join(
-    qfim_results_dir,
+    hs_results_dir,
     f"hs_trace_history_optimization_path_{keep_key}.npz",
 )
 
@@ -1743,6 +1973,85 @@ save_npz_result(
     },
 )
 
+(
+    ortk_rank_history_by_layer,
+    ortk_effective_rank_history_by_layer,
+    ortk_eigs_history_optimization_path_by_layer,
+) = compute_ortk_rank_history_by_layer(
+    theta_sample_traces_by_layer,
+    vqe_layer_list,
+    return_eigs=True,
+)
+
+ortk_rank_history_result_path = os.path.join(
+    ortk_results_dir,
+    "ortk_rank_history_optimization_path.npz",
+)
+
+save_npz_result(
+    ortk_rank_history_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    ortk_rank_threshold=np.asarray(ORTK_RANK_THRESHOLD, dtype=NP_REAL_DTYPE),
+    **{
+        f"L{int(L)}": arr
+        for L, arr in ortk_rank_history_by_layer.items()
+    },
+)
+
+ortk_effective_rank_history_result_path = os.path.join(
+    ortk_results_dir,
+    "ortk_effective_rank_history_optimization_path.npz",
+)
+
+save_npz_result(
+    ortk_effective_rank_history_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    ortk_participation_eps=np.asarray(ORTK_PARTICIPATION_EPS, dtype=NP_REAL_DTYPE),
+    **{
+        f"L{int(L)}": arr
+        for L, arr in ortk_effective_rank_history_by_layer.items()
+    },
+)
+
+ortk_eigs_history_result_path = os.path.join(
+    ortk_results_dir,
+    "ortk_eigs_history_optimization_path.npz",
+)
+
+save_npz_result(
+    ortk_eigs_history_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    ortk_rank_threshold=np.asarray(ORTK_RANK_THRESHOLD, dtype=NP_REAL_DTYPE),
+    ortk_participation_eps=np.asarray(ORTK_PARTICIPATION_EPS, dtype=NP_REAL_DTYPE),
+    **{
+        f"L{int(L)}": arr
+        for L, arr in ortk_eigs_history_optimization_path_by_layer.items()
+    },
+)
+
+ortk_trace_history_optimization_path_by_layer = {
+    int(L): np.sum(np.asarray(arr, dtype=NP_REAL_DTYPE), axis=2)
+    for L, arr in ortk_eigs_history_optimization_path_by_layer.items()
+}
+
+ortk_trace_history_result_path = os.path.join(
+    ortk_results_dir,
+    "ortk_trace_history_optimization_path.npz",
+)
+
+save_npz_result(
+    ortk_trace_history_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    **{
+        f"L{int(L)}": arr
+        for L, arr in ortk_trace_history_optimization_path_by_layer.items()
+    },
+)
+
 hessian_rank_history_by_layer, hessian_eigs_history_optimization_path_by_layer = (
     compute_hessian_rank_history_by_layer(
         theta_sample_traces_by_layer,
@@ -1752,7 +2061,7 @@ hessian_rank_history_by_layer, hessian_eigs_history_optimization_path_by_layer =
 )
 
 hessian_rank_history_result_path = os.path.join(
-    qfim_results_dir,
+    hessian_results_dir,
     "hessian_rank_history_optimization_path.npz",
 )
 
@@ -1771,7 +2080,7 @@ save_npz_result(
 )
 
 hessian_eigs_history_result_path = os.path.join(
-    qfim_results_dir,
+    hessian_results_dir,
     "hessian_eigs_history_optimization_path.npz",
 )
 
@@ -1799,7 +2108,7 @@ hessian_abs_eigsum_history_optimization_path_by_layer = {
 }
 
 hessian_trace_history_result_path = os.path.join(
-    qfim_results_dir,
+    hessian_results_dir,
     "hessian_trace_history_optimization_path.npz",
 )
 
@@ -1814,7 +2123,7 @@ save_npz_result(
 )
 
 hessian_abs_eigsum_history_result_path = os.path.join(
-    qfim_results_dir,
+    hessian_results_dir,
     "hessian_abs_eigsum_history_optimization_path.npz",
 )
 
@@ -1886,8 +2195,8 @@ save_npz_result(
 # in log-scale visualization.
 # ============================================================
 
-qfim_grad_align_dir = os.path.join(qfim_fig_dir, "qfim_grad_alignment")
-qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "qfim_grad_alignment")
+qfim_grad_align_dir = os.path.join(qfim_fig_dir, "grad_alignment")
+qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "grad_alignment")
 os.makedirs(qfim_grad_align_dir, exist_ok=True)
 os.makedirs(qfim_grad_align_results_dir, exist_ok=True)
 

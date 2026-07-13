@@ -6,8 +6,8 @@
 # ------------------------------------------------------------
 # VQE optimization settings
 # ------------------------------------------------------------
-H_PARAM = 0.50
-NUM_RUNS = 100
+H_PARAM = 0.10
+NUM_RUNS = 10
 STEPS = 5000
 SAMPLE_EVERY = 1000
 LEARNING_RATE = 1e-3
@@ -16,11 +16,11 @@ TOLERANCE = 1e-2
 # ------------------------------------------------------------
 # Layer schedules
 # ------------------------------------------------------------
-VQE_MAX_LAYER = 5
+VQE_MAX_LAYER = 7
 VQE_DENSE_UNTIL_LAYER = 5
 VQE_SPARSE_STEP = 5
 
-UNITARY_PQC_MAX_LAYER = 2
+UNITARY_PQC_MAX_LAYER = 7
 UNITARY_PQC_DENSE_UNTIL_LAYER = 7
 UNITARY_PQC_SPARSE_STEP = 1
 
@@ -40,6 +40,10 @@ QFIM_SAMPLE_SEED_BASE = 0
 UNITARY_PQC_QFIM_SAMPLE_SEED_BASE = 123456
 PURE_QFIM_LAYER_THRESHOLD = 8
 RED_JVP_CHUNK = 16
+
+# Observable-Relevant Tangent Kernel (ORTK) numerical settings.
+ORTK_RANK_THRESHOLD = 1e-12
+ORTK_PARTICIPATION_EPS = 1e-30
 
 
 # Thresholds used for large-sector gradient-weight diagnostics.

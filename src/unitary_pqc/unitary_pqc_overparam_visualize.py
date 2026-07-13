@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 _MODULE_DIR = Path(__file__).resolve().parent
 _SRC_DIR = _MODULE_DIR.parent
@@ -35,12 +36,27 @@ NP_REAL_DTYPE = np.float64
 NP_INT_DTYPE = np.int64
 
 
+def _load_required_result(path: str) -> dict:
+    """Load a compute-stage result or explain how to generate it."""
+    result_path = Path(path).resolve()
+    if not result_path.is_file():
+        compute_script = _MODULE_DIR / "unitary_pqc_overparam_compute.py"
+        raise FileNotFoundError(
+            "Required Unitary-PQC numerical result is missing:\n"
+            f"  {result_path}\n"
+            "Run the numerical pipeline to successful completion before "
+            "visualizing:\n"
+            f'  "{sys.executable}" "{compute_script}"'
+        )
+    return load_npz_result(str(result_path))
+
+
 def _load_unitary_vqe_results() -> dict:
     path = os.path.join(
         upqc.energy_results_dir,
         "vqe_optimization_results.npz",
     )
-    result = load_npz_result(path)
+    result = _load_required_result(path)
 
     upqc.layer_list = [
         int(L)
@@ -143,7 +159,7 @@ def _save_optimized_circuit_drawings() -> None:
 
 def _load_random_qfim_results() -> None:
     qfim_path = os.path.join(upqc.qfim_results_dir, "qfim_random_points.npz")
-    qfim_result = load_npz_result(qfim_path)
+    qfim_result = _load_required_result(qfim_path)
     layers = [int(L) for L in np.asarray(qfim_result["layers"], dtype=NP_INT_DTYPE)]
 
     upqc.layer_list = layers
@@ -204,10 +220,10 @@ def _load_random_qfim_results() -> None:
             upqc.qfim_thresh_pure_by_layer[L] = None
 
     hs_path = os.path.join(
-        upqc.qfim_results_dir,
+        upqc.hs_results_dir,
         "hs_random_points_reduced_0123.npz",
     )
-    hs_result = load_npz_result(hs_path)
+    hs_result = _load_required_result(hs_path)
 
     upqc.hs_rank_reduced_by_layer = {}
     upqc.hs_eigs_reduced_by_layer = {}
@@ -227,8 +243,42 @@ def _load_random_qfim_results() -> None:
             dtype=NP_REAL_DTYPE,
         )
 
+    ortk_path = os.path.join(
+        upqc.ortk_results_dir,
+        "ortk_random_points.npz",
+    )
+    ortk_result = _load_required_result(ortk_path)
+    upqc.ORTK_RANK_THRESHOLD = float(
+        np.asarray(ortk_result["ortk_rank_threshold"]).item()
+    )
+    upqc.ORTK_PARTICIPATION_EPS = float(
+        np.asarray(ortk_result["ortk_participation_eps"]).item()
+    )
+    upqc.ortk_rank_by_layer = {}
+    upqc.ortk_effective_rank_by_layer = {}
+    upqc.ortk_eigs_by_layer = {}
+    upqc.ortk_trace_by_layer = {}
+
+    for L in layers:
+        upqc.ortk_rank_by_layer[L] = np.asarray(
+            ortk_result[f"L{L}_rank"],
+            dtype=NP_INT_DTYPE,
+        )
+        upqc.ortk_effective_rank_by_layer[L] = np.asarray(
+            ortk_result[f"L{L}_effective_rank"],
+            dtype=NP_REAL_DTYPE,
+        )
+        upqc.ortk_eigs_by_layer[L] = np.asarray(
+            ortk_result[f"L{L}_eigs_desc"],
+            dtype=NP_REAL_DTYPE,
+        )
+        upqc.ortk_trace_by_layer[L] = np.asarray(
+            ortk_result[f"L{L}_trace"],
+            dtype=NP_REAL_DTYPE,
+        )
+
     hessian_path = os.path.join(
-        upqc.qfim_results_dir,
+        upqc.hessian_results_dir,
         "hessian_random_points.npz",
     )
     upqc.hessian_rank_by_layer = {}
@@ -238,7 +288,7 @@ def _load_random_qfim_results() -> None:
     upqc.hessian_abs_eigsum_by_layer = {}
 
     if os.path.exists(hessian_path):
-        hessian_result = load_npz_result(hessian_path)
+        hessian_result = _load_required_result(hessian_path)
 
         for L in layers:
             upqc.hessian_rank_by_layer[L] = np.asarray(
@@ -264,20 +314,27 @@ def _load_random_qfim_results() -> None:
 
 
 def _plot_random_qfim_results() -> None:
-    qfim_eigs_dir = os.path.join(upqc.save_dir, "qfim_eigs")
-    qfim_eigs_pure_dir = os.path.join(qfim_eigs_dir, "pure_full")
-    qfim_eigs_reduced_0123_dir = os.path.join(
-        qfim_eigs_dir,
-        "reduced_keep_0123",
-    )
-    hs_eigs_dir = os.path.join(upqc.save_dir, "hs_eigs")
-    hs_eigs_reduced_0123_dir = os.path.join(hs_eigs_dir, "reduced_keep_0123")
-    hessian_eigs_dir = os.path.join(upqc.save_dir, "hessian_eigs")
+    qfim_eigs_pure_dir = upqc.qfim_eigs_pure_dir
+    qfim_eigs_reduced_0123_dir = upqc.qfim_eigs_reduced_0123_dir
+    hs_eigs_reduced_0123_dir = upqc.hs_eigs_reduced_0123_dir
+    ortk_eigs_dir = upqc.ortk_eigs_dir
+    hessian_eigs_dir = upqc.hessian_eigs_dir
+    qfim_rank_random_dir = upqc.qfim_rank_random_dir
+    hs_rank_random_dir = upqc.hs_rank_random_dir
+    ortk_rank_random_dir = upqc.ortk_rank_random_dir
+    ortk_effective_rank_random_dir = upqc.ortk_effective_rank_random_dir
+    hessian_rank_random_dir = upqc.hessian_rank_random_dir
 
     os.makedirs(qfim_eigs_pure_dir, exist_ok=True)
     os.makedirs(qfim_eigs_reduced_0123_dir, exist_ok=True)
     os.makedirs(hs_eigs_reduced_0123_dir, exist_ok=True)
+    os.makedirs(ortk_eigs_dir, exist_ok=True)
     os.makedirs(hessian_eigs_dir, exist_ok=True)
+    os.makedirs(qfim_rank_random_dir, exist_ok=True)
+    os.makedirs(hs_rank_random_dir, exist_ok=True)
+    os.makedirs(ortk_rank_random_dir, exist_ok=True)
+    os.makedirs(ortk_effective_rank_random_dir, exist_ok=True)
+    os.makedirs(hessian_rank_random_dir, exist_ok=True)
 
     for L in upqc.layer_list:
         upqc._save_qfim_eigs_violinplot_by_index(
@@ -286,12 +343,59 @@ def _plot_random_qfim_results() -> None:
             outpath=os.path.join(qfim_eigs_reduced_0123_dir, f"L{L}_reduced_0123.pdf"),
             rank_thresholds=upqc.qfim_thresh_reduced_by_layer[L],
         )
+        upqc.plot_style.save_eigenvalue_histograms_by_trial(
+            upqc.qfim_eigs_reduced_by_layer[L],
+            outdir=os.path.join(
+                qfim_eigs_reduced_0123_dir,
+                "histograms",
+                "random_points",
+                f"L{L}",
+            ),
+            matrix_tag="unitary_pqc_qfim",
+            matrix_label="QFIM",
+            num_layers=L,
+            context_tag="random",
+            context_label="random point",
+            condition_tag="reduced0123",
+            condition_label="reduced keep=(0,1,2,3)",
+            color="C0",
+        )
         upqc._save_qfim_eigs_violinplot_by_index(
             upqc.hs_eigs_reduced_by_layer[L],
             title=rf"HS tangent Gram eigenvalues at {upqc.NUM_QFIM_SAMPLES} random points (L={L})",
             outpath=os.path.join(hs_eigs_reduced_0123_dir, f"L{L}_reduced_0123.pdf"),
             rank_thresholds=upqc.hs_thresh_reduced_by_layer[L],
             ylabel="HS tangent Gram eigenvalue",
+        )
+        upqc.plot_style.save_eigenvalue_histograms_by_trial(
+            upqc.hs_eigs_reduced_by_layer[L],
+            outdir=os.path.join(
+                hs_eigs_reduced_0123_dir,
+                "histograms",
+                "random_points",
+                f"L{L}",
+            ),
+            matrix_tag="unitary_pqc_hs_gram",
+            matrix_label="HS tangent Gram",
+            num_layers=L,
+            context_tag="random",
+            context_label="random point",
+            condition_tag="reduced0123",
+            condition_label="reduced keep=(0,1,2,3)",
+            color="C3",
+        )
+        upqc._save_qfim_eigs_violinplot_by_index(
+            upqc.ortk_eigs_by_layer[L],
+            title=(
+                rf"Observable-Relevant Tangent Kernel eigenvalues at "
+                rf"{upqc.NUM_QFIM_SAMPLES} random points (L={L})"
+            ),
+            outpath=os.path.join(ortk_eigs_dir, f"L{L}.pdf"),
+            rank_thresholds=np.asarray(
+                [upqc.ORTK_RANK_THRESHOLD],
+                dtype=NP_REAL_DTYPE,
+            ),
+            ylabel="ORTK eigenvalue",
         )
         if upqc.hessian_eigs_by_layer.get(L) is not None:
             upqc._save_signed_eigs_scatterplot_by_index(
@@ -301,12 +405,44 @@ def _plot_random_qfim_results() -> None:
                 rank_thresholds=upqc.hessian_thresh_by_layer[L],
                 ylabel="Energy Hessian eigenvalue",
             )
+            upqc.plot_style.save_eigenvalue_histograms_by_trial(
+                upqc.hessian_eigs_by_layer[L],
+                outdir=os.path.join(
+                    hessian_eigs_dir,
+                    "histograms",
+                    "random_points",
+                    f"L{L}",
+                ),
+                matrix_tag="unitary_pqc_energy_hessian",
+                matrix_label="Energy Hessian",
+                num_layers=L,
+                context_tag="random",
+                context_label="random point",
+                color="C6",
+            )
         if upqc.qfim_eigs_pure_by_layer[L] is not None:
             upqc._save_qfim_eigs_violinplot_by_index(
                 upqc.qfim_eigs_pure_by_layer[L],
                 title=rf"QFIM eigenvalues (Pure full-state) at {upqc.NUM_QFIM_SAMPLES} random points (L={L})",
                 outpath=os.path.join(qfim_eigs_pure_dir, f"L{L}_pure_full.pdf"),
                 rank_thresholds=upqc.qfim_thresh_pure_by_layer[L],
+            )
+            upqc.plot_style.save_eigenvalue_histograms_by_trial(
+                upqc.qfim_eigs_pure_by_layer[L],
+                outdir=os.path.join(
+                    qfim_eigs_pure_dir,
+                    "histograms",
+                    "random_points",
+                    f"L{L}",
+                ),
+                matrix_tag="unitary_pqc_qfim",
+                matrix_label="QFIM",
+                num_layers=L,
+                context_tag="random",
+                context_label="random point",
+                condition_tag="pure_full",
+                condition_label="pure full state",
+                color="C0",
             )
 
     x_all = np.array(upqc.layer_list, dtype=NP_REAL_DTYPE)
@@ -394,7 +530,7 @@ def _plot_random_qfim_results() -> None:
     ]
     ax.legend(handles=type_handles, loc="best", frameon=True, framealpha=0.9)
     upqc.save_current_figure(
-        os.path.join(upqc.save_dir, "qfim_rank_violinplot_random_points.pdf"),
+        os.path.join(qfim_rank_random_dir, "qfim_rank_violinplot_random_points.pdf"),
         outside_legend=False,
     )
 
@@ -436,7 +572,7 @@ def _plot_random_qfim_results() -> None:
     )
     ax.grid(True, axis="y", alpha=0.3)
     upqc.save_current_figure(
-        os.path.join(upqc.save_dir, "hs_rank_violinplot_random_points_reduced_0123.pdf"),
+        os.path.join(hs_rank_random_dir, "hs_rank_violinplot_random_points_reduced_0123.pdf"),
         outside_legend=False,
     )
 
@@ -446,7 +582,7 @@ def _plot_random_qfim_results() -> None:
         color="C0",
         title=rf"Maximum pure full-state QFIM rank at {upqc.NUM_QFIM_SAMPLES} random points",
         ylabel=r"Maximum QFIM effective rank $(\lambda_k > 10^{-12})$",
-        outpath=os.path.join(upqc.save_dir, "qfim_rank_max_random_points_pure_full.pdf"),
+        outpath=os.path.join(qfim_rank_random_dir, "qfim_rank_max_random_points_pure_full.pdf"),
         marker="s",
         lw=1.0,
     )
@@ -456,7 +592,7 @@ def _plot_random_qfim_results() -> None:
         color="C0",
         title=rf"Maximum QFIM rank at {upqc.NUM_QFIM_SAMPLES} random points",
         ylabel=r"Maximum QFIM effective rank $(\lambda_k > 10^{-12})$",
-        outpath=os.path.join(upqc.save_dir, "qfim_rank_max_random_points_reduced_0123.pdf"),
+        outpath=os.path.join(qfim_rank_random_dir, "qfim_rank_max_random_points_reduced_0123.pdf"),
         marker="o",
         lw=1.0,
     )
@@ -466,9 +602,38 @@ def _plot_random_qfim_results() -> None:
         color="C3",
         title=rf"Maximum HS tangent Gram rank at {upqc.NUM_QFIM_SAMPLES} random points",
         ylabel=r"Maximum HS effective rank $(\lambda_k > 10^{-12})$",
-        outpath=os.path.join(upqc.save_dir, "hs_rank_max_random_points_reduced_0123.pdf"),
+        outpath=os.path.join(hs_rank_random_dir, "hs_rank_max_random_points_reduced_0123.pdf"),
         marker="D",
         lw=1.0,
+    )
+
+    upqc.plot_scalar_violin_by_layer(
+        upqc.ortk_rank_by_layer,
+        upqc.layer_list,
+        title=(
+            rf"Observable-Relevant Tangent Kernel rank at "
+            rf"{upqc.NUM_QFIM_SAMPLES} random points"
+        ),
+        ylabel="ORTK rank",
+        outpath=os.path.join(
+            ortk_rank_random_dir,
+            "ortk_rank_violinplot_random_points.pdf",
+        ),
+        integer_y_axis=True,
+    )
+    upqc.plot_scalar_violin_by_layer(
+        upqc.ortk_effective_rank_by_layer,
+        upqc.layer_list,
+        title=(
+            rf"Observable-Relevant Tangent Kernel participation effective "
+            rf"rank at {upqc.NUM_QFIM_SAMPLES} random points"
+        ),
+        ylabel="ORTK participation effective rank",
+        outpath=os.path.join(
+            ortk_effective_rank_random_dir,
+            "ortk_effective_rank_violinplot_random_points.pdf",
+        ),
+        integer_y_axis=False,
     )
 
     if upqc.hessian_rank_by_layer:
@@ -512,7 +677,7 @@ def _plot_random_qfim_results() -> None:
         )
         ax.grid(True, axis="y", alpha=0.3)
         upqc.save_current_figure(
-            os.path.join(upqc.save_dir, "hessian_rank_violinplot_random_points.pdf"),
+            os.path.join(hessian_rank_random_dir, "hessian_rank_violinplot_random_points.pdf"),
             outside_legend=False,
         )
 
@@ -522,7 +687,7 @@ def _plot_random_qfim_results() -> None:
             color="C6",
             title=rf"Maximum energy Hessian rank at {upqc.NUM_QFIM_SAMPLES} random points",
             ylabel=r"Maximum Hessian rank $(|\eta_k| > 10^{-12})$",
-            outpath=os.path.join(upqc.save_dir, "hessian_rank_max_random_points.pdf"),
+            outpath=os.path.join(hessian_rank_random_dir, "hessian_rank_max_random_points.pdf"),
             marker="P",
             lw=1.0,
         )
@@ -533,7 +698,7 @@ def _load_optimization_path_results() -> None:
         upqc.qfim_results_dir,
         "qfim_rank_history_optimization_path_reduced_0123.npz",
     )
-    qfim_result = load_npz_result(qfim_rank_path)
+    qfim_result = _load_required_result(qfim_rank_path)
     layers = [int(L) for L in np.asarray(qfim_result["layers"], dtype=NP_INT_DTYPE)]
     upqc.sample_iters = np.asarray(qfim_result["sample_iters"], dtype=NP_INT_DTYPE)
     upqc.layer_list = layers
@@ -541,19 +706,71 @@ def _load_optimization_path_results() -> None:
         L: np.asarray(qfim_result[f"L{L}_rank"], dtype=NP_REAL_DTYPE)
         for L in layers
     }
+    upqc.qfim_eigs_history_by_layer = {
+        L: np.asarray(qfim_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
 
     hs_rank_path = os.path.join(
-        upqc.qfim_results_dir,
+        upqc.hs_results_dir,
         "hs_rank_history_optimization_path_reduced_0123.npz",
     )
-    hs_result = load_npz_result(hs_rank_path)
+    hs_result = _load_required_result(hs_rank_path)
     upqc.hs_rank_history_by_layer = {
         L: np.asarray(hs_result[f"L{L}_rank"], dtype=NP_REAL_DTYPE)
         for L in layers
     }
+    upqc.hs_eigs_history_by_layer = {
+        L: np.asarray(hs_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
+
+    ortk_rank_result = _load_required_result(
+        os.path.join(
+            upqc.ortk_results_dir,
+            "ortk_rank_history_optimization_path.npz",
+        )
+    )
+    ortk_effective_rank_result = _load_required_result(
+        os.path.join(
+            upqc.ortk_results_dir,
+            "ortk_effective_rank_history_optimization_path.npz",
+        )
+    )
+    ortk_eigs_result = _load_required_result(
+        os.path.join(
+            upqc.ortk_results_dir,
+            "ortk_eigs_history_optimization_path.npz",
+        )
+    )
+    ortk_trace_result = _load_required_result(
+        os.path.join(
+            upqc.ortk_results_dir,
+            "ortk_trace_history_optimization_path.npz",
+        )
+    )
+    upqc.ortk_rank_history_by_layer = {
+        L: np.asarray(ortk_rank_result[f"L{L}"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
+    upqc.ortk_effective_rank_history_by_layer = {
+        L: np.asarray(
+            ortk_effective_rank_result[f"L{L}"],
+            dtype=NP_REAL_DTYPE,
+        )
+        for L in layers
+    }
+    upqc.ortk_eigs_history_by_layer = {
+        L: np.asarray(ortk_eigs_result[f"L{L}"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
+    upqc.ortk_trace_history_by_layer = {
+        L: np.asarray(ortk_trace_result[f"L{L}"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
 
     hessian_rank_path = os.path.join(
-        upqc.qfim_results_dir,
+        upqc.hessian_results_dir,
         "hessian_rank_history_optimization_path.npz",
     )
     upqc.hessian_rank_history_by_layer = {}
@@ -561,7 +778,7 @@ def _load_optimization_path_results() -> None:
     upqc.hessian_thresh_history_by_layer = {}
 
     if os.path.exists(hessian_rank_path):
-        hessian_result = load_npz_result(hessian_rank_path)
+        hessian_result = _load_required_result(hessian_rank_path)
         upqc.hessian_rank_history_by_layer = {
             L: np.asarray(hessian_result[f"L{L}_rank"], dtype=NP_REAL_DTYPE)
             for L in layers
@@ -580,13 +797,108 @@ def _load_optimization_path_results() -> None:
 
 
 def _plot_optimization_path_results() -> None:
+    def save_optimization_path_eigenvalue_histograms(
+        eigs_history_by_layer: dict,
+        *,
+        outdir: str,
+        matrix_tag: str,
+        matrix_label: str,
+        color: str,
+        condition_tag: Optional[str] = None,
+        condition_label: Optional[str] = None,
+    ) -> None:
+        target_iterations = np.asarray(upqc.sample_iters, dtype=NP_INT_DTYPE)
+
+        for L in upqc.layer_list:
+            eigs_L = eigs_history_by_layer.get(L)
+            if eigs_L is None:
+                continue
+
+            eigs_L = np.asarray(eigs_L, dtype=NP_REAL_DTYPE)
+            if eigs_L.ndim != 3:
+                raise ValueError(
+                    "Each optimization-path eigenvalue array must have shape "
+                    "(num_runs, num_sample_iters, num_params)."
+                )
+            if (
+                eigs_L.shape[1] != target_iterations.size
+                and eigs_L.shape[0] == target_iterations.size
+            ):
+                eigs_L = np.transpose(eigs_L, (1, 0, 2))
+            if eigs_L.shape[1] != target_iterations.size:
+                raise ValueError(
+                    f"Shape mismatch for L={L}: eigs_L.shape={eigs_L.shape}, "
+                    f"len(sample_iters)={target_iterations.size}."
+                )
+
+            for time_idx, iteration in enumerate(target_iterations):
+                upqc.plot_style.save_eigenvalue_histogram_across_trials(
+                    eigs_L[:, time_idx, :],
+                    outdir=os.path.join(outdir, "histograms", f"L{L}"),
+                    matrix_tag=matrix_tag,
+                    matrix_label=matrix_label,
+                    num_layers=L,
+                    context_tag="opt_path",
+                    context_label="optimization path",
+                    iteration=int(iteration),
+                    condition_tag=condition_tag,
+                    condition_label=condition_label,
+                    color=color,
+                )
+
+    save_optimization_path_eigenvalue_histograms(
+        upqc.qfim_eigs_history_by_layer,
+        outdir=os.path.join(
+            upqc.qfim_eigs_dir,
+            "optimization_path_keep0123",
+        ),
+        matrix_tag="unitary_pqc_qfim",
+        matrix_label="QFIM",
+        color="C0",
+        condition_tag="reduced0123",
+        condition_label="reduced keep=(0,1,2,3)",
+    )
+    save_optimization_path_eigenvalue_histograms(
+        upqc.hs_eigs_history_by_layer,
+        outdir=os.path.join(
+            upqc.hs_eigs_dir,
+            "optimization_path_keep0123",
+        ),
+        matrix_tag="unitary_pqc_hs_gram",
+        matrix_label="HS tangent Gram",
+        color="C3",
+        condition_tag="reduced0123",
+        condition_label="reduced keep=(0,1,2,3)",
+    )
+    save_optimization_path_eigenvalue_histograms(
+        upqc.ortk_eigs_history_by_layer,
+        outdir=os.path.join(
+            upqc.ortk_eigs_dir,
+            "optimization_path",
+        ),
+        matrix_tag="unitary_pqc_ortk",
+        matrix_label="Observable-Relevant Tangent Kernel",
+        color="C2",
+    )
+    if upqc.hessian_eigs_history_by_layer:
+        save_optimization_path_eigenvalue_histograms(
+            upqc.hessian_eigs_history_by_layer,
+            outdir=os.path.join(
+                upqc.hessian_eigs_dir,
+                "optimization_path",
+            ),
+            matrix_tag="unitary_pqc_energy_hessian",
+            matrix_label="Energy Hessian",
+            color="C6",
+        )
+
     upqc.plot_qfim_rank_history_mean_by_layer(
         upqc.qfim_rank_history_by_layer,
         upqc.layer_list,
         upqc.sample_iters,
         title="Mean QFIM effective rank along optimization path (keep=(0,1,2,3))",
         outpath=os.path.join(
-            upqc.save_dir,
+            upqc.qfim_rank_optimization_path_mean_dir,
             "qfim_rank_mean_history_optimization_path_reduced_0123.pdf",
         ),
         cmap=upqc.cmap,
@@ -597,7 +909,7 @@ def _plot_optimization_path_results() -> None:
         upqc.sample_iters,
         title="Minimum QFIM effective rank along optimization path (keep=(0,1,2,3))",
         outpath=os.path.join(
-            upqc.save_dir,
+            upqc.qfim_rank_optimization_path_min_dir,
             "qfim_rank_min_history_optimization_path_reduced_0123.pdf",
         ),
         cmap=upqc.cmap,
@@ -608,7 +920,7 @@ def _plot_optimization_path_results() -> None:
         upqc.sample_iters,
         title="Mean HS tangent Gram effective rank along optimization path (keep=(0,1,2,3))",
         outpath=os.path.join(
-            upqc.save_dir,
+            upqc.hs_rank_optimization_path_mean_dir,
             "hs_rank_mean_history_optimization_path_reduced_0123.pdf",
         ),
         ylabel=r"Mean HS effective rank $(\lambda_k > 10^{-12})$",
@@ -620,10 +932,79 @@ def _plot_optimization_path_results() -> None:
         upqc.sample_iters,
         title="Minimum HS tangent Gram effective rank along optimization path (keep=(0,1,2,3))",
         outpath=os.path.join(
-            upqc.save_dir,
+            upqc.hs_rank_optimization_path_min_dir,
             "hs_rank_min_history_optimization_path_reduced_0123.pdf",
         ),
         ylabel=r"Minimum HS effective rank $(\lambda_k > 10^{-12})$",
+        cmap=upqc.cmap,
+    )
+
+    upqc.plot_qfim_rank_history_mean_by_layer(
+        upqc.ortk_rank_history_by_layer,
+        upqc.layer_list,
+        upqc.sample_iters,
+        title="Mean Observable-Relevant Tangent Kernel rank along optimization path",
+        outpath=os.path.join(
+            upqc.ortk_rank_optimization_path_mean_dir,
+            "ortk_rank_mean_history_optimization_path.pdf",
+        ),
+        ylabel="Mean ORTK rank",
+        cmap=upqc.cmap,
+    )
+    upqc.plot_qfim_rank_history_min_by_layer(
+        upqc.ortk_rank_history_by_layer,
+        upqc.layer_list,
+        upqc.sample_iters,
+        title="Minimum Observable-Relevant Tangent Kernel rank along optimization path",
+        outpath=os.path.join(
+            upqc.ortk_rank_optimization_path_min_dir,
+            "ortk_rank_min_history_optimization_path.pdf",
+        ),
+        ylabel="Minimum ORTK rank",
+        cmap=upqc.cmap,
+        integer_y_axis=True,
+    )
+    upqc.plot_qfim_rank_history_mean_by_layer(
+        upqc.ortk_effective_rank_history_by_layer,
+        upqc.layer_list,
+        upqc.sample_iters,
+        title=(
+            "Mean Observable-Relevant Tangent Kernel participation effective "
+            "rank along optimization path"
+        ),
+        outpath=os.path.join(
+            upqc.ortk_effective_rank_optimization_path_mean_dir,
+            "ortk_effective_rank_mean_history_optimization_path.pdf",
+        ),
+        ylabel="Mean ORTK participation effective rank",
+        cmap=upqc.cmap,
+    )
+    upqc.plot_qfim_rank_history_min_by_layer(
+        upqc.ortk_effective_rank_history_by_layer,
+        upqc.layer_list,
+        upqc.sample_iters,
+        title=(
+            "Minimum Observable-Relevant Tangent Kernel participation "
+            "effective rank along optimization path"
+        ),
+        outpath=os.path.join(
+            upqc.ortk_effective_rank_optimization_path_min_dir,
+            "ortk_effective_rank_min_history_optimization_path.pdf",
+        ),
+        ylabel="Minimum ORTK participation effective rank",
+        cmap=upqc.cmap,
+        integer_y_axis=False,
+    )
+    upqc.plot_qfim_rank_history_mean_by_layer(
+        upqc.ortk_trace_history_by_layer,
+        upqc.layer_list,
+        upqc.sample_iters,
+        title="Mean Observable-Relevant Tangent Kernel trace along optimization path",
+        outpath=os.path.join(
+            upqc.ortk_trace_optimization_path_dir,
+            "ortk_trace_mean_history_optimization_path.pdf",
+        ),
+        ylabel="Mean ORTK trace",
         cmap=upqc.cmap,
     )
 
@@ -634,7 +1015,7 @@ def _plot_optimization_path_results() -> None:
             upqc.sample_iters,
             title="Mean energy Hessian rank along optimization path",
             outpath=os.path.join(
-                upqc.save_dir,
+                upqc.hessian_rank_optimization_path_mean_dir,
                 "hessian_rank_mean_history_optimization_path.pdf",
             ),
             ylabel=r"Mean Hessian rank $(|\eta_k| > 10^{-12})$",
@@ -646,7 +1027,7 @@ def _plot_optimization_path_results() -> None:
             upqc.sample_iters,
             title="Minimum energy Hessian rank along optimization path",
             outpath=os.path.join(
-                upqc.save_dir,
+                upqc.hessian_rank_optimization_path_min_dir,
                 "hessian_rank_min_history_optimization_path.pdf",
             ),
             ylabel=r"Minimum Hessian rank $(|\eta_k| > 10^{-12})$",
@@ -654,8 +1035,7 @@ def _plot_optimization_path_results() -> None:
         )
 
         hessian_path_dir = os.path.join(
-            upqc.save_dir,
-            "hessian_eigs",
+            upqc.hessian_eigs_dir,
             "optimization_path",
         )
         os.makedirs(hessian_path_dir, exist_ok=True)
@@ -741,7 +1121,7 @@ def _plot_qfim_grad_alignment_results() -> None:
             if not os.path.exists(data_path):
                 continue
 
-            table = load_npz_result(data_path)
+            table = _load_required_result(data_path)
             upqc.plot_qfim_grad_alignment_table(
                 table,
                 title=(

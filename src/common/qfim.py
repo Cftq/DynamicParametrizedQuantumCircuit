@@ -69,6 +69,19 @@ def effective_rank_from_eigvals(
     return jnp.sum(evals > threshold_jnp)
 
 
+def participation_effective_rank_from_eigvals(
+    evals: jnp.ndarray,
+    *,
+    eps: float = 1e-30,
+) -> jnp.ndarray:
+    """Return the participation effective rank (sum lambda)^2 / sum lambda^2."""
+    evals = jnp.clip(jnp.real(evals), a_min=0.0)
+    eigsum = jnp.sum(evals)
+    eigsq_sum = jnp.sum(evals**2)
+    eps_jnp = jnp.asarray(eps, dtype=evals.dtype)
+    return jnp.where(eigsq_sum > eps_jnp, (eigsum**2) / eigsq_sum, 0.0)
+
+
 def psd_eigvals(matrix: jnp.ndarray) -> jnp.ndarray:
     """Return clipped ascending eigenvalues of a Hermitian PSD matrix."""
     return jnp.clip(jnp.linalg.eigvalsh(hermitian(matrix)), a_min=0.0)
