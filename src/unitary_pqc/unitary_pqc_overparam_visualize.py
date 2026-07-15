@@ -51,6 +51,51 @@ def _load_required_result(path: str) -> dict:
     return load_npz_result(str(result_path))
 
 
+def _plot_spectral_count_by_layer(
+    eigs_by_layer: dict,
+    *,
+    title: str,
+    ylabel: str,
+    outpath: str,
+    use_absolute_values: bool = False,
+) -> None:
+    """Plot mean component counts above each threshold against layer count."""
+    layers = [int(L) for L in sorted(eigs_by_layer) if eigs_by_layer[L] is not None]
+    thresholds = tuple(float(t) for t in cfg.QFIM_PATH_EIGCOUNT_THRESHOLDS)
+    if not layers or not thresholds:
+        return
+
+    fig, ax = plt.subplots(figsize=(8.0, 4.8))
+    cmap = matplotlib.colormaps.get_cmap("viridis")
+    for idx, threshold in enumerate(thresholds):
+        means, sems = [], []
+        for L in layers:
+            eigs = np.asarray(eigs_by_layer[L], dtype=NP_REAL_DTYPE)
+            if eigs.ndim < 2:
+                raise ValueError("Spectral arrays need sample and eigenvalue axes.")
+            eigs = eigs.reshape(-1, eigs.shape[-1])
+            if use_absolute_values:
+                eigs = np.abs(eigs)
+            counts = np.sum(eigs >= threshold, axis=1).astype(NP_REAL_DTYPE)
+            means.append(np.mean(counts))
+            sems.append(0.0 if counts.size < 2 else np.std(counts, ddof=1) / np.sqrt(counts.size))
+        ax.errorbar(
+            layers, means, yerr=sems, marker="o", linewidth=1.2,
+            capsize=3.0, color=cmap(idx / max(len(thresholds) - 1, 1)),
+            label=rf"threshold $\geq {threshold:g}$",
+        )
+    ax.set_xlabel("Number of Layers")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xticks(layers)
+    ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    Path(outpath).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(outpath, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _load_unitary_vqe_results() -> dict:
     path = os.path.join(
         upqc.energy_results_dir,
@@ -692,6 +737,29 @@ def _plot_random_qfim_results() -> None:
             lw=1.0,
         )
 
+    spectral_random_summaries = (
+        (upqc.qfim_eigs_reduced_by_layer, upqc.qfim_eigs_reduced_0123_dir,
+         "Reduced QFIM", "qfim_reduced", False),
+        (upqc.qfim_eigs_pure_by_layer, upqc.qfim_eigs_pure_dir,
+         "Pure-state QFIM", "qfim_pure", False),
+        (upqc.hs_eigs_reduced_by_layer, upqc.hs_eigs_reduced_0123_dir,
+         "HS tangent Gram", "hs", False),
+        (upqc.ortk_eigs_by_layer, upqc.ortk_eigs_dir,
+         "ORTK", "ortk", False),
+        (upqc.hessian_eigs_by_layer, upqc.hessian_eigs_dir,
+         "Absolute Hessian", "hessian_abs", True),
+    )
+    for eigs, directory, label, tag, use_abs in spectral_random_summaries:
+        if not eigs or not any(value is not None for value in eigs.values()):
+            continue
+        _plot_spectral_count_by_layer(
+            eigs,
+            title=f"{label} eigenvalue count at random points by threshold",
+            ylabel=f"Mean {label} eigenvalue count",
+            outpath=os.path.join(directory, f"{tag}_eigcount_threshold_overlay_random_points.pdf"),
+            use_absolute_values=use_abs,
+        )
+
 
 def _load_optimization_path_results() -> None:
     qfim_rank_path = os.path.join(
@@ -892,6 +960,27 @@ def _plot_optimization_path_results() -> None:
             color="C6",
         )
 
+    spectral_path_summaries = (
+        (upqc.qfim_eigs_history_by_layer, upqc.qfim_eigs_dir, "QFIM", "qfim", False),
+        (upqc.hs_eigs_history_by_layer, upqc.hs_eigs_dir, "HS tangent Gram", "hs", False),
+        (upqc.ortk_eigs_history_by_layer, upqc.ortk_eigs_dir, "ORTK", "ortk", False),
+        (upqc.hessian_eigs_history_by_layer, upqc.hessian_eigs_dir,
+         "Absolute Hessian", "hessian_abs", True),
+    )
+    for eigs, directory, label, tag, use_abs in spectral_path_summaries:
+        if not eigs:
+            continue
+        _plot_spectral_count_by_layer(
+            eigs,
+            title=f"{label} eigenvalue count along optimization path by threshold",
+            ylabel=f"Mean {label} eigenvalue count",
+            outpath=os.path.join(
+                directory,
+                f"{tag}_eigcount_threshold_overlay_optimization_path_by_layer.pdf",
+            ),
+            use_absolute_values=use_abs,
+        )
+
     upqc.plot_qfim_rank_history_mean_by_layer(
         upqc.qfim_rank_history_by_layer,
         upqc.layer_list,
@@ -1006,6 +1095,19 @@ def _plot_optimization_path_results() -> None:
         ),
         ylabel="Mean ORTK trace",
         cmap=upqc.cmap,
+    )
+    upqc.plot_qfim_rank_history_min_by_layer(
+        upqc.ortk_trace_history_by_layer,
+        upqc.layer_list,
+        upqc.sample_iters,
+        title="Minimum Observable-Relevant Tangent Kernel trace along optimization path",
+        outpath=os.path.join(
+            upqc.ortk_trace_optimization_path_dir,
+            "ortk_trace_min_history_optimization_path.pdf",
+        ),
+        ylabel="Minimum ORTK trace",
+        cmap=upqc.cmap,
+        integer_y_axis=False,
     )
 
     if upqc.hessian_rank_history_by_layer:

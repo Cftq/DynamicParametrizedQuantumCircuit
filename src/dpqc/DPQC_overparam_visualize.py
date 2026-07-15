@@ -2278,6 +2278,8 @@ def run_dpqc_overparam_visualize() -> None:
         eigs_by_layer: dict,
         layers,
         thresholds,
+        *,
+        use_absolute_values: bool = False,
     ) -> dict:
         eigcount_by_threshold = {}
 
@@ -2292,11 +2294,18 @@ def run_dpqc_overparam_visualize() -> None:
 
                 eigs_L = np.asarray(eigs_by_layer[L_int], dtype=NP_REAL_DTYPE)
 
-                if eigs_L.ndim != 2:
+                if eigs_L.ndim < 2:
                     raise ValueError(
-                        "Each random-point QFIM eigenvalue array must be 2D: "
-                        "(num_samples, num_params)."
+                        "Each eigenvalue array must have a sample axis and "
+                        "an eigenvalue axis."
                     )
+
+                # Optimization-path data have (run, iteration, eigenvalue).
+                # Both run and iteration are valid samples for a layer-wise
+                # summary, so collapse all leading axes here.
+                eigs_L = eigs_L.reshape(-1, eigs_L.shape[-1])
+                if use_absolute_values:
+                    eigs_L = np.abs(eigs_L)
 
                 count_by_layer[L_int] = np.sum(
                     eigs_L >= threshold,
@@ -2318,6 +2327,7 @@ def run_dpqc_overparam_visualize() -> None:
         ylabel: str = "Mean QFIM eigenvalue count",
         eigenvalue_symbol: str = r"\lambda_i",
         cmap=None,
+        use_absolute_values: bool = False,
     ):
         thresholds = tuple(float(thr) for thr in thresholds)
 
@@ -2328,6 +2338,7 @@ def run_dpqc_overparam_visualize() -> None:
             eigs_by_layer,
             layers,
             thresholds,
+            use_absolute_values=use_absolute_values,
         )
 
         valid_layers = [
@@ -2446,6 +2457,31 @@ def run_dpqc_overparam_visualize() -> None:
             ylabel="Mean HS eigenvalue count",
             eigenvalue_symbol=r"\mu_i",
             cmap=cmap,
+        )
+
+    if ortk_eigs_by_layer:
+        plot_qfim_random_eigcount_threshold_overlay(
+            ortk_eigs_by_layer,
+            qfim_layer_list,
+            QFIM_PATH_EIGCOUNT_THRESHOLDS,
+            title="ORTK eigenvalue count at random points by threshold",
+            outpath=os.path.join(ortk_eigs_dir, "ortk_eigcount_threshold_overlay_random_points.pdf"),
+            ylabel="Mean ORTK eigenvalue count",
+            eigenvalue_symbol=r"\kappa_i",
+            cmap=cmap,
+        )
+
+    if hessian_eigs_by_layer:
+        plot_qfim_random_eigcount_threshold_overlay(
+            hessian_eigs_by_layer,
+            qfim_layer_list,
+            QFIM_PATH_EIGCOUNT_THRESHOLDS,
+            title="Absolute Hessian eigenvalue count at random points by threshold",
+            outpath=os.path.join(hessian_eigs_dir, "hessian_abs_eigcount_threshold_overlay_random_points.pdf"),
+            ylabel="Mean absolute Hessian eigenvalue count",
+            eigenvalue_symbol=r"|\eta_i|",
+            cmap=cmap,
+            use_absolute_values=True,
         )
 
 
@@ -2792,6 +2828,24 @@ def run_dpqc_overparam_visualize() -> None:
             legend_space_frac=0.22,
         )
 
+        # The callers historically saved mean and minimum histories only.
+        # Always add the matching maximum history so every summary is present.
+        max_outpath = outpath.replace(
+            f"{os.sep}mean{os.sep}", f"{os.sep}max{os.sep}"
+        ).replace("_mean_", "_max_")
+        os.makedirs(os.path.dirname(max_outpath), exist_ok=True)
+        plot_qfim_rank_history_extreme_by_layer(
+            rank_history_by_layer,
+            layers,
+            sample_iters,
+            statistic="max",
+            title=title.replace("Mean ", "Maximum ").replace("mean ", "maximum "),
+            outpath=max_outpath,
+            ylabel=ylabel.replace("Mean ", "Maximum "),
+            cmap=cmap,
+            integer_y_axis="rank" in ylabel.lower(),
+        )
+
 
     def plot_qfim_rank_history_min_by_layer(
         rank_history_by_layer: dict,
@@ -2883,6 +2937,54 @@ def run_dpqc_overparam_visualize() -> None:
             outside_legend=True,
             legend_space_frac=0.22,
         )
+
+
+    def plot_qfim_rank_history_extreme_by_layer(
+        rank_history_by_layer: dict,
+        layers,
+        sample_iters,
+        *,
+        statistic: str,
+        title: str,
+        outpath: str,
+        ylabel: str,
+        cmap=None,
+        integer_y_axis: bool = False,
+    ):
+        if statistic not in {"min", "max"}:
+            raise ValueError("statistic must be 'min' or 'max'.")
+        valid_layers = [int(L) for L in layers if rank_history_by_layer.get(int(L)) is not None]
+        if not valid_layers:
+            return
+        x = np.asarray(sample_iters, dtype=NP_REAL_DTYPE)
+        cmap = matplotlib.colormaps.get_cmap("viridis") if cmap is None else cmap
+        fig, ax = new_fig_ax(outside_legend=True, legend_space_frac=0.22)
+        for layer_idx, L in enumerate(valid_layers):
+            values = np.asarray(rank_history_by_layer[L], dtype=NP_REAL_DTYPE)
+            if values.ndim != 2:
+                raise ValueError("Each history array must be 2D (num_runs, num_sample_iters).")
+            if values.shape[1] != x.size and values.shape[0] == x.size:
+                values = values.T
+            if values.shape[1] != x.size:
+                raise ValueError(f"Shape mismatch for L={L}: values.shape={values.shape}, len(sample_iters)={x.size}.")
+            valid = np.isfinite(values)
+            counts = np.sum(valid, axis=0)
+            fill = np.inf if statistic == "min" else -np.inf
+            reduced = getattr(np, statistic)(np.where(valid, values, fill), axis=0)
+            reduced = np.where(counts > 0, reduced, np.nan)
+            mask = np.isfinite(reduced)
+            if np.any(mask):
+                ax.plot(x[mask], reduced[mask], marker="o", linewidth=1.2,
+                        markersize=4.5, color=cmap(layer_idx / max(len(valid_layers) - 1, 1)),
+                        label=f"L={L}")
+        ax.set(xlabel="Iterations", ylabel=ylabel, title=title)
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(int(t)) for t in x], rotation=45, ha="right")
+        if integer_y_axis:
+            ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
+        save_fig(fig, ax, outpath, outside_legend=True, legend_space_frac=0.22)
 
 
     def plot_qfim_trace_history_mean_by_layer(
@@ -2978,6 +3080,20 @@ def run_dpqc_overparam_visualize() -> None:
             outside_legend=True,
             legend_space_frac=0.22,
         )
+
+        for statistic, adjective in (("min", "Minimum"), ("max", "Maximum")):
+            sibling = outpath.replace("_mean_", f"_{statistic}_")
+            plot_qfim_rank_history_extreme_by_layer(
+                trace_history_by_layer,
+                layers,
+                sample_iters,
+                statistic=statistic,
+                title=title.replace("Mean ", f"{adjective} ").replace("mean ", f"{adjective.lower()} "),
+                outpath=sibling,
+                ylabel=ylabel.replace("Mean ", f"{adjective} "),
+                cmap=cmap,
+                integer_y_axis=False,
+            )
 
 
     qfim_rank_history_result_path = os.path.join(
@@ -3497,6 +3613,36 @@ def run_dpqc_overparam_visualize() -> None:
         hessian_trace_history_optimization_path_by_layer = {}
         hessian_abs_eigsum_history_layer_list = []
         hessian_abs_eigsum_history_optimization_path_by_layer = {}
+
+    # Counts are meaningful for spectra, but not for scalar summaries such as
+    # trace, energy, success rate, or participation effective rank.
+    spectral_path_summaries = (
+        (qfim_eigs_history_optimization_path_by_layer, qfim_eigs_dir,
+         "QFIM", "qfim", r"\lambda_i", False),
+        (hs_eigs_history_optimization_path_by_layer, hs_eigs_dir,
+         "HS tangent Gram", "hs", r"\mu_i", False),
+        (ortk_eigs_history_optimization_path_by_layer, ortk_eigs_dir,
+         "ORTK", "ortk", r"\kappa_i", False),
+        (hessian_eigs_history_optimization_path_by_layer, hessian_eigs_dir,
+         "Absolute Hessian", "hessian_abs", r"|\eta_i|", True),
+    )
+    for eigs_by_layer, output_dir, label, tag, symbol, use_abs in spectral_path_summaries:
+        if not eigs_by_layer:
+            continue
+        plot_qfim_random_eigcount_threshold_overlay(
+            eigs_by_layer,
+            sorted(eigs_by_layer),
+            QFIM_PATH_EIGCOUNT_THRESHOLDS,
+            title=f"{label} eigenvalue count along optimization path by threshold",
+            outpath=os.path.join(
+                output_dir,
+                f"{tag}_eigcount_threshold_overlay_optimization_path_by_layer.pdf",
+            ),
+            ylabel=f"Mean {label} eigenvalue count",
+            eigenvalue_symbol=symbol,
+            cmap=cmap,
+            use_absolute_values=use_abs,
+        )
 
 
     def qfim_path_eig_target_iterations(
@@ -4285,6 +4431,34 @@ def run_dpqc_overparam_visualize() -> None:
         ax.legend(loc="best", frameon=True, framealpha=0.9)
 
         save_fig(fig, ax, outpath, outside_legend=False)
+
+        # Save the two complementary summaries alongside the mean figure.
+        for statistic, adjective in (("min", "Minimum"), ("max", "Maximum")):
+            xs, ys = [], []
+            for L in layers:
+                values = metric_by_layer.get(L)
+                if values is None:
+                    continue
+                finite = np.asarray(values, dtype=NP_REAL_DTYPE).reshape(-1)
+                finite = finite[np.isfinite(finite)]
+                if finite.size:
+                    xs.append(L)
+                    ys.append(getattr(np, statistic)(finite))
+            if not xs:
+                continue
+            sibling = outpath.replace("_mean_", f"_{statistic}_")
+            fig_extreme, ax_extreme = new_fig_ax(outside_legend=False)
+            ax_extreme.plot(xs, ys, marker=marker, linestyle="-", color=color,
+                            linewidth=1.2, markersize=6.0, label=f"{adjective} {label}")
+            ax_extreme.set_xlabel("Number of Layers")
+            ax_extreme.set_ylabel(ylabel.replace("Mean ", f"{adjective} "))
+            ax_extreme.set_title(title.replace("mean ", f"{adjective.lower()} ").replace("Mean ", f"{adjective} "))
+            ax_extreme.set_xticks(xs)
+            if log_scale:
+                ax_extreme.set_yscale("log")
+            ax_extreme.grid(True, axis="y", alpha=0.3)
+            ax_extreme.legend(loc="best", frameon=True, framealpha=0.9)
+            save_fig(fig_extreme, ax_extreme, sibling, outside_legend=False)
 
 
     plot_metric_mean_sem_by_layer(
