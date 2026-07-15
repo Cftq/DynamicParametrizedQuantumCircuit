@@ -631,6 +631,24 @@ def make_reduced_hs_matrix_fn_for_layer_sequential(
         jvp_chunk=jvp_chunk,
     )
 
+
+def make_pure_full_hs_matrix_fn_for_layer(
+    num_layers: int,
+    *,
+    jvp_chunk: int = RED_JVP_CHUNK,
+):
+    """HS tangent Gram matrix of the full five-qubit pure-state density matrix."""
+    @jax.jit
+    def rho_full_fn(theta: jnp.ndarray) -> jnp.ndarray:
+        return _hermitian(
+            rho_full_sequential_unitary_pqc(theta, num_layers=num_layers)
+        )
+
+    return make_hilbert_schmidt_metric_fn(
+        rho_full_fn,
+        jvp_chunk=jvp_chunk,
+    )
+
 def make_reduced_qfim_rank_fn_for_layer(
     num_layers: int,
     keep_wires=KEEP_WIRES,
@@ -860,7 +878,7 @@ def plot_qfim_rank_max_by_layer(
         x,
         max_ranks,
         marker=marker,
-        linestyle="-",
+        linestyle="--",
         linewidth=lw,
         markersize=4.0,
         color=color,
@@ -1084,6 +1102,7 @@ def compute_qfim_rank_history_by_layer(
     *,
     keep_wires=KEEP_WIRES,
     jvp_chunk: int = RED_JVP_CHUNK,
+    representation: str = "reduced",
 ):
     rank_history_by_layer = {}
     eigs_history_by_layer = {}
@@ -1110,11 +1129,15 @@ def compute_qfim_rank_history_by_layer(
             )
 
         num_runs, num_times, num_params = theta_samples.shape
-        eigvals_fn = make_qfim_eigvals_fn_for_layer(
-            num_layers=L_int,
-            keep_wires=keep_wires,
-            jvp_chunk=jvp_chunk,
-        )
+        if representation == "pure_full":
+            matrix_fn = make_pure_qfim_matrix_fn_for_layer(L_int)
+            eigvals_fn = jax.jit(lambda theta: psd_eigvals_desc(matrix_fn(theta)))
+        elif representation == "reduced":
+            eigvals_fn = make_qfim_eigvals_fn_for_layer(
+                num_layers=L_int, keep_wires=keep_wires, jvp_chunk=jvp_chunk
+            )
+        else:
+            raise ValueError("representation must be 'pure_full' or 'reduced'.")
 
         ranks_L = np.full((num_runs, num_times), np.nan, dtype=NP_REAL_DTYPE)
         eigs_L = np.full((num_runs, num_times, num_params), np.nan, dtype=NP_REAL_DTYPE)
@@ -1233,6 +1256,7 @@ def compute_hs_rank_history_by_layer(
     *,
     keep_wires=KEEP_WIRES,
     jvp_chunk: int = RED_JVP_CHUNK,
+    representation: str = "reduced",
 ):
     rank_history_by_layer = {}
     eigs_history_by_layer = {}
@@ -1259,11 +1283,17 @@ def compute_hs_rank_history_by_layer(
             )
 
         num_runs, num_times, num_params = theta_samples.shape
-        eigvals_fn = make_hs_eigvals_fn_for_layer(
-            num_layers=L_int,
-            keep_wires=keep_wires,
-            jvp_chunk=jvp_chunk,
-        )
+        if representation == "pure_full":
+            matrix_fn = make_pure_full_hs_matrix_fn_for_layer(
+                num_layers=L_int, jvp_chunk=jvp_chunk
+            )
+            eigvals_fn = jax.jit(lambda theta: psd_eigvals_desc(matrix_fn(theta)))
+        elif representation == "reduced":
+            eigvals_fn = make_hs_eigvals_fn_for_layer(
+                num_layers=L_int, keep_wires=keep_wires, jvp_chunk=jvp_chunk
+            )
+        else:
+            raise ValueError("representation must be 'pure_full' or 'reduced'.")
 
         ranks_L = np.full((num_runs, num_times), np.nan, dtype=NP_REAL_DTYPE)
         eigs_L = np.full((num_runs, num_times, num_params), np.nan, dtype=NP_REAL_DTYPE)
@@ -1527,7 +1557,7 @@ def plot_qfim_rank_history_min_by_layer(
             x[finite_mask],
             min_ranks[finite_mask],
             marker="o",
-            linestyle="-",
+            linestyle=":",
             linewidth=1.2,
             markersize=4.5,
             color=color,
@@ -3016,7 +3046,9 @@ def run_random_qfim_analysis(*, make_plots: bool = False) -> None:
     # ------------------------------
     # Pure QFIM compute cutoff (kept)
     # ------------------------------
-    PURE_QFIM_LAYER_THRESHOLD = cfg.PURE_QFIM_LAYER_THRESHOLD
+    # Compute pure-full metrics for every configured layer.  The previous
+    # cutoff produced an asymmetric pure/reduced result set.
+    PURE_QFIM_LAYER_THRESHOLD = max(layer_list, default=0) + 1
     
     # ------------------------------
     # Reduced-QFIM derivative chunk size
@@ -3064,6 +3096,9 @@ def run_random_qfim_analysis(*, make_plots: bool = False) -> None:
     hs_rank_reduced_by_layer = {}       # L -> (NUM_QFIM_SAMPLES,)
     hs_eigs_reduced_by_layer = {}       # L -> (NUM_QFIM_SAMPLES, num_params)
     hs_thresh_reduced_by_layer = {}     # L -> (NUM_QFIM_SAMPLES,)
+    hs_rank_pure_by_layer = {}
+    hs_eigs_pure_by_layer = {}
+    hs_thresh_pure_by_layer = {}
     ortk_rank_by_layer = {}             # L -> (NUM_QFIM_SAMPLES,)
     ortk_effective_rank_by_layer = {}   # L -> (NUM_QFIM_SAMPLES,)
     ortk_eigs_by_layer = {}             # L -> (NUM_QFIM_SAMPLES, num_observables)
@@ -3228,6 +3263,37 @@ def run_random_qfim_analysis(*, make_plots: bool = False) -> None:
         hs_thresh_reduced_by_layer[L] = np.asarray(
             hs_thresh_list,
             dtype=NP_REAL_DTYPE,
+        )
+
+        pure_hs_fn = make_pure_full_hs_matrix_fn_for_layer(
+            num_layers=L,
+            jvp_chunk=RED_JVP_CHUNK,
+        )
+        pure_hs_ranks, pure_hs_eigs, pure_hs_thresholds = [], [], []
+        for s in tqdm(
+            range(NUM_QFIM_SAMPLES),
+            desc=f"Pure(full) HS samples (rank+eigs) (L={L})",
+            unit="sample",
+            leave=False,
+        ):
+            evals_hs_pure = jnp.clip(
+                jnp.linalg.eigvalsh(_hermitian(pure_hs_fn(thetas_L[s]))),
+                a_min=0.0,
+            )
+            masked_hs_pure, threshold_hs_pure = threshold_psd_eigvals_for_rank(
+                evals_hs_pure
+            )
+            pure_hs_ranks.append(
+                int(jax.device_get(jnp.sum(evals_hs_pure > threshold_hs_pure)))
+            )
+            pure_hs_eigs.append(
+                np.asarray(jax.device_get(masked_hs_pure[::-1]), dtype=NP_REAL_DTYPE)
+            )
+            pure_hs_thresholds.append(float(jax.device_get(threshold_hs_pure)))
+        hs_rank_pure_by_layer[L] = np.asarray(pure_hs_ranks, dtype=NP_INT_DTYPE)
+        hs_eigs_pure_by_layer[L] = np.stack(pure_hs_eigs, axis=0)
+        hs_thresh_pure_by_layer[L] = np.asarray(
+            pure_hs_thresholds, dtype=NP_REAL_DTYPE
         )
 
         if make_plots:
@@ -3529,7 +3595,23 @@ def run_random_qfim_analysis(*, make_plots: bool = False) -> None:
     )
 
     save_npz_result(
+        os.path.join(hs_results_dir, "hs_random_points_pure_full.npz"),
+        h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+        num_hs_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
+        hs_sample_seed_base=np.asarray(QFIM_SAMPLE_SEED_BASE, dtype=NP_INT_DTYPE),
+        hs_effective_rank_threshold=np.asarray(QFIM_EFFECTIVE_RANK_THRESHOLD, dtype=NP_REAL_DTYPE),
+        layers=np.asarray(layer_list, dtype=NP_INT_DTYPE),
+        representation=np.asarray("pure_full"),
+        **{f"L{int(L)}_rank": arr for L, arr in hs_rank_pure_by_layer.items()},
+        **{f"L{int(L)}_eigs_desc": arr for L, arr in hs_eigs_pure_by_layer.items()},
+        **{f"L{int(L)}_rank_threshold": arr for L, arr in hs_thresh_pure_by_layer.items()},
+    )
+
+    save_npz_result(
         os.path.join(ortk_results_dir, "ortk_random_points.npz"),
+        representation_equivalence=np.asarray(
+            "pure_full == reduced_keep_0123 for system-observable expectations"
+        ),
         h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
         num_ortk_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
         ortk_sample_seed_base=np.asarray(
@@ -3569,6 +3651,9 @@ def run_random_qfim_analysis(*, make_plots: bool = False) -> None:
 
     save_npz_result(
         os.path.join(hessian_results_dir, "hessian_random_points.npz"),
+        representation_equivalence=np.asarray(
+            "pure_full == reduced_keep_0123 for E=Tr[(H_system tensor I) rho_full]"
+        ),
         h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
         num_hessian_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
         hessian_sample_seed_base=np.asarray(QFIM_SAMPLE_SEED_BASE, dtype=NP_INT_DTYPE),
@@ -3979,6 +4064,25 @@ def run_optimization_path_qfim_analysis(*, make_plots: bool = False) -> None:
         **qfim_rank_history_npz,
     )
 
+    qfim_rank_history_pure, qfim_eigs_history_pure, qfim_thresh_history_pure = (
+        compute_qfim_rank_history_by_layer(
+            theta_sample_traces_by_layer,
+            layer_list,
+            jvp_chunk=RED_JVP_CHUNK,
+            representation="pure_full",
+        )
+    )
+    save_npz_result(
+        os.path.join(qfim_results_dir, "qfim_rank_history_optimization_path_pure_full.npz"),
+        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+        plot_iters=_qfim_history_plot_iterations(sample_iters),
+        layers=np.asarray(layer_list, dtype=NP_INT_DTYPE),
+        representation=np.asarray("pure_full"),
+        **{f"L{int(L)}_rank": arr for L, arr in qfim_rank_history_pure.items()},
+        **{f"L{int(L)}_eigs": arr for L, arr in qfim_eigs_history_pure.items()},
+        **{f"L{int(L)}_rank_threshold": arr for L, arr in qfim_thresh_history_pure.items()},
+    )
+
     hs_rank_history_by_layer, hs_eigs_history_by_layer, hs_thresh_history_by_layer = (
         compute_hs_rank_history_by_layer(
             theta_sample_traces_by_layer,
@@ -4015,6 +4119,25 @@ def run_optimization_path_qfim_analysis(*, make_plots: bool = False) -> None:
     save_npz_result(
         os.path.join(hs_results_dir, "hs_rank_history_optimization_path_reduced_0123.npz"),
         **hs_rank_history_npz,
+    )
+
+    hs_rank_history_pure, hs_eigs_history_pure, hs_thresh_history_pure = (
+        compute_hs_rank_history_by_layer(
+            theta_sample_traces_by_layer,
+            layer_list,
+            jvp_chunk=RED_JVP_CHUNK,
+            representation="pure_full",
+        )
+    )
+    save_npz_result(
+        os.path.join(hs_results_dir, "hs_rank_history_optimization_path_pure_full.npz"),
+        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+        plot_iters=_qfim_history_plot_iterations(sample_iters),
+        layers=np.asarray(layer_list, dtype=NP_INT_DTYPE),
+        representation=np.asarray("pure_full"),
+        **{f"L{int(L)}_rank": arr for L, arr in hs_rank_history_pure.items()},
+        **{f"L{int(L)}_eigs": arr for L, arr in hs_eigs_history_pure.items()},
+        **{f"L{int(L)}_rank_threshold": arr for L, arr in hs_thresh_history_pure.items()},
     )
 
     (

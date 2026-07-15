@@ -897,6 +897,51 @@ def make_reduced0123_hs_matrix_fn_for_layer_sequential(
     )
 
 
+def make_reduced01234_qfim_matrix_fn_for_layer_sequential(
+    num_layers: int,
+    *,
+    jvp_chunk: int = RED_JVP_CHUNK,
+):
+    """Mixed-state QFIM retaining the center ancilla qubit 4."""
+    @jax.jit
+    def rho_sub_fn(theta: jnp.ndarray) -> jnp.ndarray:
+        return _hermitian(
+            rho_keep_sequential_dpqc(theta, num_layers=num_layers)
+        )
+
+    return make_mixed_state_qfim_fn(
+        rho_sub_fn, eig_sum_eps=EIG_SUM_EPS, jvp_chunk=jvp_chunk
+    )
+
+
+def make_reduced01234_hs_matrix_fn_for_layer_sequential(
+    num_layers: int,
+    *,
+    jvp_chunk: int = RED_JVP_CHUNK,
+):
+    """HS tangent Gram retaining the center ancilla qubit 4."""
+    @jax.jit
+    def rho_sub_fn(theta: jnp.ndarray) -> jnp.ndarray:
+        return _hermitian(
+            rho_keep_sequential_dpqc(theta, num_layers=num_layers)
+        )
+
+    return make_hilbert_schmidt_metric_fn(rho_sub_fn, jvp_chunk=jvp_chunk)
+
+
+def make_reduced01234_rho_rank_fn_for_layer_sequential(num_layers: int):
+    @jax.jit
+    def rho_rank(theta: jnp.ndarray) -> jnp.ndarray:
+        rho5 = _hermitian(
+            rho_keep_sequential_dpqc(theta, num_layers=num_layers)
+        )
+        evals = jnp.clip(jnp.linalg.eigvalsh(rho5), a_min=0.0)
+        threshold = jnp.asarray(QFIM_EFFECTIVE_RANK_THRESHOLD, dtype=evals.dtype)
+        return jnp.sum(evals > threshold)
+
+    return rho_rank
+
+
 def make_reduced0123_rho_rank_fn_for_layer_sequential(num_layers: int):
     @jax.jit
     def rho_rank_reduced0123(theta: jnp.ndarray) -> jnp.ndarray:
@@ -965,11 +1010,21 @@ qfim_rho_rank_reduced_0123_by_layer = {}
 
 qfim_eigsum_reduced_0123_by_layer = {}
 qfim_abs_entry_sum_reduced_0123_by_layer = {}
+qfim_rank_reduced_01234_by_layer = {}
+qfim_eigs_reduced_01234_by_layer = {}
+qfim_rho_rank_reduced_01234_by_layer = {}
+qfim_eigsum_reduced_01234_by_layer = {}
+qfim_abs_entry_sum_reduced_01234_by_layer = {}
 hs_rank_reduced_0123_by_layer = {}
 hs_eigs_reduced_0123_by_layer = {}
 hs_rho_rank_reduced_0123_by_layer = {}
 hs_eigsum_reduced_0123_by_layer = {}
 hs_abs_entry_sum_reduced_0123_by_layer = {}
+hs_rank_reduced_01234_by_layer = {}
+hs_eigs_reduced_01234_by_layer = {}
+hs_rho_rank_reduced_01234_by_layer = {}
+hs_eigsum_reduced_01234_by_layer = {}
+hs_abs_entry_sum_reduced_01234_by_layer = {}
 ortk_rank_by_layer = {}
 ortk_effective_rank_by_layer = {}
 ortk_eigs_by_layer = {}
@@ -1009,12 +1064,18 @@ for L in tqdm(
     red4_rho_rank_fn = make_reduced0123_rho_rank_fn_for_layer_sequential(
         num_layers=L,
     )
+    red5_qfim_fn = make_reduced01234_qfim_matrix_fn_for_layer_sequential(
+        num_layers=L, jvp_chunk=RED_JVP_CHUNK
+    )
+    red5_rho_rank_fn = make_reduced01234_rho_rank_fn_for_layer_sequential(L)
 
     rr4_list = []
     eigs4_list = []
     rho_rank4_list = []
     eigsum4_list = []
     abs_entry_sum4_list = []
+    rr5_list, eigs5_list, rho_rank5_list = [], [], []
+    eigsum5_list, abs_entry_sum5_list = [], []
 
     for s in tqdm(
         range(NUM_QFIM_SAMPLES),
@@ -1039,6 +1100,16 @@ for L in tqdm(
         eigsum4_list.append(NP_REAL_DTYPE(np.sum(evals4_np)))
         abs_entry_sum4_list.append(NP_REAL_DTYPE(np.sum(np.abs(F4_np))))
 
+        F5 = red5_qfim_fn(th)
+        evals5_desc = psd_eigvals_desc(F5)
+        evals5_np = jax_to_np(evals5_desc, dtype=NP_REAL_DTYPE)
+        F5_np = jax_to_np(F5, dtype=NP_REAL_DTYPE)
+        rr5_list.append(int(jax.device_get(effective_rank_from_eigvals(evals5_desc))))
+        eigs5_list.append(evals5_np)
+        rho_rank5_list.append(int(jax.device_get(red5_rho_rank_fn(th))))
+        eigsum5_list.append(NP_REAL_DTYPE(np.sum(evals5_np)))
+        abs_entry_sum5_list.append(NP_REAL_DTYPE(np.sum(np.abs(F5_np))))
+
     qfim_rank_reduced_0123_by_layer[L] = np.asarray(
         rr4_list,
         dtype=NP_INT_DTYPE,
@@ -1060,10 +1131,18 @@ for L in tqdm(
         abs_entry_sum4_list,
         dtype=NP_REAL_DTYPE,
     )
+    qfim_rank_reduced_01234_by_layer[L] = np.asarray(rr5_list, dtype=NP_INT_DTYPE)
+    qfim_eigs_reduced_01234_by_layer[L] = np.stack(eigs5_list, axis=0)
+    qfim_rho_rank_reduced_01234_by_layer[L] = np.asarray(rho_rank5_list, dtype=NP_INT_DTYPE)
+    qfim_eigsum_reduced_01234_by_layer[L] = np.asarray(eigsum5_list, dtype=NP_REAL_DTYPE)
+    qfim_abs_entry_sum_reduced_01234_by_layer[L] = np.asarray(abs_entry_sum5_list, dtype=NP_REAL_DTYPE)
 
     red4_hs_fn = make_reduced0123_hs_matrix_fn_for_layer_sequential(
         num_layers=L,
         jvp_chunk=RED_JVP_CHUNK,
+    )
+    red5_hs_fn = make_reduced01234_hs_matrix_fn_for_layer_sequential(
+        num_layers=L, jvp_chunk=RED_JVP_CHUNK
     )
 
     hs_rank_list = []
@@ -1071,6 +1150,8 @@ for L in tqdm(
     hs_rho_rank_list = []
     hs_eigsum_list = []
     hs_abs_entry_sum_list = []
+    hs_rank5_list, hs_eigs5_list, hs_rho_rank5_list = [], [], []
+    hs_eigsum5_list, hs_abs_entry_sum5_list = [], []
 
     for s in tqdm(
         range(NUM_QFIM_SAMPLES),
@@ -1094,6 +1175,16 @@ for L in tqdm(
         hs_eigsum_list.append(NP_REAL_DTYPE(np.sum(hs_evals_np)))
         hs_abs_entry_sum_list.append(NP_REAL_DTYPE(np.sum(np.abs(G4_np))))
 
+        G5 = red5_hs_fn(th)
+        hs_evals5_desc = psd_eigvals_desc(G5)
+        hs_evals5_np = jax_to_np(hs_evals5_desc, dtype=NP_REAL_DTYPE)
+        G5_np = jax_to_np(G5, dtype=NP_REAL_DTYPE)
+        hs_rank5_list.append(int(jax.device_get(effective_rank_from_eigvals(hs_evals5_desc))))
+        hs_eigs5_list.append(hs_evals5_np)
+        hs_rho_rank5_list.append(int(jax.device_get(red5_rho_rank_fn(th))))
+        hs_eigsum5_list.append(NP_REAL_DTYPE(np.sum(hs_evals5_np)))
+        hs_abs_entry_sum5_list.append(NP_REAL_DTYPE(np.sum(np.abs(G5_np))))
+
     hs_rank_reduced_0123_by_layer[L] = np.asarray(
         hs_rank_list,
         dtype=NP_INT_DTYPE,
@@ -1111,6 +1202,11 @@ for L in tqdm(
         hs_abs_entry_sum_list,
         dtype=NP_REAL_DTYPE,
     )
+    hs_rank_reduced_01234_by_layer[L] = np.asarray(hs_rank5_list, dtype=NP_INT_DTYPE)
+    hs_eigs_reduced_01234_by_layer[L] = np.stack(hs_eigs5_list, axis=0)
+    hs_rho_rank_reduced_01234_by_layer[L] = np.asarray(hs_rho_rank5_list, dtype=NP_INT_DTYPE)
+    hs_eigsum_reduced_01234_by_layer[L] = np.asarray(hs_eigsum5_list, dtype=NP_REAL_DTYPE)
+    hs_abs_entry_sum_reduced_01234_by_layer[L] = np.asarray(hs_abs_entry_sum5_list, dtype=NP_REAL_DTYPE)
 
     ortk_eigvals_fn = make_observable_tangent_kernel_eigvals_fn_for_layer(
         num_layers=L,
@@ -1226,6 +1322,20 @@ save_npz_result(
     **_layer_arrays_for_npz(qfim_abs_entry_sum_reduced_0123_by_layer, "abs_entry_sum"),
 )
 
+save_npz_result(
+    os.path.join(qfim_results_dir, "qfim_random_points_keep01234.npz"),
+    h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+    num_qfim_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
+    qfim_sample_seed_base=np.asarray(QFIM_SAMPLE_SEED_BASE, dtype=NP_INT_DTYPE),
+    representation=np.asarray("reduced_keep_01234"),
+    layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
+    **_layer_arrays_for_npz(qfim_rank_reduced_01234_by_layer, "rank"),
+    **_layer_arrays_for_npz(qfim_eigs_reduced_01234_by_layer, "eigs_desc"),
+    **_layer_arrays_for_npz(qfim_rho_rank_reduced_01234_by_layer, "rho_rank"),
+    **_layer_arrays_for_npz(qfim_eigsum_reduced_01234_by_layer, "trace"),
+    **_layer_arrays_for_npz(qfim_abs_entry_sum_reduced_01234_by_layer, "abs_entry_sum"),
+)
+
 hs_random_points_result_path = os.path.join(
     hs_results_dir,
     f"hs_random_points_{keep_key}.npz",
@@ -1245,6 +1355,19 @@ save_npz_result(
     **_layer_arrays_for_npz(hs_rho_rank_reduced_0123_by_layer, "rho_rank"),
     **_layer_arrays_for_npz(hs_eigsum_reduced_0123_by_layer, "trace"),
     **_layer_arrays_for_npz(hs_abs_entry_sum_reduced_0123_by_layer, "abs_entry_sum"),
+)
+
+save_npz_result(
+    os.path.join(hs_results_dir, "hs_random_points_keep01234.npz"),
+    h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+    num_hs_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
+    representation=np.asarray("reduced_keep_01234"),
+    layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
+    **_layer_arrays_for_npz(hs_rank_reduced_01234_by_layer, "rank"),
+    **_layer_arrays_for_npz(hs_eigs_reduced_01234_by_layer, "eigs_desc"),
+    **_layer_arrays_for_npz(hs_rho_rank_reduced_01234_by_layer, "rho_rank"),
+    **_layer_arrays_for_npz(hs_eigsum_reduced_01234_by_layer, "trace"),
+    **_layer_arrays_for_npz(hs_abs_entry_sum_reduced_01234_by_layer, "abs_entry_sum"),
 )
 
 ortk_random_points_result_path = os.path.join(
@@ -1459,11 +1582,15 @@ def make_qfim_eigvals_fn_for_layer(
     num_layers: int,
     *,
     jvp_chunk: int = RED_JVP_CHUNK,
+    representation: str = "reduced_0123",
 ):
-    qfim_fn = make_reduced0123_qfim_matrix_fn_for_layer_sequential(
-        num_layers=num_layers,
-        jvp_chunk=jvp_chunk,
-    )
+    if representation == "reduced_01234":
+        factory = make_reduced01234_qfim_matrix_fn_for_layer_sequential
+    elif representation == "reduced_0123":
+        factory = make_reduced0123_qfim_matrix_fn_for_layer_sequential
+    else:
+        raise ValueError("Unknown representation.")
+    qfim_fn = factory(num_layers=num_layers, jvp_chunk=jvp_chunk)
 
     @jax.jit
     def qfim_eigvals(theta: jnp.ndarray):
@@ -1494,11 +1621,15 @@ def make_hs_eigvals_fn_for_layer(
     num_layers: int,
     *,
     jvp_chunk: int = RED_JVP_CHUNK,
+    representation: str = "reduced_0123",
 ):
-    hs_fn = make_reduced0123_hs_matrix_fn_for_layer_sequential(
-        num_layers=num_layers,
-        jvp_chunk=jvp_chunk,
-    )
+    if representation == "reduced_01234":
+        factory = make_reduced01234_hs_matrix_fn_for_layer_sequential
+    elif representation == "reduced_0123":
+        factory = make_reduced0123_hs_matrix_fn_for_layer_sequential
+    else:
+        raise ValueError("Unknown representation.")
+    hs_fn = factory(num_layers=num_layers, jvp_chunk=jvp_chunk)
 
     @jax.jit
     def hs_eigvals(theta: jnp.ndarray):
@@ -1552,6 +1683,7 @@ def compute_qfim_rank_history_by_layer(
     *,
     jvp_chunk: int = RED_JVP_CHUNK,
     return_eigs: bool = False,
+    representation: str = "reduced_0123",
 ):
     rank_history_by_layer = {}
     eigs_history_by_layer = {}
@@ -1577,8 +1709,8 @@ def compute_qfim_rank_history_by_layer(
 
         num_runs, num_times, num_params = theta_samples.shape
         eigvals_fn = make_qfim_eigvals_fn_for_layer(
-            num_layers=int(L),
-            jvp_chunk=jvp_chunk,
+            num_layers=int(L), jvp_chunk=jvp_chunk,
+            representation=representation,
         )
 
         ranks_L = np.full((num_runs, num_times), np.nan, dtype=NP_REAL_DTYPE)
@@ -1716,6 +1848,7 @@ def compute_hs_rank_history_by_layer(
     *,
     jvp_chunk: int = RED_JVP_CHUNK,
     return_eigs: bool = False,
+    representation: str = "reduced_0123",
 ):
     rank_history_by_layer = {}
     eigs_history_by_layer = {}
@@ -1741,8 +1874,8 @@ def compute_hs_rank_history_by_layer(
 
         num_runs, num_times, num_params = theta_samples.shape
         eigvals_fn = make_hs_eigvals_fn_for_layer(
-            num_layers=int(L),
-            jvp_chunk=jvp_chunk,
+            num_layers=int(L), jvp_chunk=jvp_chunk,
+            representation=representation,
         )
 
         ranks_L = np.full((num_runs, num_times), np.nan, dtype=NP_REAL_DTYPE)
@@ -1914,6 +2047,30 @@ save_npz_result(
     },
 )
 
+qfim_rank_history_01234, qfim_eigs_history_01234 = compute_qfim_rank_history_by_layer(
+    theta_sample_traces_by_layer, vqe_layer_list,
+    jvp_chunk=RED_JVP_CHUNK, return_eigs=True,
+    representation="reduced_01234",
+)
+save_npz_result(
+    os.path.join(qfim_results_dir, "qfim_rank_history_optimization_path_keep01234.npz"),
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    **{f"L{int(L)}": arr for L, arr in qfim_rank_history_01234.items()},
+)
+save_npz_result(
+    os.path.join(qfim_results_dir, "qfim_eigs_history_optimization_path_keep01234.npz"),
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    **{f"L{int(L)}": arr for L, arr in qfim_eigs_history_01234.items()},
+)
+save_npz_result(
+    os.path.join(qfim_results_dir, "qfim_trace_history_optimization_path_keep01234.npz"),
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    **{f"L{int(L)}": np.sum(arr, axis=2) for L, arr in qfim_eigs_history_01234.items()},
+)
+
 hs_rank_history_by_layer, hs_eigs_history_optimization_path_by_layer = (
     compute_hs_rank_history_by_layer(
         theta_sample_traces_by_layer,
@@ -1971,6 +2128,30 @@ save_npz_result(
         f"L{int(L)}": arr
         for L, arr in hs_trace_history_optimization_path_by_layer.items()
     },
+)
+
+hs_rank_history_01234, hs_eigs_history_01234 = compute_hs_rank_history_by_layer(
+    theta_sample_traces_by_layer, vqe_layer_list,
+    jvp_chunk=RED_JVP_CHUNK, return_eigs=True,
+    representation="reduced_01234",
+)
+save_npz_result(
+    os.path.join(hs_results_dir, "hs_rank_history_optimization_path_keep01234.npz"),
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    **{f"L{int(L)}": arr for L, arr in hs_rank_history_01234.items()},
+)
+save_npz_result(
+    os.path.join(hs_results_dir, "hs_eigs_history_optimization_path_keep01234.npz"),
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    **{f"L{int(L)}": arr for L, arr in hs_eigs_history_01234.items()},
+)
+save_npz_result(
+    os.path.join(hs_results_dir, "hs_trace_history_optimization_path_keep01234.npz"),
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    **{f"L{int(L)}": np.sum(arr, axis=2) for L, arr in hs_eigs_history_01234.items()},
 )
 
 (

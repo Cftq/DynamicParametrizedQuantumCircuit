@@ -25,7 +25,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import jax.numpy as jnp
-from matplotlib.patches import Patch
 
 import config_overparam as cfg
 import unitary_pqc_overparam_compute as upqc
@@ -34,6 +33,16 @@ from dpqc_overparam_common import load_npz_result, save_circuit_matplotlib_png
 
 NP_REAL_DTYPE = np.float64
 NP_INT_DTYPE = np.int64
+
+# Shared visual language: metric determines color; statistic determines line.
+METRIC_COLORS = {
+    "qfim": "#0072B2",
+    "hs": "#D55E00",
+    "ortk": "#009E73",
+    "hessian": "#CC79A7",
+    "energy": "#E69F00",
+}
+STATISTIC_LINESTYLES = {"min": ":", "mean": "-", "max": "--"}
 
 
 def _load_required_result(path: str) -> dict:
@@ -65,7 +74,8 @@ def _plot_spectral_count_by_layer(
     if not layers or not thresholds:
         return
 
-    fig, ax = plt.subplots(figsize=(8.0, 4.8))
+    upqc.new_prx_figure(width="double")
+    fig, ax = plt.gcf(), plt.gca()
     cmap = matplotlib.colormaps.get_cmap("viridis")
     for idx, threshold in enumerate(thresholds):
         means, sems = [], []
@@ -80,7 +90,8 @@ def _plot_spectral_count_by_layer(
             means.append(np.mean(counts))
             sems.append(0.0 if counts.size < 2 else np.std(counts, ddof=1) / np.sqrt(counts.size))
         ax.errorbar(
-            layers, means, yerr=sems, marker="o", linewidth=1.2,
+            layers, means, yerr=sems, marker="o",
+            linestyle=STATISTIC_LINESTYLES["mean"], linewidth=1.2,
             capsize=3.0, color=cmap(idx / max(len(thresholds) - 1, 1)),
             label=rf"threshold $\geq {threshold:g}$",
         )
@@ -92,8 +103,7 @@ def _plot_spectral_count_by_layer(
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0))
     Path(outpath).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(outpath, bbox_inches="tight")
-    plt.close(fig)
+    upqc.save_current_figure(outpath, outside_legend=True)
 
 
 def _load_unitary_vqe_results() -> dict:
@@ -288,6 +298,22 @@ def _load_random_qfim_results() -> None:
             dtype=NP_REAL_DTYPE,
         )
 
+    hs_pure_result = _load_required_result(
+        os.path.join(upqc.hs_results_dir, "hs_random_points_pure_full.npz")
+    )
+    upqc.hs_rank_pure_by_layer = {
+        L: np.asarray(hs_pure_result[f"L{L}_rank"], dtype=NP_INT_DTYPE)
+        for L in layers
+    }
+    upqc.hs_eigs_pure_by_layer = {
+        L: np.asarray(hs_pure_result[f"L{L}_eigs_desc"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
+    upqc.hs_thresh_pure_by_layer = {
+        L: np.asarray(hs_pure_result[f"L{L}_rank_threshold"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
+
     ortk_path = os.path.join(
         upqc.ortk_results_dir,
         "ortk_random_points.npz",
@@ -382,12 +408,6 @@ def _plot_random_qfim_results() -> None:
     os.makedirs(hessian_rank_random_dir, exist_ok=True)
 
     for L in upqc.layer_list:
-        upqc._save_qfim_eigs_violinplot_by_index(
-            upqc.qfim_eigs_reduced_by_layer[L],
-            title=rf"QFIM eigenvalues at {upqc.NUM_QFIM_SAMPLES} random points (L={L})",
-            outpath=os.path.join(qfim_eigs_reduced_0123_dir, f"L{L}_reduced_0123.pdf"),
-            rank_thresholds=upqc.qfim_thresh_reduced_by_layer[L],
-        )
         upqc.plot_style.save_eigenvalue_histograms_by_trial(
             upqc.qfim_eigs_reduced_by_layer[L],
             outdir=os.path.join(
@@ -403,14 +423,7 @@ def _plot_random_qfim_results() -> None:
             context_label="random point",
             condition_tag="reduced0123",
             condition_label="reduced keep=(0,1,2,3)",
-            color="C0",
-        )
-        upqc._save_qfim_eigs_violinplot_by_index(
-            upqc.hs_eigs_reduced_by_layer[L],
-            title=rf"HS tangent Gram eigenvalues at {upqc.NUM_QFIM_SAMPLES} random points (L={L})",
-            outpath=os.path.join(hs_eigs_reduced_0123_dir, f"L{L}_reduced_0123.pdf"),
-            rank_thresholds=upqc.hs_thresh_reduced_by_layer[L],
-            ylabel="HS tangent Gram eigenvalue",
+            color=METRIC_COLORS["qfim"],
         )
         upqc.plot_style.save_eigenvalue_histograms_by_trial(
             upqc.hs_eigs_reduced_by_layer[L],
@@ -427,20 +440,21 @@ def _plot_random_qfim_results() -> None:
             context_label="random point",
             condition_tag="reduced0123",
             condition_label="reduced keep=(0,1,2,3)",
-            color="C3",
+            color=METRIC_COLORS["hs"],
         )
-        upqc._save_qfim_eigs_violinplot_by_index(
-            upqc.ortk_eigs_by_layer[L],
-            title=(
-                rf"Observable-Relevant Tangent Kernel eigenvalues at "
-                rf"{upqc.NUM_QFIM_SAMPLES} random points (L={L})"
+        upqc.plot_style.save_eigenvalue_histograms_by_trial(
+            upqc.hs_eigs_pure_by_layer[L],
+            outdir=os.path.join(
+                upqc.hs_eigs_dir, "pure_full", "histograms", "random_points", f"L{L}"
             ),
-            outpath=os.path.join(ortk_eigs_dir, f"L{L}.pdf"),
-            rank_thresholds=np.asarray(
-                [upqc.ORTK_RANK_THRESHOLD],
-                dtype=NP_REAL_DTYPE,
-            ),
-            ylabel="ORTK eigenvalue",
+            matrix_tag="unitary_pqc_hs_gram",
+            matrix_label="HS tangent Gram",
+            num_layers=L,
+            context_tag="random",
+            context_label="random point",
+            condition_tag="pure_full",
+            condition_label="pure full state",
+            color=METRIC_COLORS["hs"],
         )
         if upqc.hessian_eigs_by_layer.get(L) is not None:
             upqc._save_signed_eigs_scatterplot_by_index(
@@ -463,15 +477,9 @@ def _plot_random_qfim_results() -> None:
                 num_layers=L,
                 context_tag="random",
                 context_label="random point",
-                color="C6",
+                color=METRIC_COLORS["hessian"],
             )
         if upqc.qfim_eigs_pure_by_layer[L] is not None:
-            upqc._save_qfim_eigs_violinplot_by_index(
-                upqc.qfim_eigs_pure_by_layer[L],
-                title=rf"QFIM eigenvalues (Pure full-state) at {upqc.NUM_QFIM_SAMPLES} random points (L={L})",
-                outpath=os.path.join(qfim_eigs_pure_dir, f"L{L}_pure_full.pdf"),
-                rank_thresholds=upqc.qfim_thresh_pure_by_layer[L],
-            )
             upqc.plot_style.save_eigenvalue_histograms_by_trial(
                 upqc.qfim_eigs_pure_by_layer[L],
                 outdir=os.path.join(
@@ -487,144 +495,13 @@ def _plot_random_qfim_results() -> None:
                 context_label="random point",
                 condition_tag="pure_full",
                 condition_label="pure full state",
-                color="C0",
+                color=METRIC_COLORS["qfim"],
             )
-
-    x_all = np.array(upqc.layer_list, dtype=NP_REAL_DTYPE)
-    x_labels = [str(L) for L in upqc.layer_list]
-    dx = 0.25
-    violin_w_rank = 0.20
-    num_layers = len(upqc.layer_list)
-
-    upqc.new_prx_figure(width="double")
-    ax = plt.gca()
-
-    for idx, L in enumerate(upqc.layer_list):
-        color = upqc.cmap(idx / num_layers)
-        red_dataset = upqc._make_violin_ready(
-            upqc.qfim_rank_reduced_by_layer[L],
-            ensure_positive=False,
-            tiny=1e-12,
-        )
-        vp_red = plt.violinplot(
-            [red_dataset],
-            positions=[float(L) + dx],
-            widths=violin_w_rank,
-            showmeans=False,
-            showmedians=True,
-            showextrema=True,
-        )
-        upqc._style_violin(
-            vp_red,
-            facecolor=color,
-            edgecolor=color,
-            alpha=0.12,
-            linewidth=1.0,
-            hatch="///",
-            linecolor=color,
-            linealpha=0.7,
-        )
-
-    pure_layers = [
-        L for L in upqc.layer_list
-        if upqc.qfim_rank_pure_by_layer[L] is not None
-    ]
-    for L in pure_layers:
-        idx = upqc.layer_list.index(L)
-        color = upqc.cmap(idx / num_layers)
-        pure_dataset = upqc._make_violin_ready(
-            upqc.qfim_rank_pure_by_layer[L],
-            ensure_positive=False,
-            tiny=1e-12,
-        )
-        vp_pure = plt.violinplot(
-            [pure_dataset],
-            positions=[float(L) - dx],
-            widths=violin_w_rank,
-            showmeans=False,
-            showmedians=True,
-            showextrema=True,
-        )
-        upqc._style_violin(
-            vp_pure,
-            facecolor=color,
-            edgecolor=color,
-            alpha=0.20,
-            linewidth=1.0,
-            linecolor=color,
-            linealpha=0.7,
-        )
-
-    ax.set_xticks(x_all)
-    ax.set_xticklabels(x_labels)
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(r"QFIM effective rank $(\lambda_k > 10^{-12})$")
-    upqc.set_prx_title(
-        rf"QFIM rank at {upqc.NUM_QFIM_SAMPLES} random points",
-        ax=ax,
-    )
-    ax.grid(True, axis="y", alpha=0.3)
-    type_handles = [
-        Patch(facecolor="white", edgecolor="black", label="Pure(full)"),
-        Patch(
-            facecolor="white",
-            edgecolor="black",
-            hatch="///",
-            label=f"Reduced (keep={upqc.KEEP_WIRES})",
-        ),
-    ]
-    ax.legend(handles=type_handles, loc="best", frameon=True, framealpha=0.9)
-    upqc.save_current_figure(
-        os.path.join(qfim_rank_random_dir, "qfim_rank_violinplot_random_points.pdf"),
-        outside_legend=False,
-    )
-
-    upqc.new_prx_figure(width="double")
-    ax = plt.gca()
-
-    for idx, L in enumerate(upqc.layer_list):
-        color = upqc.cmap(idx / num_layers)
-        hs_dataset = upqc._make_violin_ready(
-            upqc.hs_rank_reduced_by_layer[L],
-            ensure_positive=False,
-            tiny=1e-12,
-        )
-        vp_hs = plt.violinplot(
-            [hs_dataset],
-            positions=[float(L)],
-            widths=violin_w_rank,
-            showmeans=False,
-            showmedians=True,
-            showextrema=True,
-        )
-        upqc._style_violin(
-            vp_hs,
-            facecolor=color,
-            edgecolor=color,
-            alpha=0.18,
-            linewidth=1.0,
-            linecolor=color,
-            linealpha=0.7,
-        )
-
-    ax.set_xticks(x_all)
-    ax.set_xticklabels(x_labels)
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(r"HS effective rank $(\lambda_k > 10^{-12})$")
-    upqc.set_prx_title(
-        rf"HS tangent Gram rank at {upqc.NUM_QFIM_SAMPLES} random points",
-        ax=ax,
-    )
-    ax.grid(True, axis="y", alpha=0.3)
-    upqc.save_current_figure(
-        os.path.join(hs_rank_random_dir, "hs_rank_violinplot_random_points_reduced_0123.pdf"),
-        outside_legend=False,
-    )
 
     upqc.plot_qfim_rank_max_by_layer(
         upqc.qfim_rank_pure_by_layer,
         upqc.layer_list,
-        color="C0",
+        color=METRIC_COLORS["qfim"],
         title=rf"Maximum pure full-state QFIM rank at {upqc.NUM_QFIM_SAMPLES} random points",
         ylabel=r"Maximum QFIM effective rank $(\lambda_k > 10^{-12})$",
         outpath=os.path.join(qfim_rank_random_dir, "qfim_rank_max_random_points_pure_full.pdf"),
@@ -634,7 +511,7 @@ def _plot_random_qfim_results() -> None:
     upqc.plot_qfim_rank_max_by_layer(
         upqc.qfim_rank_reduced_by_layer,
         upqc.layer_list,
-        color="C0",
+        color=METRIC_COLORS["qfim"],
         title=rf"Maximum QFIM rank at {upqc.NUM_QFIM_SAMPLES} random points",
         ylabel=r"Maximum QFIM effective rank $(\lambda_k > 10^{-12})$",
         outpath=os.path.join(qfim_rank_random_dir, "qfim_rank_max_random_points_reduced_0123.pdf"),
@@ -644,92 +521,29 @@ def _plot_random_qfim_results() -> None:
     upqc.plot_qfim_rank_max_by_layer(
         upqc.hs_rank_reduced_by_layer,
         upqc.layer_list,
-        color="C3",
+        color=METRIC_COLORS["hs"],
         title=rf"Maximum HS tangent Gram rank at {upqc.NUM_QFIM_SAMPLES} random points",
         ylabel=r"Maximum HS effective rank $(\lambda_k > 10^{-12})$",
         outpath=os.path.join(hs_rank_random_dir, "hs_rank_max_random_points_reduced_0123.pdf"),
         marker="D",
         lw=1.0,
     )
-
-    upqc.plot_scalar_violin_by_layer(
-        upqc.ortk_rank_by_layer,
+    upqc.plot_qfim_rank_max_by_layer(
+        upqc.hs_rank_pure_by_layer,
         upqc.layer_list,
-        title=(
-            rf"Observable-Relevant Tangent Kernel rank at "
-            rf"{upqc.NUM_QFIM_SAMPLES} random points"
-        ),
-        ylabel="ORTK rank",
-        outpath=os.path.join(
-            ortk_rank_random_dir,
-            "ortk_rank_violinplot_random_points.pdf",
-        ),
-        integer_y_axis=True,
-    )
-    upqc.plot_scalar_violin_by_layer(
-        upqc.ortk_effective_rank_by_layer,
-        upqc.layer_list,
-        title=(
-            rf"Observable-Relevant Tangent Kernel participation effective "
-            rf"rank at {upqc.NUM_QFIM_SAMPLES} random points"
-        ),
-        ylabel="ORTK participation effective rank",
-        outpath=os.path.join(
-            ortk_effective_rank_random_dir,
-            "ortk_effective_rank_violinplot_random_points.pdf",
-        ),
-        integer_y_axis=False,
+        color=METRIC_COLORS["hs"],
+        title=rf"Maximum pure-full HS tangent Gram rank at {upqc.NUM_QFIM_SAMPLES} random points",
+        ylabel="Maximum pure-full HS effective rank",
+        outpath=os.path.join(hs_rank_random_dir, "hs_rank_max_random_points_pure_full.pdf"),
+        marker="D",
+        lw=1.0,
     )
 
     if upqc.hessian_rank_by_layer:
-        upqc.new_prx_figure(width="double")
-        ax = plt.gca()
-
-        for idx, L in enumerate(upqc.layer_list):
-            if upqc.hessian_rank_by_layer.get(L) is None:
-                continue
-            color = upqc.cmap(idx / num_layers)
-            hessian_dataset = upqc._make_violin_ready(
-                upqc.hessian_rank_by_layer[L],
-                ensure_positive=False,
-                tiny=1e-12,
-            )
-            vp_hessian = plt.violinplot(
-                [hessian_dataset],
-                positions=[float(L)],
-                widths=violin_w_rank,
-                showmeans=False,
-                showmedians=True,
-                showextrema=True,
-            )
-            upqc._style_violin(
-                vp_hessian,
-                facecolor=color,
-                edgecolor=color,
-                alpha=0.18,
-                linewidth=1.0,
-                linecolor=color,
-                linealpha=0.7,
-            )
-
-        ax.set_xticks(x_all)
-        ax.set_xticklabels(x_labels)
-        ax.set_xlabel("Number of Layers")
-        ax.set_ylabel(r"Hessian rank $(|\eta_k| > 10^{-12})$")
-        upqc.set_prx_title(
-            rf"Energy Hessian rank at {upqc.NUM_QFIM_SAMPLES} random points",
-            ax=ax,
-        )
-        ax.grid(True, axis="y", alpha=0.3)
-        upqc.save_current_figure(
-            os.path.join(hessian_rank_random_dir, "hessian_rank_violinplot_random_points.pdf"),
-            outside_legend=False,
-        )
-
         upqc.plot_qfim_rank_max_by_layer(
             upqc.hessian_rank_by_layer,
             upqc.layer_list,
-            color="C6",
+            color=METRIC_COLORS["hessian"],
             title=rf"Maximum energy Hessian rank at {upqc.NUM_QFIM_SAMPLES} random points",
             ylabel=r"Maximum Hessian rank $(|\eta_k| > 10^{-12})$",
             outpath=os.path.join(hessian_rank_random_dir, "hessian_rank_max_random_points.pdf"),
@@ -744,10 +558,16 @@ def _plot_random_qfim_results() -> None:
          "Pure-state QFIM", "qfim_pure", False),
         (upqc.hs_eigs_reduced_by_layer, upqc.hs_eigs_reduced_0123_dir,
          "HS tangent Gram", "hs", False),
+        (upqc.hs_eigs_pure_by_layer, os.path.join(upqc.hs_eigs_dir, "pure_full"),
+         "Pure-full HS tangent Gram", "hs_pure", False),
         (upqc.ortk_eigs_by_layer, upqc.ortk_eigs_dir,
          "ORTK", "ortk", False),
+        (upqc.ortk_eigs_by_layer, os.path.join(upqc.ortk_eigs_dir, "pure_full"),
+         "Pure-full ORTK (identical to reduced)", "ortk_pure", False),
         (upqc.hessian_eigs_by_layer, upqc.hessian_eigs_dir,
          "Absolute Hessian", "hessian_abs", True),
+        (upqc.hessian_eigs_by_layer, os.path.join(upqc.hessian_eigs_dir, "pure_full"),
+         "Pure-full absolute Hessian (identical to reduced)", "hessian_abs_pure", True),
     )
     for eigs, directory, label, tag, use_abs in spectral_random_summaries:
         if not eigs or not any(value is not None for value in eigs.values()):
@@ -778,6 +598,20 @@ def _load_optimization_path_results() -> None:
         L: np.asarray(qfim_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
         for L in layers
     }
+    qfim_pure_result = _load_required_result(
+        os.path.join(
+            upqc.qfim_results_dir,
+            "qfim_rank_history_optimization_path_pure_full.npz",
+        )
+    )
+    upqc.qfim_rank_history_pure_by_layer = {
+        L: np.asarray(qfim_pure_result[f"L{L}_rank"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
+    upqc.qfim_eigs_history_pure_by_layer = {
+        L: np.asarray(qfim_pure_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
 
     hs_rank_path = os.path.join(
         upqc.hs_results_dir,
@@ -790,6 +624,20 @@ def _load_optimization_path_results() -> None:
     }
     upqc.hs_eigs_history_by_layer = {
         L: np.asarray(hs_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
+    hs_pure_result = _load_required_result(
+        os.path.join(
+            upqc.hs_results_dir,
+            "hs_rank_history_optimization_path_pure_full.npz",
+        )
+    )
+    upqc.hs_rank_history_pure_by_layer = {
+        L: np.asarray(hs_pure_result[f"L{L}_rank"], dtype=NP_REAL_DTYPE)
+        for L in layers
+    }
+    upqc.hs_eigs_history_pure_by_layer = {
+        L: np.asarray(hs_pure_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
         for L in layers
     }
 
@@ -922,9 +770,18 @@ def _plot_optimization_path_results() -> None:
         ),
         matrix_tag="unitary_pqc_qfim",
         matrix_label="QFIM",
-        color="C0",
+        color=METRIC_COLORS["qfim"],
         condition_tag="reduced0123",
         condition_label="reduced keep=(0,1,2,3)",
+    )
+    save_optimization_path_eigenvalue_histograms(
+        upqc.qfim_eigs_history_pure_by_layer,
+        outdir=os.path.join(upqc.qfim_eigs_dir, "optimization_path_pure_full"),
+        matrix_tag="unitary_pqc_qfim",
+        matrix_label="QFIM",
+        color=METRIC_COLORS["qfim"],
+        condition_tag="pure_full",
+        condition_label="pure full state",
     )
     save_optimization_path_eigenvalue_histograms(
         upqc.hs_eigs_history_by_layer,
@@ -934,9 +791,18 @@ def _plot_optimization_path_results() -> None:
         ),
         matrix_tag="unitary_pqc_hs_gram",
         matrix_label="HS tangent Gram",
-        color="C3",
+        color=METRIC_COLORS["hs"],
         condition_tag="reduced0123",
         condition_label="reduced keep=(0,1,2,3)",
+    )
+    save_optimization_path_eigenvalue_histograms(
+        upqc.hs_eigs_history_pure_by_layer,
+        outdir=os.path.join(upqc.hs_eigs_dir, "optimization_path_pure_full"),
+        matrix_tag="unitary_pqc_hs_gram",
+        matrix_label="HS tangent Gram",
+        color=METRIC_COLORS["hs"],
+        condition_tag="pure_full",
+        condition_label="pure full state",
     )
     save_optimization_path_eigenvalue_histograms(
         upqc.ortk_eigs_history_by_layer,
@@ -946,7 +812,7 @@ def _plot_optimization_path_results() -> None:
         ),
         matrix_tag="unitary_pqc_ortk",
         matrix_label="Observable-Relevant Tangent Kernel",
-        color="C2",
+        color=METRIC_COLORS["ortk"],
     )
     if upqc.hessian_eigs_history_by_layer:
         save_optimization_path_eigenvalue_histograms(
@@ -957,15 +823,23 @@ def _plot_optimization_path_results() -> None:
             ),
             matrix_tag="unitary_pqc_energy_hessian",
             matrix_label="Energy Hessian",
-            color="C6",
+            color=METRIC_COLORS["hessian"],
         )
 
     spectral_path_summaries = (
         (upqc.qfim_eigs_history_by_layer, upqc.qfim_eigs_dir, "QFIM", "qfim", False),
+        (upqc.qfim_eigs_history_pure_by_layer, os.path.join(upqc.qfim_eigs_dir, "pure_full"),
+         "Pure-full QFIM", "qfim_pure", False),
         (upqc.hs_eigs_history_by_layer, upqc.hs_eigs_dir, "HS tangent Gram", "hs", False),
+        (upqc.hs_eigs_history_pure_by_layer, os.path.join(upqc.hs_eigs_dir, "pure_full"),
+         "Pure-full HS tangent Gram", "hs_pure", False),
         (upqc.ortk_eigs_history_by_layer, upqc.ortk_eigs_dir, "ORTK", "ortk", False),
+        (upqc.ortk_eigs_history_by_layer, os.path.join(upqc.ortk_eigs_dir, "pure_full"),
+         "Pure-full ORTK (identical to reduced)", "ortk_pure", False),
         (upqc.hessian_eigs_history_by_layer, upqc.hessian_eigs_dir,
          "Absolute Hessian", "hessian_abs", True),
+        (upqc.hessian_eigs_history_by_layer, os.path.join(upqc.hessian_eigs_dir, "pure_full"),
+         "Pure-full absolute Hessian (identical to reduced)", "hessian_abs_pure", True),
     )
     for eigs, directory, label, tag, use_abs in spectral_path_summaries:
         if not eigs:
@@ -979,6 +853,32 @@ def _plot_optimization_path_results() -> None:
                 f"{tag}_eigcount_threshold_overlay_optimization_path_by_layer.pdf",
             ),
             use_absolute_values=use_abs,
+        )
+
+    for metric_tag, metric_label, histories, base_dir in (
+        ("qfim", "Pure-full QFIM", upqc.qfim_rank_history_pure_by_layer,
+         os.path.join(upqc.qfim_rank_optimization_path_dir, "pure_full")),
+        ("hs", "Pure-full HS tangent Gram", upqc.hs_rank_history_pure_by_layer,
+         os.path.join(upqc.hs_rank_optimization_path_dir, "pure_full")),
+    ):
+        os.makedirs(base_dir, exist_ok=True)
+        upqc.plot_qfim_rank_history_mean_by_layer(
+            histories,
+            upqc.layer_list,
+            upqc.sample_iters,
+            title=f"Mean {metric_label} effective rank along optimization path",
+            outpath=os.path.join(base_dir, f"{metric_tag}_rank_mean_history_optimization_path_pure_full.pdf"),
+            ylabel=f"Mean {metric_label} effective rank",
+            cmap=upqc.cmap,
+        )
+        upqc.plot_qfim_rank_history_min_by_layer(
+            histories,
+            upqc.layer_list,
+            upqc.sample_iters,
+            title=f"Minimum {metric_label} effective rank along optimization path",
+            outpath=os.path.join(base_dir, f"{metric_tag}_rank_min_history_optimization_path_pure_full.pdf"),
+            ylabel=f"Minimum {metric_label} effective rank",
+            cmap=upqc.cmap,
         )
 
     upqc.plot_qfim_rank_history_mean_by_layer(
@@ -1199,6 +1099,36 @@ def _plot_optimization_path_results() -> None:
                     ),
                     ylabel="Energy Hessian eigenvalue",
                 )
+
+    # ORTK and energy Hessian are invariant under tracing out qubit 4 for the
+    # current system-only observables.  Emit explicitly labelled pure-full
+    # views so both representations have a complete, symmetric figure tree.
+    equivalent_histories = (
+        ("ortk_rank", "ORTK rank", upqc.ortk_rank_history_by_layer, True),
+        ("ortk_effective_rank", "ORTK participation effective rank",
+         upqc.ortk_effective_rank_history_by_layer, False),
+        ("ortk_trace", "ORTK trace", upqc.ortk_trace_history_by_layer, False),
+        ("hessian_rank", "Energy Hessian rank",
+         upqc.hessian_rank_history_by_layer, True),
+    )
+    for tag, label, histories, integer_axis in equivalent_histories:
+        if not histories:
+            continue
+        output_dir = os.path.join(upqc.figures_dir, tag.split("_")[0], "pure_full")
+        os.makedirs(output_dir, exist_ok=True)
+        upqc.plot_qfim_rank_history_mean_by_layer(
+            histories, upqc.layer_list, upqc.sample_iters,
+            title=f"Mean pure-full {label} along optimization path",
+            outpath=os.path.join(output_dir, f"{tag}_mean_optimization_path_pure_full.pdf"),
+            ylabel=f"Mean {label}", cmap=upqc.cmap,
+        )
+        upqc.plot_qfim_rank_history_min_by_layer(
+            histories, upqc.layer_list, upqc.sample_iters,
+            title=f"Minimum pure-full {label} along optimization path",
+            outpath=os.path.join(output_dir, f"{tag}_min_optimization_path_pure_full.pdf"),
+            ylabel=f"Minimum {label}", cmap=upqc.cmap,
+            integer_y_axis=integer_axis,
+        )
 
 
 def _plot_qfim_grad_alignment_results() -> None:

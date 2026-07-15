@@ -46,6 +46,16 @@ NP_REAL_DTYPE = np.float64
 NP_COMPLEX_DTYPE = np.complex128
 NP_INT_DTYPE = np.int64
 
+# Shared visual language: metric determines color; statistic determines line.
+METRIC_COLORS = {
+    "qfim": "#0072B2",
+    "hs": "#D55E00",
+    "ortk": "#009E73",
+    "hessian": "#CC79A7",
+    "energy": "#E69F00",
+}
+STATISTIC_LINESTYLES = {"min": ":", "mean": "-", "max": "--"}
+
 def run_dpqc_overparam_visualize() -> None:
     import jax
     import jax.numpy as jnp
@@ -578,9 +588,15 @@ def run_dpqc_overparam_visualize() -> None:
     hs_fig_dir = os.path.join(figures_dir, "hs")
     ortk_fig_dir = os.path.join(figures_dir, "ortk")
     hessian_fig_dir = os.path.join(figures_dir, "hessian")
-    qfim_eigs_dir = os.path.join(qfim_fig_dir, "eigs")
-    qfim_eigs_dir_red4 = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
-    qfim_rank_dir = os.path.join(qfim_fig_dir, "rank")
+    qfim_keep0123_fig_dir = os.path.join(qfim_fig_dir, "reduced_keep_0123")
+    qfim_keep01234_fig_dir = os.path.join(qfim_fig_dir, "reduced_keep_01234")
+    hs_keep0123_fig_dir = os.path.join(hs_fig_dir, "reduced_keep_0123")
+    hs_keep01234_fig_dir = os.path.join(hs_fig_dir, "reduced_keep_01234")
+    ortk_keep01234_fig_dir = os.path.join(ortk_fig_dir, "reduced_keep_01234")
+    hessian_keep01234_fig_dir = os.path.join(hessian_fig_dir, "reduced_keep_01234")
+    qfim_eigs_dir = os.path.join(qfim_keep0123_fig_dir, "eigs")
+    qfim_eigs_dir_red4 = qfim_eigs_dir
+    qfim_rank_dir = os.path.join(qfim_keep0123_fig_dir, "rank")
     qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
     qfim_rank_optimization_path_dir = os.path.join(qfim_rank_dir, "optimization_path")
     qfim_rank_optimization_path_mean_dir = os.path.join(
@@ -591,7 +607,7 @@ def run_dpqc_overparam_visualize() -> None:
         qfim_rank_optimization_path_dir,
         "min",
     )
-    qfim_eigcount_dir = os.path.join(qfim_fig_dir, "eigcount")
+    qfim_eigcount_dir = os.path.join(qfim_keep0123_fig_dir, "eigcount")
     qfim_eigcount_random_dir = os.path.join(qfim_eigcount_dir, "random_points")
     qfim_eigcount_optimization_path_dir = os.path.join(
         qfim_eigcount_dir,
@@ -605,9 +621,9 @@ def run_dpqc_overparam_visualize() -> None:
         qfim_eigcount_optimization_path_dir,
         "min",
     )
-    hs_eigs_dir = os.path.join(hs_fig_dir, "eigs")
-    hs_eigs_dir_red4 = os.path.join(hs_eigs_dir, "reduced_keep_0123")
-    hs_rank_dir = os.path.join(hs_fig_dir, "rank")
+    hs_eigs_dir = os.path.join(hs_keep0123_fig_dir, "eigs")
+    hs_eigs_dir_red4 = hs_eigs_dir
+    hs_rank_dir = os.path.join(hs_keep0123_fig_dir, "rank")
     hs_rank_random_dir = os.path.join(hs_rank_dir, "random_points")
     hs_rank_optimization_path_dir = os.path.join(hs_rank_dir, "optimization_path")
     hs_rank_optimization_path_mean_dir = os.path.join(
@@ -618,7 +634,7 @@ def run_dpqc_overparam_visualize() -> None:
         hs_rank_optimization_path_dir,
         "min",
     )
-    hs_eigcount_dir = os.path.join(hs_fig_dir, "eigcount")
+    hs_eigcount_dir = os.path.join(hs_keep0123_fig_dir, "eigcount")
     hs_eigcount_random_dir = os.path.join(hs_eigcount_dir, "random_points")
     hs_eigcount_optimization_path_dir = os.path.join(
         hs_eigcount_dir,
@@ -632,8 +648,8 @@ def run_dpqc_overparam_visualize() -> None:
         hs_eigcount_optimization_path_dir,
         "min",
     )
-    ortk_eigs_dir = os.path.join(ortk_fig_dir, "eigs")
-    ortk_rank_dir = os.path.join(ortk_fig_dir, "rank")
+    ortk_eigs_dir = os.path.join(ortk_keep01234_fig_dir, "eigs")
+    ortk_rank_dir = os.path.join(ortk_keep01234_fig_dir, "rank")
     ortk_rank_random_dir = os.path.join(ortk_rank_dir, "random_points")
     ortk_rank_optimization_path_dir = os.path.join(
         ortk_rank_dir,
@@ -647,7 +663,7 @@ def run_dpqc_overparam_visualize() -> None:
         ortk_rank_optimization_path_dir,
         "min",
     )
-    ortk_effective_rank_dir = os.path.join(ortk_fig_dir, "effective_rank")
+    ortk_effective_rank_dir = os.path.join(ortk_keep01234_fig_dir, "effective_rank")
     ortk_effective_rank_random_dir = os.path.join(
         ortk_effective_rank_dir,
         "random_points",
@@ -664,8 +680,8 @@ def run_dpqc_overparam_visualize() -> None:
         ortk_effective_rank_optimization_path_dir,
         "min",
     )
-    hessian_eigs_dir = os.path.join(hessian_fig_dir, "eigs")
-    hessian_rank_dir = os.path.join(hessian_fig_dir, "rank")
+    hessian_eigs_dir = os.path.join(hessian_keep01234_fig_dir, "eigs")
+    hessian_rank_dir = os.path.join(hessian_keep01234_fig_dir, "rank")
     hessian_rank_random_dir = os.path.join(hessian_rank_dir, "random_points")
     hessian_rank_optimization_path_dir = os.path.join(
         hessian_rank_dir,
@@ -679,39 +695,39 @@ def run_dpqc_overparam_visualize() -> None:
         hessian_rank_optimization_path_dir,
         "min",
     )
-    qfim_trace_dir = os.path.join(qfim_fig_dir, "trace")
+    qfim_trace_dir = os.path.join(qfim_keep0123_fig_dir, "trace")
     qfim_trace_random_dir = os.path.join(qfim_trace_dir, "random_points")
     qfim_trace_optimization_path_dir = os.path.join(
         qfim_trace_dir,
         "optimization_path",
     )
-    qfim_abs_entry_sum_dir = os.path.join(qfim_fig_dir, "abs_entry_sum")
+    qfim_abs_entry_sum_dir = os.path.join(qfim_keep0123_fig_dir, "abs_entry_sum")
     qfim_abs_entry_sum_random_dir = os.path.join(
         qfim_abs_entry_sum_dir,
         "random_points",
     )
-    hs_trace_dir = os.path.join(hs_fig_dir, "trace")
+    hs_trace_dir = os.path.join(hs_keep0123_fig_dir, "trace")
     hs_trace_random_dir = os.path.join(hs_trace_dir, "random_points")
     hs_trace_optimization_path_dir = os.path.join(
         hs_trace_dir,
         "optimization_path",
     )
-    hs_abs_entry_sum_dir = os.path.join(hs_fig_dir, "abs_entry_sum")
+    hs_abs_entry_sum_dir = os.path.join(hs_keep0123_fig_dir, "abs_entry_sum")
     hs_abs_entry_sum_random_dir = os.path.join(
         hs_abs_entry_sum_dir,
         "random_points",
     )
-    ortk_trace_dir = os.path.join(ortk_fig_dir, "trace")
+    ortk_trace_dir = os.path.join(ortk_keep01234_fig_dir, "trace")
     ortk_trace_optimization_path_dir = os.path.join(
         ortk_trace_dir,
         "optimization_path",
     )
-    hessian_trace_dir = os.path.join(hessian_fig_dir, "trace")
+    hessian_trace_dir = os.path.join(hessian_keep01234_fig_dir, "trace")
     hessian_trace_optimization_path_dir = os.path.join(
         hessian_trace_dir,
         "optimization_path",
     )
-    hessian_abs_eigsum_dir = os.path.join(hessian_fig_dir, "abs_eigsum")
+    hessian_abs_eigsum_dir = os.path.join(hessian_keep01234_fig_dir, "abs_eigsum")
     hessian_abs_eigsum_random_dir = os.path.join(
         hessian_abs_eigsum_dir,
         "random_points",
@@ -1726,7 +1742,7 @@ def run_dpqc_overparam_visualize() -> None:
             context_label="random point",
             condition_tag="reduced0123",
             condition_label="reduced keep=(0,1,2,3)",
-            color="C0",
+            color=METRIC_COLORS["qfim"],
         )
 
     for L in hs_layer_list:
@@ -1754,7 +1770,7 @@ def run_dpqc_overparam_visualize() -> None:
             context_label="random point",
             condition_tag="reduced0123",
             condition_label="reduced keep=(0,1,2,3)",
-            color="C3",
+            color=METRIC_COLORS["hs"],
         )
 
     for L in ortk_layer_list:
@@ -1790,7 +1806,7 @@ def run_dpqc_overparam_visualize() -> None:
             num_layers=L,
             context_tag="random",
             context_label="random point",
-            color="C6",
+            color=METRIC_COLORS["hessian"],
         )
 
 
@@ -1984,7 +2000,7 @@ def run_dpqc_overparam_visualize() -> None:
             x,
             min_ranks,
             marker=marker_min,
-            linestyle="-",
+            linestyle=STATISTIC_LINESTYLES["min"],
             linewidth=lw,
             markersize=6.0,
             color=color_min,
@@ -1995,7 +2011,7 @@ def run_dpqc_overparam_visualize() -> None:
             x,
             max_ranks,
             marker=marker_max,
-            linestyle="-",
+            linestyle=STATISTIC_LINESTYLES["max"],
             linewidth=lw,
             markersize=6.0,
             color=color_max,
@@ -2007,7 +2023,7 @@ def run_dpqc_overparam_visualize() -> None:
             mean_ranks,
             yerr=sem_ranks,
             marker=marker_mean,
-            linestyle="-",
+            linestyle=STATISTIC_LINESTYLES["mean"],
             linewidth=lw,
             markersize=5.0,
             capsize=4.0,
@@ -2102,7 +2118,7 @@ def run_dpqc_overparam_visualize() -> None:
             x,
             min_ranks,
             marker=marker_min,
-            linestyle="-",
+            linestyle=STATISTIC_LINESTYLES["min"],
             linewidth=lw,
             markersize=6.0,
             color=color_min,
@@ -2112,7 +2128,7 @@ def run_dpqc_overparam_visualize() -> None:
             x,
             max_ranks,
             marker=marker_max,
-            linestyle="-",
+            linestyle=STATISTIC_LINESTYLES["max"],
             linewidth=lw,
             markersize=6.0,
             color=color_max,
@@ -2123,7 +2139,7 @@ def run_dpqc_overparam_visualize() -> None:
             mean_ranks,
             yerr=sem_ranks,
             marker=marker_mean,
-            linestyle="-",
+            linestyle=STATISTIC_LINESTYLES["mean"],
             linewidth=lw,
             markersize=5.0,
             capsize=4.0,
@@ -2576,7 +2592,7 @@ def run_dpqc_overparam_visualize() -> None:
             x,
             max_values,
             marker=marker_max,
-            linestyle="-",
+            linestyle=STATISTIC_LINESTYLES["max"],
             linewidth=lw,
             markersize=6.0,
             color=color_max,
@@ -2588,7 +2604,7 @@ def run_dpqc_overparam_visualize() -> None:
             mean_values,
             yerr=sem_values,
             marker=marker_mean,
-            linestyle="-",
+            linestyle=STATISTIC_LINESTYLES["mean"],
             linewidth=lw,
             markersize=5.0,
             capsize=4.0,
@@ -2797,7 +2813,7 @@ def run_dpqc_overparam_visualize() -> None:
                 means[finite_mask],
                 yerr=sems[finite_mask],
                 marker="o",
-                linestyle="-",
+                linestyle=STATISTIC_LINESTYLES["mean"],
                 linewidth=1.2,
                 markersize=4.5,
                 capsize=3.0,
@@ -2907,7 +2923,7 @@ def run_dpqc_overparam_visualize() -> None:
                 x[finite_mask],
                 min_ranks[finite_mask],
                 marker="o",
-                linestyle="-",
+                linestyle=STATISTIC_LINESTYLES["min"],
                 linewidth=1.2,
                 markersize=4.5,
                 color=color,
@@ -2974,7 +2990,8 @@ def run_dpqc_overparam_visualize() -> None:
             reduced = np.where(counts > 0, reduced, np.nan)
             mask = np.isfinite(reduced)
             if np.any(mask):
-                ax.plot(x[mask], reduced[mask], marker="o", linewidth=1.2,
+                ax.plot(x[mask], reduced[mask], marker="o",
+                        linestyle=STATISTIC_LINESTYLES[statistic], linewidth=1.2,
                         markersize=4.5, color=cmap(layer_idx / max(len(valid_layers) - 1, 1)),
                         label=f"L={L}")
         ax.set(xlabel="Iterations", ylabel=ylabel, title=title)
@@ -3044,7 +3061,7 @@ def run_dpqc_overparam_visualize() -> None:
                 means[finite_mask],
                 yerr=sems[finite_mask],
                 marker="o",
-                linestyle="-",
+                linestyle=STATISTIC_LINESTYLES["mean"],
                 linewidth=1.2,
                 markersize=4.5,
                 capsize=3.0,
@@ -3767,7 +3784,7 @@ def run_dpqc_overparam_visualize() -> None:
                     iteration=iteration_int,
                     condition_tag="reduced0123",
                     condition_label="reduced keep=(0,1,2,3)",
-                    color="C3" if "Gram" in quantity_name else "C0",
+                    color=(METRIC_COLORS["hs"] if "Gram" in quantity_name else METRIC_COLORS["qfim"]),
                 )
                 saved_paths.append(outpath)
 
@@ -3869,7 +3886,7 @@ def run_dpqc_overparam_visualize() -> None:
                     context_tag="opt_path",
                     context_label="optimization path",
                     iteration=iteration_int,
-                    color="C6",
+                    color=METRIC_COLORS["hessian"],
                 )
                 saved_paths.append(outpath)
 
@@ -4388,7 +4405,7 @@ def run_dpqc_overparam_visualize() -> None:
         title: str,
         outpath: str,
         label: str,
-        color="C0",
+        color=METRIC_COLORS["qfim"],
         marker: str = "o",
         log_scale: bool = False,
     ):
@@ -4486,7 +4503,7 @@ def run_dpqc_overparam_visualize() -> None:
             f"qfim_abs_entry_sum_mean_errorbar_{keep_key}.pdf",
         ),
         label=r"$\sum_{i,j} |F_{ij}|$",
-        color="C1",
+        color=METRIC_COLORS["qfim"],
         marker="s",
         log_scale=False,
     )
@@ -4505,7 +4522,7 @@ def run_dpqc_overparam_visualize() -> None:
                 f"hs_trace_mean_errorbar_optimization_path_{keep_key}.pdf",
             ),
             label=r"$\sum_k \mu_k(G)$",
-            color="C3",
+            color=METRIC_COLORS["hs"],
             marker="o",
             log_scale=False,
         )
@@ -4524,7 +4541,7 @@ def run_dpqc_overparam_visualize() -> None:
                 f"hs_abs_entry_sum_mean_errorbar_{keep_key}.pdf",
             ),
             label=r"$\sum_{i,j} |G_{ij}|$",
-            color="C4",
+            color=METRIC_COLORS["hs"],
             marker="s",
             log_scale=False,
         )
@@ -4540,7 +4557,7 @@ def run_dpqc_overparam_visualize() -> None:
                 "hessian_trace_mean_errorbar_optimization_path.pdf",
             ),
             label=r"$\sum_k \eta_k(\nabla^2 E)$",
-            color="C6",
+            color=METRIC_COLORS["hessian"],
             marker="o",
             log_scale=False,
         )
@@ -4558,7 +4575,7 @@ def run_dpqc_overparam_visualize() -> None:
                 "hessian_abs_eigsum_mean_errorbar_optimization_path.pdf",
             ),
             label=r"$\sum_k |\eta_k(\nabla^2 E)|$",
-            color="C7",
+            color=METRIC_COLORS["hessian"],
             marker="s",
             log_scale=False,
         )
@@ -4577,9 +4594,120 @@ def run_dpqc_overparam_visualize() -> None:
                 "hessian_abs_eigsum_mean_errorbar_random_points.pdf",
             ),
             label=r"$\sum_k |\eta_k(\nabla^2 E)|$",
-            color="C8",
+            color=METRIC_COLORS["hessian"],
             marker="s",
             log_scale=False,
+        )
+
+    # ============================================================
+    # Reduced keep=(0,1,2,3,4): retain the center ancilla qubit 4.
+    # ============================================================
+    keep5_key = "keep01234"
+    keep5_label = "Reduced (0,1,2,3,4)"
+    qfim5_random = load_npz_result(
+        os.path.join(qfim_results_dir, "qfim_random_points_keep01234.npz")
+    )
+    hs5_random = load_npz_result(
+        os.path.join(hs_results_dir, "hs_random_points_keep01234.npz")
+    )
+    keep5_layers = [int(L) for L in np.asarray(qfim5_random["layers"], dtype=NP_INT_DTYPE)]
+    qfim5_rank = _load_layer_arrays_from_npz(qfim5_random, keep5_layers, "rank", dtype=NP_REAL_DTYPE)
+    qfim5_eigs = _load_layer_arrays_from_npz(qfim5_random, keep5_layers, "eigs_desc", dtype=NP_REAL_DTYPE)
+    qfim5_trace = _load_layer_arrays_from_npz(qfim5_random, keep5_layers, "trace", dtype=NP_REAL_DTYPE)
+    qfim5_abs = _load_layer_arrays_from_npz(qfim5_random, keep5_layers, "abs_entry_sum", dtype=NP_REAL_DTYPE)
+    hs5_rank = _load_layer_arrays_from_npz(hs5_random, keep5_layers, "rank", dtype=NP_REAL_DTYPE)
+    hs5_eigs = _load_layer_arrays_from_npz(hs5_random, keep5_layers, "eigs_desc", dtype=NP_REAL_DTYPE)
+
+    for metric, eigs, representation_dir, symbol in (
+        ("QFIM", qfim5_eigs, qfim_keep01234_fig_dir, r"\lambda_i"),
+        ("HS tangent Gram", hs5_eigs, hs_keep01234_fig_dir, r"\mu_i"),
+    ):
+        eigs_output_dir = os.path.join(representation_dir, "eigs")
+        eigcount_output_dir = os.path.join(
+            representation_dir, "eigcount", "random_points"
+        )
+        os.makedirs(eigs_output_dir, exist_ok=True)
+        os.makedirs(eigcount_output_dir, exist_ok=True)
+        plot_qfim_random_eigcount_threshold_overlay(
+            eigs, keep5_layers, QFIM_PATH_EIGCOUNT_THRESHOLDS,
+            title=f"{metric} eigenvalue count at random points by threshold ({keep5_label})",
+            outpath=os.path.join(eigcount_output_dir, f"{metric.lower().split()[0]}_eigcount_random_{keep5_key}.pdf"),
+            ylabel=f"Mean {metric} eigenvalue count", eigenvalue_symbol=symbol, cmap=cmap,
+        )
+        for L in keep5_layers:
+            save_eigenvalue_histograms_by_trial(
+                eigs[L], outdir=os.path.join(eigs_output_dir, "histograms", "random_points", f"L{L}"),
+                matrix_tag=f"dpqc_{metric.lower().replace(' ', '_')}", matrix_label=metric,
+                num_layers=L, context_tag="random", context_label="random point",
+                condition_tag="reduced01234", condition_label="reduced keep=(0,1,2,3,4)",
+                color=METRIC_COLORS["qfim" if metric == "QFIM" else "hs"],
+            )
+
+    for tag, label, values, color in (
+        ("qfim_rank", "QFIM effective rank", qfim5_rank, METRIC_COLORS["qfim"]),
+        ("qfim_trace", "QFIM trace", qfim5_trace, METRIC_COLORS["qfim"]),
+        ("qfim_abs_entry_sum", "QFIM elementwise absolute sum", qfim5_abs, METRIC_COLORS["qfim"]),
+        ("hs_rank", "HS effective rank", hs5_rank, METRIC_COLORS["hs"]),
+    ):
+        representation_dir = (
+            qfim_keep01234_fig_dir if tag.startswith("qfim") else hs_keep01234_fig_dir
+        )
+        if tag.endswith("rank"):
+            category = "rank"
+        elif "trace" in tag:
+            category = "trace"
+        else:
+            category = "abs_entry_sum"
+        random_output_dir = os.path.join(
+            representation_dir, category, "random_points"
+        )
+        os.makedirs(random_output_dir, exist_ok=True)
+        plot_metric_mean_sem_by_layer(
+            values, keep5_layers, ylabel=f"Mean {label}",
+            title=f"{label} mean ± SEM vs Layers ({keep5_label})",
+            outpath=os.path.join(random_output_dir, f"{tag}_mean_random_{keep5_key}.pdf"),
+            label=label, color=color,
+        )
+
+    for metric, result_dir, color in (
+        ("qfim", qfim_results_dir, METRIC_COLORS["qfim"]),
+        ("hs", hs_results_dir, METRIC_COLORS["hs"]),
+    ):
+        rank_result = load_npz_result(os.path.join(result_dir, f"{metric}_rank_history_optimization_path_keep01234.npz"))
+        eigs_result = load_npz_result(os.path.join(result_dir, f"{metric}_eigs_history_optimization_path_keep01234.npz"))
+        trace_result = load_npz_result(os.path.join(result_dir, f"{metric}_trace_history_optimization_path_keep01234.npz"))
+        layers5 = [int(L) for L in np.asarray(rank_result["layers"], dtype=NP_INT_DTYPE)]
+        iters5 = np.asarray(rank_result["sample_iters"], dtype=NP_INT_DTYPE)
+        ranks5 = _load_layer_arrays_from_npz(rank_result, layers5, suffix=None, dtype=NP_REAL_DTYPE)
+        eigs5 = _load_layer_arrays_from_npz(eigs_result, layers5, suffix=None, dtype=NP_REAL_DTYPE)
+        traces5 = _load_layer_arrays_from_npz(trace_result, layers5, suffix=None, dtype=NP_REAL_DTYPE)
+        representation_dir = qfim_keep01234_fig_dir if metric == "qfim" else hs_keep01234_fig_dir
+        rank_path_dir = os.path.join(representation_dir, "rank", "optimization_path")
+        rank_mean_dir = os.path.join(rank_path_dir, "mean")
+        rank_min_dir = os.path.join(rank_path_dir, "min")
+        trace_path_dir = os.path.join(representation_dir, "trace", "optimization_path")
+        eigcount_path_dir = os.path.join(representation_dir, "eigcount", "optimization_path")
+        for output_dir in (rank_mean_dir, rank_min_dir, trace_path_dir, eigcount_path_dir):
+            os.makedirs(output_dir, exist_ok=True)
+        plot_qfim_rank_history_mean_by_layer(
+            ranks5, layers5, iters5, title=f"Mean {metric.upper()} rank along optimization path ({keep5_label})",
+            outpath=os.path.join(rank_mean_dir, f"{metric}_rank_mean_{keep5_key}.pdf"), cmap=cmap,
+        )
+        plot_qfim_rank_history_min_by_layer(
+            ranks5, layers5, iters5, title=f"Minimum {metric.upper()} rank along optimization path ({keep5_label})",
+            outpath=os.path.join(rank_min_dir, f"{metric}_rank_min_{keep5_key}.pdf"), cmap=cmap,
+        )
+        plot_qfim_trace_history_mean_by_layer(
+            traces5, layers5, iters5,
+            title=f"Mean {metric.upper()} trace along optimization path ({keep5_label})",
+            outpath=os.path.join(trace_path_dir, f"{metric}_trace_mean_{keep5_key}.pdf"),
+            ylabel=f"Mean {metric.upper()} trace", cmap=cmap,
+        )
+        plot_qfim_random_eigcount_threshold_overlay(
+            eigs5, layers5, QFIM_PATH_EIGCOUNT_THRESHOLDS,
+            title=f"{metric.upper()} eigenvalue count along optimization path ({keep5_label})",
+            outpath=os.path.join(eigcount_path_dir, f"{metric}_eigcount_by_layer_{keep5_key}.pdf"),
+            ylabel=f"Mean {metric.upper()} eigenvalue count", cmap=cmap,
         )
 
     # ============================================================
@@ -4642,7 +4770,7 @@ def run_dpqc_overparam_visualize() -> None:
     # in log-scale visualization.
     # ============================================================
 
-    qfim_grad_align_dir = os.path.join(qfim_fig_dir, "grad_alignment")
+    qfim_grad_align_dir = os.path.join(qfim_keep0123_fig_dir, "grad_alignment")
     qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "grad_alignment")
     os.makedirs(qfim_grad_align_dir, exist_ok=True)
     os.makedirs(qfim_grad_align_results_dir, exist_ok=True)
