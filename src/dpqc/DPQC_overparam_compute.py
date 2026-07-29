@@ -308,6 +308,9 @@ def save_circuit_matplotlib_png(
         style=drawer_style,
     )
 
+    outdir = os.path.dirname(os.path.abspath(outpath))
+    os.makedirs(outdir, exist_ok=True)
+
     root, _ = os.path.splitext(outpath)
 
     if save_png:
