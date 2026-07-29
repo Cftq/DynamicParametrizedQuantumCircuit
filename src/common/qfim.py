@@ -6,17 +6,35 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-import config_overparam as cfg
+if __package__:
+    from .dpqc_precision import COMPLEX_DTYPE, REAL_DTYPE, ensure_jax_x64
+else:
+    from dpqc_precision import COMPLEX_DTYPE, REAL_DTYPE, ensure_jax_x64
+
+ensure_jax_x64()
+
+if __package__:
+    from . import config_overparam as cfg
+else:
+    import config_overparam as cfg
 import jax
 import jax.numpy as jnp
 
 
-REAL_DTYPE = jnp.float64
-COMPLEX_DTYPE = jnp.complex128
+def _precision_array(value) -> jnp.ndarray:
+    """Promote floating/complex inputs to the project precision contract."""
+    ensure_jax_x64()
+    array = jnp.asarray(value)
+    if jnp.issubdtype(array.dtype, jnp.complexfloating):
+        return array.astype(COMPLEX_DTYPE)
+    if jnp.issubdtype(array.dtype, jnp.floating):
+        return array.astype(REAL_DTYPE)
+    return array
 
 
 def hermitian(a: jnp.ndarray) -> jnp.ndarray:
     """Return the Hermitian part of a square matrix."""
+    a = _precision_array(a)
     return 0.5 * (a + jnp.conjugate(a.T))
 
 
@@ -42,6 +60,7 @@ def mask_psd_eigvals_for_rank(
     threshold: Optional[float] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Zero eigenvalues that are not counted in the effective rank."""
+    evals = _precision_array(evals)
     if threshold is None:
         return _mask_psd_eigvals_default_threshold(evals)
 
@@ -56,6 +75,7 @@ def rank_threshold_from_eigvals(
     threshold: Optional[float] = None,
 ) -> jnp.ndarray:
     """Return the effective-rank threshold for a PSD eigenvalue array."""
+    evals = _precision_array(evals)
     return _threshold_value(evals, threshold)
 
 
@@ -65,6 +85,7 @@ def effective_rank_from_eigvals(
     threshold: Optional[float] = None,
 ) -> jnp.ndarray:
     """Count PSD eigenvalues strictly larger than the effective-rank threshold."""
+    evals = _precision_array(evals)
     threshold_jnp = rank_threshold_from_eigvals(evals, threshold=threshold)
     return jnp.sum(evals > threshold_jnp)
 
@@ -73,13 +94,45 @@ def participation_effective_rank_from_eigvals(
     evals: jnp.ndarray,
     *,
     eps: float = 1e-30,
+    axis=None,
 ) -> jnp.ndarray:
-    """Return the participation effective rank (sum lambda)^2 / sum lambda^2."""
+    """Return ``(sum lambda)^2 / sum(lambda^2)`` for a PSD spectrum."""
+    evals = _precision_array(evals)
     evals = jnp.clip(jnp.real(evals), a_min=0.0)
-    eigsum = jnp.sum(evals)
-    eigsq_sum = jnp.sum(evals**2)
+    eigsum = jnp.sum(evals, axis=axis)
+    eigsq_sum = jnp.sum(evals**2, axis=axis)
     eps_jnp = jnp.asarray(eps, dtype=evals.dtype)
-    return jnp.where(eigsq_sum > eps_jnp, (eigsum**2) / eigsq_sum, 0.0)
+    safe_eigsq_sum = jnp.maximum(eigsq_sum, eps_jnp)
+    return jnp.where(
+        eigsq_sum > eps_jnp,
+        (eigsum**2) / safe_eigsq_sum,
+        0.0,
+    )
+
+
+def participation_effective_abs_rank_from_eigvals(
+    evals: jnp.ndarray,
+    *,
+    eps: float = 1e-30,
+    axis=None,
+) -> jnp.ndarray:
+    """Return participation rank for a signed spectrum using ``abs(evals)``.
+
+    This is the non-cancelling extension used for indefinite Hessians:
+
+        (sum |lambda|)^2 / sum |lambda|^2.
+    """
+    evals = _precision_array(evals)
+    weights = jnp.abs(jnp.real(evals))
+    weight_sum = jnp.sum(weights, axis=axis)
+    weight_sq_sum = jnp.sum(weights**2, axis=axis)
+    eps_jnp = jnp.asarray(eps, dtype=weights.dtype)
+    safe_weight_sq_sum = jnp.maximum(weight_sq_sum, eps_jnp)
+    return jnp.where(
+        weight_sq_sum > eps_jnp,
+        (weight_sum**2) / safe_weight_sq_sum,
+        0.0,
+    )
 
 
 def psd_eigvals(matrix: jnp.ndarray) -> jnp.ndarray:
@@ -104,6 +157,7 @@ def effective_abs_rank_from_eigvals(
     threshold: Optional[float] = None,
 ) -> jnp.ndarray:
     """Count signed eigenvalues whose absolute value exceeds the threshold."""
+    evals = _precision_array(evals)
     threshold_jnp = rank_threshold_from_eigvals(evals, threshold=threshold)
     return jnp.sum(jnp.abs(evals) > threshold_jnp)
 
@@ -122,6 +176,8 @@ def pure_state_qfim_from_state_jacobian(
     jacobian: jnp.ndarray,
 ) -> jnp.ndarray:
     """Pure-state QFIM from |psi(theta)> and d|psi>/dtheta."""
+    psi = _precision_array(psi)
+    jacobian = _precision_array(jacobian)
     jtj = jnp.matmul(jnp.conjugate(jacobian).T, jacobian)
     b = jnp.matmul(jnp.conjugate(psi), jacobian)
     qfim_matrix = 4.0 * jnp.real(jtj - jnp.outer(jnp.conjugate(b), b))
@@ -130,13 +186,19 @@ def pure_state_qfim_from_state_jacobian(
 
 def make_pure_state_qfim_fn(psi_fn):
     """Create a pure-state QFIM function from a state-vector function."""
+    ensure_jax_x64()
     jac_psi = jax.jacfwd(psi_fn)
 
     @jax.jit
-    def qfim_pure(theta: jnp.ndarray) -> jnp.ndarray:
+    def qfim_pure_impl(theta: jnp.ndarray) -> jnp.ndarray:
         psi = psi_fn(theta)
         jacobian = jac_psi(theta)
         return pure_state_qfim_from_state_jacobian(psi, jacobian)
+
+    def qfim_pure(theta: jnp.ndarray) -> jnp.ndarray:
+        ensure_jax_x64()
+        theta = jnp.asarray(theta, dtype=REAL_DTYPE)
+        return qfim_pure_impl(theta)
 
     return qfim_pure
 
@@ -154,6 +216,12 @@ def mixed_state_qfim_from_rho_jvp(
 
     rho_jvp is the second return value of jax.linearize(rho_fn, theta).
     """
+    ensure_jax_x64()
+    theta = jnp.asarray(theta)
+    if theta.dtype != jnp.dtype(REAL_DTYPE):
+        raise TypeError(
+            "theta must use float64 before jax.linearize constructs rho_jvp."
+        )
     rho = hermitian(rho)
     evals, evecs = jnp.linalg.eigh(rho)
     evals = jnp.clip(evals, a_min=0.0)
@@ -213,6 +281,12 @@ def hilbert_schmidt_metric_from_rho_jvp(
     evaluates the equivalent Frobenius inner product
     Re Tr[(partial_i rho)^dagger (partial_j rho)] for numerical stability.
     """
+    ensure_jax_x64()
+    theta = jnp.asarray(theta)
+    if theta.dtype != jnp.dtype(REAL_DTYPE):
+        raise TypeError(
+            "theta must use float64 before jax.linearize constructs rho_jvp."
+        )
     rho = hermitian(rho)
     num_params = int(theta.shape[0])
     dim_vec = int(rho.shape[0] * rho.shape[1])
@@ -240,8 +314,11 @@ def make_mixed_state_qfim_fn(
     jvp_chunk: int,
 ):
     """Create a mixed-state SLD-QFIM function from rho(theta)."""
+    ensure_jax_x64()
 
     def qfim_mixed(theta: jnp.ndarray) -> jnp.ndarray:
+        ensure_jax_x64()
+        theta = jnp.asarray(theta, dtype=REAL_DTYPE)
         rho, rho_jvp = jax.linearize(rho_fn, theta)
         return mixed_state_qfim_from_rho_jvp(
             rho,
@@ -260,8 +337,11 @@ def make_hilbert_schmidt_metric_fn(
     jvp_chunk: int,
 ):
     """Create G_ij = Re Tr[(partial_i rho)(partial_j rho)]."""
+    ensure_jax_x64()
 
     def hs_metric(theta: jnp.ndarray) -> jnp.ndarray:
+        ensure_jax_x64()
+        theta = jnp.asarray(theta, dtype=REAL_DTYPE)
         rho, rho_jvp = jax.linearize(rho_fn, theta)
         return hilbert_schmidt_metric_from_rho_jvp(
             rho,

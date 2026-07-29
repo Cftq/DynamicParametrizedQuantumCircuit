@@ -1,278 +1,122 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # coding: utf-8
 """Shared plotting style and figure helpers for overparameterization scripts."""
 
 
-import configparser
 import os
-from pathlib import Path
 from typing import Optional
 
 import matplotlib
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 import numpy as np
 
 
 # ============================================================
-# APS / PRX-style figure settings loaded from plot.config
+# APS / PRX-style figure settings
 # ============================================================
-_PLOT_MODULE_DIR = Path(__file__).resolve().parent
-PLOT_CONFIG_PATH = _PLOT_MODULE_DIR / "plot.config"
-if not PLOT_CONFIG_PATH.exists():
-    PLOT_CONFIG_PATH = _PLOT_MODULE_DIR.parent / "plot.config"
-if not PLOT_CONFIG_PATH.exists():
-    PLOT_CONFIG_PATH = _PLOT_MODULE_DIR.parent.parent / "plot.config"
-
-_DEFAULT_PLOT_CONFIG = {
-    "figure": {
-        "width_default": "double",
-        "single_width_cm": "8.5",
-        "single_height_cm": "6.2",
-        "double_width_cm": "17.0",
-        "double_height_cm": "8.5",
-        "dpi": "600",
-        "display_dpi": "150",
-    },
-    "save": {
-        "numerical_png": "false",
-        "numerical_pdf": "true",
-        "circuit_png": "true",
-        "circuit_pdf": "false",
-        "pad_inches": "0.02",
-    },
-    "text": {
-        "show_titles": "false",
-        "show_redundant_layer_legends": "false",
-        "base_font_size": "10",
-        "title_font_size": "10",
-        "axis_label_font_size": "13",
-        "tick_label_font_size": "11",
-        "legend_font_size": "12",
-        "font_family": "serif",
-        "font_serif": "STIXGeneral, Times New Roman, DejaVu Serif",
-        "mathtext_fontset": "stix",
-    },
-    "axes": {
-        "linewidth": "0.6",
-        "labelpad": "2.5",
-        "unicode_minus": "false",
-        "tick_direction": "in",
-        "tick_top": "true",
-        "tick_right": "true",
-        "tick_pad": "2.0",
-        "tick_major_size": "3.0",
-        "tick_minor_size": "1.8",
-        "tick_major_width": "0.6",
-        "tick_minor_width": "0.5",
-        "margin_left": "0.14",
-        "margin_right": "0.03",
-        "margin_bottom": "0.17",
-        "margin_top": "0.04",
-        "outside_legend_margin_left": "0.14",
-        "outside_legend_margin_right": "0.28",
-        "outside_legend_margin_bottom": "0.17",
-        "outside_legend_margin_top": "0.04",
-    },
-    "lines": {
-        "linewidth": "1.0",
-        "markersize": "4.0",
-        "errorbar_capsize": "2.5",
-    },
-    "legend": {
-        "frameon": "false",
-        "handlelength": "1.4",
-        "handletextpad": "0.4",
-        "borderaxespad": "0.3",
-        "labelspacing": "0.25",
-        "columnspacing": "0.8",
-    },
-    "grid": {
-        "linewidth": "0.4",
-        "alpha": "0.25",
-    },
-}
-
-
-def _load_plot_config() -> configparser.ConfigParser:
-    config = configparser.ConfigParser()
-    config.read_dict(_DEFAULT_PLOT_CONFIG)
-    config.read(PLOT_CONFIG_PATH, encoding="utf-8")
-    return config
-
-
-_PLOT_CONFIG = _load_plot_config()
-
-
-def _cfg_str(section: str, key: str) -> str:
-    return _PLOT_CONFIG.get(section, key)
-
-
-def _cfg_float(section: str, key: str) -> float:
-    return _PLOT_CONFIG.getfloat(section, key)
-
-
-def _cfg_int(section: str, key: str) -> int:
-    return _PLOT_CONFIG.getint(section, key)
-
-
-def _cfg_bool(section: str, key: str) -> bool:
-    return _PLOT_CONFIG.getboolean(section, key)
-
-
-def _cfg_csv(section: str, key: str) -> list[str]:
-    return [
-        item.strip()
-        for item in _cfg_str(section, key).split(",")
-        if item.strip()
-    ]
-
-
 INCH_PER_CM = 1.0 / 2.54
-FIGSIZE_SINGLE = (
-    _cfg_float("figure", "single_width_cm") * INCH_PER_CM,
-    _cfg_float("figure", "single_height_cm") * INCH_PER_CM,
-)
-FIGSIZE_DOUBLE = (
-    _cfg_float("figure", "double_width_cm") * INCH_PER_CM,
-    _cfg_float("figure", "double_height_cm") * INCH_PER_CM,
-)
-FIGURE_WIDTH_DEFAULT = _cfg_str("figure", "width_default")
+FIGSIZE_SINGLE = (8.5 * INCH_PER_CM, 6.2 * INCH_PER_CM)
+FIGSIZE_DOUBLE = (17.0 * INCH_PER_CM, 8.5 * INCH_PER_CM)
+FIGURE_WIDTH_DEFAULT = "double"
 
-SAVE_DPI = _cfg_int("figure", "dpi")
-FIGURE_DPI = _cfg_int("figure", "display_dpi")
-SAVEFIG_PAD_INCHES = _cfg_float("save", "pad_inches")
+SAVE_DPI = 600
 
-NUMERICAL_SAVE_PNG = _cfg_bool("save", "numerical_png")
-NUMERICAL_SAVE_PDF = _cfg_bool("save", "numerical_pdf")
-CIRCUIT_SAVE_PNG = _cfg_bool("save", "circuit_png")
-CIRCUIT_SAVE_PDF = _cfg_bool("save", "circuit_pdf")
+# Numerical result figures: PDF only
+NUMERICAL_SAVE_PNG = False
+NUMERICAL_SAVE_PDF = True
 
-SHOW_FIGURE_TITLES = _cfg_bool("text", "show_titles")
-SHOW_REDUNDANT_LAYER_LEGENDS = _cfg_bool("text", "show_redundant_layer_legends")
+# Quantum circuit figures: PNG only
+CIRCUIT_SAVE_PNG = True
+CIRCUIT_SAVE_PDF = False
 
-BASE_FONT_SIZE = _cfg_int("text", "base_font_size")
-TITLE_FONT_SIZE = _cfg_int("text", "title_font_size")
-AXIS_LABEL_FONT_SIZE = _cfg_int("text", "axis_label_font_size")
-TICK_LABEL_FONT_SIZE = _cfg_int("text", "tick_label_font_size")
-LEGEND_FONT_SIZE = _cfg_int("text", "legend_font_size")
+SHOW_FIGURE_TITLES = False
 
-FONT_FAMILY = _cfg_str("text", "font_family")
-FONT_SERIF = _cfg_csv("text", "font_serif")
-MATHTEXT_FONTSET = _cfg_str("text", "mathtext_fontset")
+BASE_FONT_SIZE = 10
+TITLE_FONT_SIZE = 10
+AXIS_LABEL_FONT_SIZE = 13
+TICK_LABEL_FONT_SIZE = 11
+LEGEND_FONT_SIZE = 12
 
-AXES_LINEWIDTH = _cfg_float("axes", "linewidth")
-AXES_LABELPAD = _cfg_float("axes", "labelpad")
-AXES_UNICODE_MINUS = _cfg_bool("axes", "unicode_minus")
-TICK_DIRECTION = _cfg_str("axes", "tick_direction")
-TICK_TOP = _cfg_bool("axes", "tick_top")
-TICK_RIGHT = _cfg_bool("axes", "tick_right")
-TICK_PAD = _cfg_float("axes", "tick_pad")
-TICK_MAJOR_SIZE = _cfg_float("axes", "tick_major_size")
-TICK_MINOR_SIZE = _cfg_float("axes", "tick_minor_size")
-TICK_MAJOR_WIDTH = _cfg_float("axes", "tick_major_width")
-TICK_MINOR_WIDTH = _cfg_float("axes", "tick_minor_width")
+matplotlib.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["STIXGeneral", "Times New Roman", "DejaVu Serif"],
+    "mathtext.fontset": "stix",
 
-LINE_WIDTH = _cfg_float("lines", "linewidth")
-MARKER_SIZE = _cfg_float("lines", "markersize")
-ERRORBAR_CAPSIZE = _cfg_float("lines", "errorbar_capsize")
+    "font.size": BASE_FONT_SIZE,
+    "axes.titlesize": TITLE_FONT_SIZE,
+    "axes.labelsize": AXIS_LABEL_FONT_SIZE,
+    "xtick.labelsize": TICK_LABEL_FONT_SIZE,
+    "ytick.labelsize": TICK_LABEL_FONT_SIZE,
+    "legend.fontsize": LEGEND_FONT_SIZE,
+    "figure.titlesize": TITLE_FONT_SIZE,
 
-LEGEND_FRAMEON = _cfg_bool("legend", "frameon")
-LEGEND_HANDLELENGTH = _cfg_float("legend", "handlelength")
-LEGEND_HANDLETEXTPAD = _cfg_float("legend", "handletextpad")
-LEGEND_BORDERAXESPAD = _cfg_float("legend", "borderaxespad")
-LEGEND_LABELSPACING = _cfg_float("legend", "labelspacing")
-LEGEND_COLUMNSPACING = _cfg_float("legend", "columnspacing")
+    "axes.linewidth": 0.6,
+    "axes.labelpad": 2.5,
+    "axes.unicode_minus": False,
 
-GRID_LINEWIDTH = _cfg_float("grid", "linewidth")
-GRID_ALPHA = _cfg_float("grid", "alpha")
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "xtick.top": True,
+    "ytick.right": True,
+
+    "xtick.major.size": 3.0,
+    "ytick.major.size": 3.0,
+    "xtick.minor.size": 1.8,
+    "ytick.minor.size": 1.8,
+
+    "xtick.major.width": 0.6,
+    "ytick.major.width": 0.6,
+    "xtick.minor.width": 0.5,
+    "ytick.minor.width": 0.5,
+
+    "lines.linewidth": 1.0,
+    "lines.markersize": 4.0,
+    "errorbar.capsize": 2.5,
+
+    "legend.frameon": False,
+    "legend.handlelength": 1.4,
+    "legend.handletextpad": 0.4,
+    "legend.borderaxespad": 0.3,
+    "legend.labelspacing": 0.25,
+    "legend.columnspacing": 0.8,
+
+    "grid.linewidth": 0.4,
+    "grid.alpha": 0.25,
+
+    "savefig.dpi": SAVE_DPI,
+    "figure.dpi": 150,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+    "savefig.bbox": "tight",
+    "savefig.pad_inches": 0.02,
+})
 
 _DEFAULT_AXES_MARGINS_PRX = {
-    "left": _cfg_float("axes", "margin_left"),
-    "right": _cfg_float("axes", "margin_right"),
-    "bottom": _cfg_float("axes", "margin_bottom"),
-    "top": _cfg_float("axes", "margin_top"),
+    "left": 0.14,
+    "right": 0.03,
+    "bottom": 0.17,
+    "top": 0.04,
 }
 
 _DEFAULT_AXES_MARGINS_PRX_OUTSIDE_LEGEND = {
-    "left": _cfg_float("axes", "outside_legend_margin_left"),
-    "right": _cfg_float("axes", "outside_legend_margin_right"),
-    "bottom": _cfg_float("axes", "outside_legend_margin_bottom"),
-    "top": _cfg_float("axes", "outside_legend_margin_top"),
+    "left": 0.14,
+    "right": 0.28,
+    "bottom": 0.17,
+    "top": 0.04,
 }
 
 
-def apply_plot_config() -> None:
-    """Apply plot.config settings to matplotlib.rcParams."""
-    matplotlib.rcParams.update({
-        "font.family": FONT_FAMILY,
-        "font.serif": FONT_SERIF,
-        "mathtext.fontset": MATHTEXT_FONTSET,
-        "font.size": BASE_FONT_SIZE,
-        "axes.titlesize": TITLE_FONT_SIZE,
-        "axes.labelsize": AXIS_LABEL_FONT_SIZE,
-        "xtick.labelsize": TICK_LABEL_FONT_SIZE,
-        "ytick.labelsize": TICK_LABEL_FONT_SIZE,
-        "legend.fontsize": LEGEND_FONT_SIZE,
-        "figure.titlesize": TITLE_FONT_SIZE,
-        "axes.linewidth": AXES_LINEWIDTH,
-        "axes.labelpad": AXES_LABELPAD,
-        "axes.unicode_minus": AXES_UNICODE_MINUS,
-        "xtick.direction": TICK_DIRECTION,
-        "ytick.direction": TICK_DIRECTION,
-        "xtick.top": TICK_TOP,
-        "ytick.right": TICK_RIGHT,
-        "xtick.major.size": TICK_MAJOR_SIZE,
-        "ytick.major.size": TICK_MAJOR_SIZE,
-        "xtick.minor.size": TICK_MINOR_SIZE,
-        "ytick.minor.size": TICK_MINOR_SIZE,
-        "xtick.major.width": TICK_MAJOR_WIDTH,
-        "ytick.major.width": TICK_MAJOR_WIDTH,
-        "xtick.minor.width": TICK_MINOR_WIDTH,
-        "ytick.minor.width": TICK_MINOR_WIDTH,
-        "lines.linewidth": LINE_WIDTH,
-        "lines.markersize": MARKER_SIZE,
-        "errorbar.capsize": ERRORBAR_CAPSIZE,
-        "legend.frameon": LEGEND_FRAMEON,
-        "legend.handlelength": LEGEND_HANDLELENGTH,
-        "legend.handletextpad": LEGEND_HANDLETEXTPAD,
-        "legend.borderaxespad": LEGEND_BORDERAXESPAD,
-        "legend.labelspacing": LEGEND_LABELSPACING,
-        "legend.columnspacing": LEGEND_COLUMNSPACING,
-        "grid.linewidth": GRID_LINEWIDTH,
-        "grid.alpha": GRID_ALPHA,
-        "savefig.dpi": SAVE_DPI,
-        "figure.dpi": FIGURE_DPI,
-        "pdf.fonttype": 42,
-        "ps.fonttype": 42,
-        "savefig.bbox": "tight",
-        "savefig.pad_inches": SAVEFIG_PAD_INCHES,
-    })
-
-
-apply_plot_config()
-
-
-def _figsize_from_width(
-    width: str = FIGURE_WIDTH_DEFAULT,
-    *,
-    height_cm: Optional[float] = None,
-):
+def _figsize_from_width(width: str = FIGURE_WIDTH_DEFAULT):
     if width == "single":
-        base_w, base_h = FIGSIZE_SINGLE
-    elif width == "double":
-        base_w, base_h = FIGSIZE_DOUBLE
-    else:
-        raise ValueError("width must be either 'single' or 'double'.")
-
-    if height_cm is None:
-        return (base_w, base_h)
-    return (base_w, float(height_cm) * INCH_PER_CM)
+        return FIGSIZE_SINGLE
+    if width == "double":
+        return FIGSIZE_DOUBLE
+    raise ValueError("width must be either 'single' or 'double'.")
 
 
 def apply_axes_prx(
     fig,
-    ax=None,
+    ax,
     *,
     outside_legend: bool = False,
     legend_space_frac: Optional[float] = None,
@@ -324,25 +168,6 @@ def new_fig_ax(
     return fig, ax
 
 
-def new_prx_figure(
-    *,
-    width: str = FIGURE_WIDTH_DEFAULT,
-    height_cm: Optional[float] = None,
-):
-    """Create a figure with dimensions controlled by plot.config."""
-    return plt.figure(figsize=_figsize_from_width(width, height_cm=height_cm))
-
-
-def set_prx_title(title: str, *, ax=None) -> None:
-    """Keep figure titles switchable; journal captions usually carry titles."""
-    if not SHOW_FIGURE_TITLES:
-        return
-    if ax is None:
-        plt.title(title)
-    else:
-        ax.set_title(title)
-
-
 def apply_fontsizes(
     ax,
     *,
@@ -362,11 +187,6 @@ def apply_fontsizes(
             txt.set_fontsize(legend_size)
 
 
-def apply_prx_axis_style(ax) -> None:
-    """Apply configured font sizes to a single axis."""
-    apply_fontsizes(ax)
-
-
 def style_axes_for_prx(
     ax,
     *,
@@ -377,36 +197,26 @@ def style_axes_for_prx(
     ax.tick_params(
         axis="both",
         which="both",
-        direction=TICK_DIRECTION,
-        top=TICK_TOP,
-        right=TICK_RIGHT,
-        pad=TICK_PAD,
+        direction="in",
+        top=True,
+        right=True,
+        pad=2.0,
     )
 
-    ax.tick_params(
-        axis="both",
-        which="major",
-        length=TICK_MAJOR_SIZE,
-        width=TICK_MAJOR_WIDTH,
-    )
-    ax.tick_params(
-        axis="both",
-        which="minor",
-        length=TICK_MINOR_SIZE,
-        width=TICK_MINOR_WIDTH,
-    )
+    ax.tick_params(axis="both", which="major", length=3.0, width=0.6)
+    ax.tick_params(axis="both", which="minor", length=1.8, width=0.5)
 
     if use_minor_ticks:
         ax.minorticks_on()
 
     for spine in ax.spines.values():
-        spine.set_linewidth(AXES_LINEWIDTH)
+        spine.set_linewidth(0.6)
 
-    ax.xaxis.labelpad = AXES_LABELPAD
-    ax.yaxis.labelpad = AXES_LABELPAD
+    ax.xaxis.labelpad = 2.5
+    ax.yaxis.labelpad = 2.5
 
     if grid:
-        ax.grid(True, axis=grid_axis, alpha=GRID_ALPHA, linewidth=GRID_LINEWIDTH)
+        ax.grid(True, axis=grid_axis, alpha=0.25, linewidth=0.4)
     else:
         ax.grid(False)
 
@@ -458,7 +268,7 @@ def save_fig(
     )
     apply_fontsizes(ax)
     style_axes_for_prx(ax)
-    style_legend_for_prx(ax, frameon=LEGEND_FRAMEON)
+    style_legend_for_prx(ax, frameon=False)
 
     root, _ = os.path.splitext(outpath)
 
@@ -467,381 +277,17 @@ def save_fig(
             root + ".png",
             dpi=SAVE_DPI,
             bbox_inches="tight",
-            pad_inches=SAVEFIG_PAD_INCHES,
+            pad_inches=0.02,
         )
 
     if save_pdf:
         fig.savefig(
             root + ".pdf",
             bbox_inches="tight",
-            pad_inches=SAVEFIG_PAD_INCHES,
+            pad_inches=0.02,
         )
 
     plt.close(fig)
-
-
-def save_current_figure(
-    outpath: str,
-    *,
-    outside_legend: bool = False,
-    legend_space_frac: Optional[float] = None,
-    save_png: bool = NUMERICAL_SAVE_PNG,
-    save_pdf: bool = NUMERICAL_SAVE_PDF,
-) -> None:
-    """Save the current matplotlib figure using plot.config appearance settings."""
-    outdir = os.path.dirname(outpath)
-    if outdir:
-        os.makedirs(outdir, exist_ok=True)
-
-    fig = plt.gcf()
-    if not SHOW_FIGURE_TITLES:
-        for ax in fig.axes:
-            ax.set_title("")
-
-    apply_axes_prx(
-        fig,
-        outside_legend=outside_legend,
-        legend_space_frac=legend_space_frac,
-    )
-
-    for ax in fig.axes:
-        apply_prx_axis_style(ax)
-        style_axes_for_prx(ax)
-        style_legend_for_prx(ax, frameon=LEGEND_FRAMEON)
-
-    root, ext = os.path.splitext(outpath)
-    ext = ext.lower()
-    if not ext:
-        root = outpath
-        outpath = root + ".png"
-        ext = ".png"
-
-    if save_png:
-        png_path = outpath if ext == ".png" else root + ".png"
-        fig.savefig(
-            png_path,
-            dpi=SAVE_DPI,
-            bbox_inches="tight",
-            pad_inches=SAVEFIG_PAD_INCHES,
-        )
-
-    if save_pdf:
-        fig.savefig(
-            root + ".pdf",
-            bbox_inches="tight",
-            pad_inches=SAVEFIG_PAD_INCHES,
-        )
-
-    plt.close(fig)
-
-
-_MAX_AUTOMATIC_EIGENVALUE_HISTOGRAM_BINS = 256
-
-
-def _resolve_eigenvalue_histogram_bins(
-    values: np.ndarray,
-    bins,
-):
-    """Bound pathological FD-based bin estimates without changing the data.
-
-    Near-rank-deficient spectra can have an order-one range but a machine-scale
-    interquartile range. NumPy's FD and auto estimators then request trillions
-    of bins, so automatic estimates are limited to one bin per value and 256
-    bins overall.
-    """
-    if not isinstance(bins, str) or bins.lower() not in {"auto", "fd"}:
-        return bins
-
-    num_values = int(values.size)
-    if num_values <= 1:
-        return 1
-
-    max_bins = min(
-        num_values,
-        _MAX_AUTOMATIC_EIGENVALUE_HISTOGRAM_BINS,
-    )
-    value_range = float(np.max(values) - np.min(values))
-    if not np.isfinite(value_range) or value_range <= 0.0:
-        return bins
-
-    q25, q75 = np.percentile(values, [25.0, 75.0])
-    iqr = float(q75 - q25)
-    if not np.isfinite(iqr) or iqr <= 0.0:
-        return bins
-
-    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        fd_width = 2.0 * iqr / np.cbrt(num_values)
-        estimated_fd_bins = value_range / fd_width
-
-    if (
-        not np.isfinite(estimated_fd_bins)
-        or estimated_fd_bins > max_bins
-    ):
-        return max_bins
-
-    return bins
-
-
-def save_eigenvalue_histogram(
-    eigenvalues: np.ndarray,
-    *,
-    title: str,
-    outpath: str,
-    bins="auto",
-    xlabel: str = "Eigenvalue",
-    color: str = "C0",
-) -> None:
-    """Save a count histogram for one matrix's finite eigenvalues.
-
-    Input values are intentionally not transformed here. This preserves any
-    exact zeros supplied by the numerical pipeline and the signs of Hessian
-    eigenvalues.
-    """
-    values = np.asarray(eigenvalues, dtype=np.float64).reshape(-1)
-    if values.size == 0:
-        raise ValueError("eigenvalues must contain at least one value.")
-    if not np.all(np.isfinite(values)):
-        raise ValueError("eigenvalues must contain only finite values.")
-
-    resolved_bins = _resolve_eigenvalue_histogram_bins(values, bins)
-
-    fig, ax = new_fig_ax(outside_legend=False)
-    ax.hist(
-        values,
-        bins=resolved_bins,
-        density=False,
-        color=color,
-        alpha=0.75,
-        edgecolor="black",
-        linewidth=0.6,
-    )
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Count")
-    ax.set_title(title)
-    ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax.grid(True, axis="y", alpha=GRID_ALPHA, linewidth=GRID_LINEWIDTH)
-
-    save_fig(fig, ax, outpath, outside_legend=False)
-
-
-def save_eigenvalue_histograms_by_trial(
-    eigenvalues_by_trial: np.ndarray,
-    *,
-    outdir: str,
-    matrix_tag: str,
-    matrix_label: str,
-    num_layers: int,
-    context_tag: str,
-    context_label: str,
-    condition_tag: Optional[str] = None,
-    condition_label: Optional[str] = None,
-    bins="auto",
-    color: str = "C0",
-    trial_index_start: int = 0,
-) -> list[str]:
-    """Save one eigenvalue-count histogram per trial and return its paths.
-
-    The first array axis is the trial/sample axis and the second is the
-    eigenvalue axis. Trial numbers are zero-based by default so filenames map
-    directly to the rows stored in the numerical-result arrays.
-    """
-    eigs = np.asarray(eigenvalues_by_trial, dtype=np.float64)
-    if eigs.ndim == 1:
-        eigs = eigs[None, :]
-    if eigs.ndim != 2:
-        raise ValueError(
-            "eigenvalues_by_trial must have shape (num_trials, num_eigenvalues)."
-        )
-    if eigs.shape[0] == 0 or eigs.shape[1] == 0:
-        return []
-    if not np.all(np.isfinite(eigs)):
-        raise ValueError("eigenvalues_by_trial must contain only finite values.")
-
-    num_layers = int(num_layers)
-    num_params = int(eigs.shape[1])
-    trial_index_start = int(trial_index_start)
-    filename_tags = [
-        str(matrix_tag).strip("_"),
-        "eig_hist",
-        f"L{num_layers:04d}",
-        f"params{num_params:04d}",
-    ]
-
-    os.makedirs(outdir, exist_ok=True)
-    saved_paths = []
-
-    for row_index, trial_eigenvalues in enumerate(eigs):
-        trial_index = trial_index_start + row_index
-        trial_tags = filename_tags + [
-            f"trial{trial_index:04d}",
-            str(context_tag).strip("_"),
-        ]
-        if condition_tag:
-            trial_tags.append(str(condition_tag).strip("_"))
-
-        title_parts = [
-            f"{matrix_label} eigenvalue histogram",
-            f"L={num_layers}",
-            f"parameters={num_params}",
-            f"trial={trial_index}",
-            context_label,
-        ]
-        if condition_label:
-            title_parts.append(condition_label)
-
-        outpath = os.path.join(outdir, "_".join(trial_tags) + ".pdf")
-        save_eigenvalue_histogram(
-            trial_eigenvalues,
-            title=f"{title_parts[0]} ({', '.join(title_parts[1:])})",
-            outpath=outpath,
-            bins=bins,
-            xlabel=f"{matrix_label} eigenvalue",
-            color=color,
-        )
-        saved_paths.append(outpath)
-
-    return saved_paths
-
-
-def save_eigenvalue_histogram_across_trials(
-    eigenvalues_by_trial: np.ndarray,
-    *,
-    outdir: str,
-    matrix_tag: str,
-    matrix_label: str,
-    num_layers: int,
-    context_tag: str,
-    context_label: str,
-    iteration: Optional[int] = None,
-    condition_tag: Optional[str] = None,
-    condition_label: Optional[str] = None,
-    bins="auto",
-    color: str = "C0",
-    trial_index_start: int = 0,
-) -> str:
-    """Save one histogram containing all eigenvalues from several trials."""
-    eigs = np.asarray(eigenvalues_by_trial, dtype=np.float64)
-    if eigs.ndim == 1:
-        eigs = eigs[None, :]
-    if eigs.ndim != 2:
-        raise ValueError(
-            "eigenvalues_by_trial must have shape (num_trials, num_eigenvalues)."
-        )
-    if eigs.shape[0] == 0 or eigs.shape[1] == 0:
-        raise ValueError("eigenvalues_by_trial must not be empty.")
-    if not np.all(np.isfinite(eigs)):
-        raise ValueError("eigenvalues_by_trial must contain only finite values.")
-
-    num_layers = int(num_layers)
-    num_trials, num_params = (int(size) for size in eigs.shape)
-    first_trial = int(trial_index_start)
-    last_trial = first_trial + num_trials - 1
-    filename_tags = [
-        str(matrix_tag).strip("_"),
-        "eig_hist",
-        f"L{num_layers:04d}",
-        f"params{num_params:04d}",
-        f"trials{first_trial:04d}-{last_trial:04d}",
-    ]
-    if iteration is not None:
-        filename_tags.append(f"iter{int(iteration):06d}")
-    filename_tags.append(str(context_tag).strip("_"))
-    if condition_tag:
-        filename_tags.append(str(condition_tag).strip("_"))
-
-    title_parts = [
-        f"{matrix_label} eigenvalue histogram",
-        f"L={num_layers}",
-        f"parameters={num_params}",
-        f"trials={first_trial}-{last_trial}",
-        context_label,
-    ]
-    if iteration is not None:
-        title_parts.append(f"iteration={int(iteration)}")
-    if condition_label:
-        title_parts.append(condition_label)
-
-    os.makedirs(outdir, exist_ok=True)
-    outpath = os.path.join(outdir, "_".join(filename_tags) + ".pdf")
-    save_eigenvalue_histogram(
-        eigs,
-        title=f"{title_parts[0]} ({', '.join(title_parts[1:])})",
-        outpath=outpath,
-        bins=bins,
-        xlabel=f"{matrix_label} eigenvalue",
-        color=color,
-    )
-    return outpath
-
-
-def make_violin_ready(
-    x,
-    *,
-    ensure_positive: bool = False,
-    tiny: float = 1e-12,
-) -> np.ndarray:
-    """Return a plotting-only array that is safe for matplotlib.violinplot."""
-    arr = np.asarray(x, dtype=float).ravel()
-
-    if arr.size == 0:
-        base = tiny if ensure_positive else 0.0
-        return np.array([base, base + tiny], dtype=float)
-
-    if ensure_positive:
-        arr = np.where(arr <= 0.0, tiny, arr)
-
-    if arr.size == 1:
-        base = arr[0]
-        scale = max(abs(base), 1.0)
-        delta = tiny * scale
-        if ensure_positive:
-            return np.array([base, base + delta], dtype=float)
-        return np.array([base - 0.5 * delta, base + 0.5 * delta], dtype=float)
-
-    if np.allclose(arr, arr[0], rtol=0.0, atol=0.0):
-        base = arr[0]
-        scale = max(abs(base), 1.0)
-        delta = tiny * scale
-        if ensure_positive:
-            jitter = delta * np.linspace(0.0, 1.0, arr.size, dtype=float)
-        else:
-            jitter = delta * np.linspace(-0.5, 0.5, arr.size, dtype=float)
-        return arr + jitter
-
-    return arr
-
-
-def style_violin(
-    vp,
-    *,
-    facecolor=None,
-    edgecolor=None,
-    alpha: float = 0.20,
-    linewidth: float = LINE_WIDTH,
-    hatch: Optional[str] = None,
-    linecolor=None,
-    linealpha: float = 0.7,
-) -> None:
-    """Apply configured violin-plot styling to matplotlib's violinplot result."""
-    for body in vp["bodies"]:
-        if facecolor is not None:
-            body.set_facecolor(facecolor)
-        if edgecolor is not None:
-            body.set_edgecolor(edgecolor)
-        body.set_alpha(alpha)
-        body.set_linewidth(linewidth)
-        if hatch is not None:
-            body.set_hatch(hatch)
-
-    line_color = linecolor if linecolor is not None else (
-        edgecolor if edgecolor is not None else "black"
-    )
-
-    for key in ["cmeans", "cmins", "cmaxes", "cbars", "cmedians"]:
-        if key in vp:
-            vp[key].set_color(line_color)
-            vp[key].set_linewidth(linewidth)
-            vp[key].set_alpha(linealpha)
 
 
 def plot_qfim_grad_alignment_table(
@@ -1011,4 +457,3 @@ def plot_qfim_grad_alignment_layer_overlay(
     style_axes_for_prx(ax, grid_axis="both", grid=True)
 
     save_fig(fig, ax, outpath, outside_legend=True)
-
