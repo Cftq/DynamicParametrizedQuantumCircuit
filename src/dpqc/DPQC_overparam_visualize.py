@@ -88,6 +88,11 @@ lr = cfg.LEARNING_RATE
 eps = 1e-12
 sample_every = cfg.SAMPLE_EVERY
 
+# Upper cutoff for the zoomed final-energy-error distribution.  The h=0.1
+# results have a dense lowest-error cloud below 0.6; changing this value
+# regenerates the detailed figure with a different cutoff.
+FINAL_ENERGY_ERROR_DETAIL_THRESHOLD = 6e-1
+
 # Optimization-history sampling points used for history plots and
 # QFIM-gradient sector diagnostics.
 #
@@ -123,10 +128,12 @@ LAYER_PAIRS = (
 
 RED4_COLOR = "blue"
 
-# Reduced-system QFIM identifier used in filenames and figure titles.
+# Reduced-system QFIM identifiers used in filenames and figure titles.
 # Define these near the top so later cells/sections cannot hit NameError.
 keep_key = "keep0123"
 keep_label = "Reduced (0,1,2,3)"
+keep_key_5 = "keep01234"
+keep_label_5 = "Reduced (0,1,2,3,4)"
 
 
 def make_layer_legend_handles(layer_list, cmap, *, alpha=0.25):
@@ -276,6 +283,13 @@ def plot_beeswarm_by_layer(
         color = cmap(idx / len(layer_list))
 
         y = np.asarray(values, dtype=NP_REAL_DTYPE).reshape(-1)
+
+        # A thresholded detail view can legitimately leave a layer empty.
+        # Skip non-finite/empty inputs before computing layout bins or a
+        # median, while keeping every layer position on the x-axis.
+        y = y[np.isfinite(y)]
+        if y.size == 0:
+            continue
 
         if log_scale:
             y_plot = np.maximum(y, eps)
@@ -466,8 +480,8 @@ def plot_single_line_by_layer(
     save_fig(fig, ax, outpath, outside_legend=False)
 
 
-SUCCESS_PROBABILITY_THRESHOLDS = np.asarray(
-    cfg.SUCCESS_PROBABILITY_THRESHOLDS,
+SUCCESS_PROBABILITY_FIGURE_THRESHOLDS = np.asarray(
+    cfg.SUCCESS_PROBABILITY_FIGURE_THRESHOLDS,
     dtype=NP_REAL_DTYPE,
 )
 
@@ -479,6 +493,134 @@ def _warn_skip_success_probability_figure(message: str) -> None:
         RuntimeWarning,
         stacklevel=2,
     )
+
+
+def _success_probability_result_for_figure(result: dict) -> dict:
+    """Recompute plot summaries at the figure-specific thresholds."""
+    thresholds = np.asarray(
+        SUCCESS_PROBABILITY_FIGURE_THRESHOLDS,
+        dtype=NP_REAL_DTYPE,
+    )
+    if thresholds.ndim != 1 or thresholds.size == 0:
+        raise ValueError(
+            "SUCCESS_PROBABILITY_FIGURE_THRESHOLDS must be a non-empty "
+            "one-dimensional sequence"
+        )
+    if not np.all(np.isfinite(thresholds)) or np.any(thresholds <= 0.0):
+        raise ValueError(
+            "SUCCESS_PROBABILITY_FIGURE_THRESHOLDS must contain only "
+            "positive finite values"
+        )
+    if np.any(np.diff(thresholds) >= 0.0):
+        raise ValueError(
+            "SUCCESS_PROBABILITY_FIGURE_THRESHOLDS must be strictly decreasing"
+        )
+
+    if "layers" not in result or "num_trials" not in result:
+        raise ValueError("archive is missing 'layers' or 'num_trials'")
+
+    layers = np.asarray(result["layers"])
+    if layers.ndim != 1 or layers.size == 0:
+        raise ValueError("'layers' must be a non-empty one-dimensional array")
+
+    try:
+        num_trials_array = np.asarray(
+            result["num_trials"],
+            dtype=NP_REAL_DTYPE,
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("'num_trials' must be a numeric scalar") from exc
+    if (
+        num_trials_array.size != 1
+        or not np.isfinite(num_trials_array.reshape(-1)[0])
+        or num_trials_array.reshape(-1)[0]
+        != np.rint(num_trials_array.reshape(-1)[0])
+    ):
+        raise ValueError("'num_trials' must be one finite integer scalar")
+    num_trials = int(num_trials_array.reshape(-1)[0])
+    if num_trials <= 0:
+        raise ValueError("'num_trials' must be positive")
+
+    if "final_energy_errors" in result:
+        try:
+            final_energy_errors = np.asarray(
+                result["final_energy_errors"],
+                dtype=NP_REAL_DTYPE,
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "'final_energy_errors' must be a numeric array"
+            ) from exc
+    else:
+        if "final_energies" not in result:
+            raise ValueError(
+                "archive is missing both 'final_energy_errors' and "
+                "'final_energies'"
+            )
+        ground_energy_key = (
+            "ground_energy"
+            if "ground_energy" in result
+            else "smallest_eigval"
+        )
+        if ground_energy_key not in result:
+            raise ValueError(
+                "archive with 'final_energies' is missing 'ground_energy' "
+                "and 'smallest_eigval'"
+            )
+        try:
+            final_energies = np.asarray(
+                result["final_energies"],
+                dtype=NP_REAL_DTYPE,
+            )
+            ground_energy_array = np.asarray(
+                result[ground_energy_key],
+                dtype=NP_REAL_DTYPE,
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "'final_energies' and the ground energy must be numeric"
+            ) from exc
+        if ground_energy_array.size != 1 or not np.isfinite(
+            ground_energy_array.reshape(-1)[0]
+        ):
+            raise ValueError("ground energy must be one finite scalar")
+        final_energy_errors = np.maximum(
+            final_energies - ground_energy_array.reshape(-1)[0],
+            0.0,
+        )
+
+    expected_error_shape = (layers.size, num_trials)
+    if final_energy_errors.shape != expected_error_shape:
+        raise ValueError(
+            f"'final_energy_errors' has shape {final_energy_errors.shape}; "
+            f"expected {expected_error_shape}"
+        )
+    if not np.all(np.isfinite(final_energy_errors)):
+        raise ValueError("'final_energy_errors' contains a non-finite value")
+    if np.any(final_energy_errors < 0.0):
+        raise ValueError("'final_energy_errors' contains a negative value")
+
+    success_indicators = (
+        final_energy_errors[:, :, None] <= thresholds[None, None, :]
+    ).astype(NP_INT_DTYPE)
+    success_counts = np.sum(
+        success_indicators,
+        axis=1,
+        dtype=NP_INT_DTYPE,
+    )
+    success_probabilities = (
+        success_counts.astype(NP_REAL_DTYPE) / NP_REAL_DTYPE(num_trials)
+    )
+
+    figure_result = dict(result)
+    figure_result.update(
+        thresholds=thresholds,
+        tolerances=thresholds,
+        success_indicators=success_indicators,
+        success_counts=success_counts,
+        success_probabilities=success_probabilities,
+    )
+    return figure_result
 
 
 def _validated_success_probability_data(result: dict):
@@ -540,13 +682,14 @@ def _validated_success_probability_data(result: dict):
     if thresholds.ndim != 1:
         raise ValueError(f"'{threshold_key}' must be one-dimensional")
     if (
-        thresholds.size != SUCCESS_PROBABILITY_THRESHOLDS.size
+        thresholds.size != SUCCESS_PROBABILITY_FIGURE_THRESHOLDS.size
         or not np.all(np.isfinite(thresholds))
         or np.any(thresholds <= 0.0)
     ):
         raise ValueError(
-            f"'{threshold_key}' must contain the five positive finite "
-            "accuracy levels 1e-1, ..., 1e-5"
+            f"'{threshold_key}' must contain the "
+            f"{SUCCESS_PROBABILITY_FIGURE_THRESHOLDS.size} configured positive "
+            "finite accuracy levels"
         )
 
     if "thresholds" in result and "tolerances" in result:
@@ -574,7 +717,7 @@ def _validated_success_probability_data(result: dict):
             )
 
     threshold_order = []
-    for expected_threshold in SUCCESS_PROBABILITY_THRESHOLDS:
+    for expected_threshold in SUCCESS_PROBABILITY_FIGURE_THRESHOLDS:
         matching = np.flatnonzero(
             np.isclose(
                 thresholds,
@@ -586,7 +729,7 @@ def _validated_success_probability_data(result: dict):
         if matching.size != 1:
             raise ValueError(
                 f"'{threshold_key}' must contain exactly one "
-                f"{expected_threshold:.0e} entry"
+                f"{expected_threshold:.8g} entry"
             )
         threshold_order.append(int(matching[0]))
 
@@ -606,12 +749,6 @@ def _validated_success_probability_data(result: dict):
     ):
         raise ValueError("'num_trials' must be one finite integer scalar")
     num_trials = int(num_trials_array.reshape(-1)[0])
-    configured_num_runs = int(cfg.NUM_RUNS)
-    if num_trials != configured_num_runs:
-        raise ValueError(
-            f"'num_trials' is {num_trials}; expected "
-            f"NUM_RUNS={configured_num_runs} independent trials"
-        )
 
     expected_shape = (layers.size, thresholds.size)
     try:
@@ -695,6 +832,29 @@ def _validated_success_probability_data(result: dict):
     )
 
 
+def _success_probability_threshold_label(threshold: float) -> str:
+    """Format the requested decade-spanning tolerances exactly."""
+    threshold = float(threshold)
+    hundredths = int(np.rint(100.0 * threshold))
+    if 1 <= hundredths <= 10 and np.isclose(
+        threshold,
+        hundredths * 1e-2,
+        rtol=1e-12,
+        atol=0.0,
+    ):
+        if hundredths == 1:
+            return r"$\delta=10^{-2}$"
+        if hundredths == 10:
+            return r"$\delta=10^{-1}$"
+        return rf"$\delta={hundredths}\times 10^{{-2}}$"
+
+    exponent = int(np.floor(np.log10(threshold)))
+    mantissa = threshold / (10.0 ** exponent)
+    if np.isclose(mantissa, 1.0, rtol=1e-12, atol=0.0):
+        return rf"$\delta=10^{{{exponent}}}$"
+    return rf"$\delta={mantissa:.3g}\times 10^{{{exponent}}}$"
+
+
 def plot_success_probability_multiple_tolerances(
     layers,
     thresholds,
@@ -714,22 +874,23 @@ def plot_success_probability_multiple_tolerances(
     colors = matplotlib.colormaps.get_cmap("viridis")(
         np.linspace(0.08, 0.92, thresholds.size)
     )
-    markers = ("o", "s", "^", "D", "P")
+    markers = ("o", "s", "^", "D", "P", "v", "X")
     linestyles = ("-", "--", "-.", ":", (0, (3, 1, 1, 1)))
 
-    fig, ax = new_fig_ax(outside_legend=False)
+    fig, ax = new_fig_ax(outside_legend=True)
 
-    for threshold_index, threshold in enumerate(thresholds):
-        exponent = int(np.rint(-np.log10(threshold)))
+    threshold_plot_order = np.argsort(thresholds, kind="stable")
+    for plot_index, threshold_index in enumerate(threshold_plot_order):
+        threshold = thresholds[threshold_index]
         ax.plot(
             layers,
             success_probabilities[:, threshold_index],
-            color=colors[threshold_index],
-            marker=markers[threshold_index],
-            linestyle=linestyles[threshold_index],
+            color=colors[plot_index],
+            marker=markers[plot_index % len(markers)],
+            linestyle=linestyles[plot_index % len(linestyles)],
             linewidth=1.35,
             markersize=4.5,
-            label=rf"$\delta=10^{{-{exponent}}}$",
+            label=_success_probability_threshold_label(threshold),
             zorder=3,
         )
 
@@ -748,10 +909,12 @@ def plot_success_probability_multiple_tolerances(
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(
         title=rf"$R={int(num_trials)}$ independent trials",
-        loc="best",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
     )
 
-    save_fig(fig, ax, outpath, outside_legend=False)
+    save_fig(fig, ax, outpath, outside_legend=True)
 
 
 def render_success_probability_multiple_tolerances_figure(
@@ -774,6 +937,15 @@ def render_success_probability_multiple_tolerances_figure(
         )
         return False
 
+    recompute_error = None
+    try:
+        result_for_figure = _success_probability_result_for_figure(result)
+    except (TypeError, ValueError, OverflowError) as exc:
+        # Backward compatibility for summary-only archives that already use
+        # the configured figure thresholds.
+        recompute_error = exc
+        result_for_figure = result
+
     try:
         (
             layers,
@@ -781,10 +953,15 @@ def render_success_probability_multiple_tolerances_figure(
             success_probabilities,
             _success_counts,
             num_trials,
-        ) = _validated_success_probability_data(result)
+        ) = _validated_success_probability_data(result_for_figure)
     except (TypeError, ValueError, OverflowError) as exc:
+        recompute_detail = (
+            ""
+            if recompute_error is None
+            else f"; could not recompute from final energies: {recompute_error}"
+        )
         _warn_skip_success_probability_figure(
-            f"invalid archive {result_path}: {exc}"
+            f"invalid archive {result_path}: {exc}{recompute_detail}"
         )
         return False
 
@@ -908,8 +1085,10 @@ save_dir = f"./figs/dpqc/h_{h_param}"
 
 energy_fig_dir = os.path.join(save_dir, "energy_figures")
 qfim_fig_dir = os.path.join(save_dir, "qfim_figures")
+qfim_trace_dir = os.path.join(qfim_fig_dir, "qfim_trace")
 qfim_eigs_dir = os.path.join(qfim_fig_dir, "qfim_eigs")
 qfim_eigs_dir_red4 = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
+qfim_eigs_dir_red5 = os.path.join(qfim_eigs_dir, "reduced_keep_01234")
 qfim_rank_dir = os.path.join(qfim_fig_dir, "qfim_rank")
 qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
 qfim_rank_optimization_path_dir = os.path.join(qfim_rank_dir, "optimization_path")
@@ -943,8 +1122,10 @@ qfim_results_dir = os.path.join(numerical_results_dir, "qfim")
 os.makedirs(save_dir, exist_ok=True)
 os.makedirs(energy_fig_dir, exist_ok=True)
 os.makedirs(qfim_fig_dir, exist_ok=True)
+os.makedirs(qfim_trace_dir, exist_ok=True)
 os.makedirs(qfim_eigs_dir, exist_ok=True)
 os.makedirs(qfim_eigs_dir_red4, exist_ok=True)
+os.makedirs(qfim_eigs_dir_red5, exist_ok=True)
 os.makedirs(qfim_rank_dir, exist_ok=True)
 os.makedirs(qfim_rank_random_dir, exist_ok=True)
 os.makedirs(qfim_rank_optimization_path_dir, exist_ok=True)
@@ -1194,6 +1375,60 @@ plot_beeswarm_by_layer(
     eps=eps,
 )
 
+final_energy_error_detail_threshold = float(
+    FINAL_ENERGY_ERROR_DETAIL_THRESHOLD
+)
+
+if (
+    not np.isfinite(final_energy_error_detail_threshold)
+    or final_energy_error_detail_threshold <= 0.0
+):
+    raise ValueError(
+        "FINAL_ENERGY_ERROR_DETAIL_THRESHOLD must be finite and positive."
+    )
+
+final_energy_error_detail_by_layer = [
+    err[
+        np.isfinite(err)
+        & (err <= final_energy_error_detail_threshold)
+    ]
+    for err in final_energy_error_by_layer
+]
+
+if not any(values.size for values in final_energy_error_detail_by_layer):
+    warnings.warn(
+        "No final energy errors satisfy "
+        f"error <= {final_energy_error_detail_threshold:g}; "
+        "skipping the detailed beeswarm figure.",
+        RuntimeWarning,
+        stacklevel=1,
+    )
+else:
+    plot_beeswarm_by_layer(
+        final_energy_error_detail_by_layer,
+        vqe_layer_list,
+        cmap=cmap,
+        ylabel=(
+            "Final energy error "
+            rf"($\Delta E \leq {final_energy_error_detail_threshold:g}$)"
+        ),
+        title=(
+            "Detailed final energy-error distributions "
+            rf"($\Delta E \leq {final_energy_error_detail_threshold:g}$)"
+        ),
+        outpath=os.path.join(
+            energy_fig_dir,
+            (
+                "final_energy_error_beeswarm_below_"
+                f"{_thr_tag(final_energy_error_detail_threshold)}.pdf"
+            ),
+        ),
+        point_size=18.0,
+        alpha=0.65,
+        max_width=0.32,
+        log_scale=False,
+    )
+
 plot_single_line_by_layer(
     np.array(final_stats["layer"], dtype=NP_REAL_DTYPE),
     np.array(final_stats["success_rate"], dtype=NP_REAL_DTYPE),
@@ -1271,11 +1506,11 @@ save_fig(
 # ============================================================
 # Load random-parameter QFIM results and generate QFIM figures
 # ============================================================
-# QFIM rank + eigenvalue plots
-#   Only reduced-system QFIM for keep=(0,1,2,3)
+# QFIM rank + eigenvalue plots for both retained subsystems.
 # ============================================================
 KEEP_WIRES_4 = (0, 1, 2, 3)
 assert KEEP_WIRES_4 == tuple(range(num_system_qubits - 1))
+KEEP_WIRES_5 = tuple(range(num_system_qubits))
 
 QFIM_EFFECTIVE_RANK_THRESHOLD = cfg.QFIM_EFFECTIVE_RANK_THRESHOLD
 
@@ -1651,6 +1886,7 @@ def plot_single_qfim_rank_mean_min_sem_by_layer(
     rho_rank_by_layer: dict,
     layers,
     *,
+    d_keep: int = 2 ** len(KEEP_WIRES_4),
     color_min,
     color_mean,
     label=None,
@@ -1671,6 +1907,7 @@ def plot_single_qfim_rank_mean_min_sem_by_layer(
         rank_by_layer,
         rho_rank_by_layer,
         layers,
+        d_keep=d_keep,
     )
 
     if x.size == 0:
@@ -1712,7 +1949,10 @@ def plot_single_qfim_rank_mean_min_sem_by_layer(
         linestyle="--",
         linewidth=lw,
         color="black",
-        label=r"Upper bound $\min(14L, 32r_{\max}-r_{\max}^2-1)$",
+        label=(
+            rf"Upper bound $\min({n_param_per_layer}L, "
+            rf"{2 * int(d_keep)}r_{{\max}}-r_{{\max}}^2-1)$"
+        ),
     )
 
     ax.set_xlabel("Number of Layers")
@@ -2044,7 +2284,7 @@ plot_qfim_trace_max_mean_sem_by_layer(
     qfim_layer_list,
     title=rf"QFIM trace maximum and mean $\pm$ SEM at {NUM_QFIM_SAMPLES} random points",
     outpath=os.path.join(
-        qfim_fig_dir,
+        qfim_trace_dir,
         "qfim_trace_max_mean_sem_random_points_reduced_0123.pdf",
     ),
     color_max="C0",
@@ -2501,7 +2741,7 @@ plot_qfim_trace_history_mean_by_layer(
     sample_iters,
     title=rf"Mean QFIM trace along optimization path ({keep_label})",
     outpath=os.path.join(
-        qfim_fig_dir,
+        qfim_trace_dir,
         f"qfim_trace_mean_history_optimization_path_{keep_key}.pdf",
     ),
     cmap=cmap,
@@ -2541,6 +2781,8 @@ def save_qfim_eigs_optimization_path_by_iteration(
     sample_iters_for_labels,
     *,
     outdir: str,
+    result_key: str = keep_key,
+    result_label: str = keep_label,
     target_iterations=None,
     eps: float = QFIM_EIG_PLOT_EPS,
 ):
@@ -2600,14 +2842,14 @@ def save_qfim_eigs_optimization_path_by_iteration(
 
             outpath = os.path.join(
                 layer_outdir,
-                f"iter{iteration_int:06d}_{keep_key}.pdf",
+                f"iter{iteration_int:06d}_{result_key}.pdf",
             )
 
             save_qfim_eigs_by_index(
                 eigs_L[:, time_idx, :],
                 title=(
                     rf"QFIM eigenvalues along optimization path "
-                    rf"(L={L_int}, iteration={iteration_int}, {keep_label})"
+                    rf"(L={L_int}, iteration={iteration_int}, {result_label})"
                 ),
                 outpath=outpath,
                 eps=eps,
@@ -3081,7 +3323,7 @@ plot_metric_mean_sem_by_layer(
     ylabel="Mean QFIM trace",
     title=rf"QFIM trace mean $\pm$ SEM vs Layers along optimization path ({keep_label})",
     outpath=os.path.join(
-        qfim_fig_dir,
+        qfim_trace_dir,
         f"qfim_trace_mean_errorbar_optimization_path_{keep_key}.pdf",
     ),
     label=r"$\sum_k \lambda_k(F)$",
@@ -3132,6 +3374,18 @@ for _diagnostic_fig_dir in (
     os.makedirs(_diagnostic_fig_dir, exist_ok=True)
 
 
+def qfim_grad_alignment_dirs_for_key(result_key: str):
+    result_root = os.path.join(qfim_results_dir, "qfim_grad_alignment")
+
+    if result_key == keep_key:
+        return qfim_spectral_gradient_fig_dir, result_root
+
+    figure_dir = os.path.join(qfim_spectral_gradient_fig_dir, result_key)
+    result_dir = os.path.join(result_root, result_key)
+    os.makedirs(figure_dir, exist_ok=True)
+    return figure_dir, result_dir
+
+
 def _warn_skip_new_figure(message: str) -> None:
     warnings.warn(
         f"Skipping new QFIM diagnostic figure: {message}",
@@ -3173,6 +3427,553 @@ def _summary_layers_or_none(result: dict, *, description: str):
     return layers
 
 
+def _summary_sample_iters_or_none(result: dict, *, description: str):
+    if "sample_iters" not in result:
+        _warn_skip_new_figure(
+            f"{description} archive has no 'sample_iters' key"
+        )
+        return None
+
+    sample_iters_result = np.asarray(
+        result["sample_iters"],
+        dtype=NP_INT_DTYPE,
+    ).reshape(-1)
+
+    if sample_iters_result.size == 0:
+        _warn_skip_new_figure(
+            f"{description} archive has an empty 'sample_iters' array"
+        )
+        return None
+
+    return sample_iters_result
+
+
+def render_qfim_keep01234_core_figures() -> None:
+    """Render the keep=(0,1,2,3,4) counterparts of the core QFIM figures."""
+    random_result_path = os.path.join(
+        qfim_results_dir,
+        f"qfim_random_points_{keep_key_5}.npz",
+    )
+    random_result = _load_optional_npz_result(
+        random_result_path,
+        description=(
+            "keep01234 random-point QFIM result; rerun "
+            "DPQC_overparam_compute.py for complete keep01234 figures"
+        ),
+    )
+    random_rank_rendered = False
+
+    if random_result is not None:
+        random_layers = _summary_layers_or_none(
+            random_result,
+            description="keep01234 random-point QFIM result",
+        )
+
+        if random_layers is not None:
+            num_random_samples = int(
+                np.asarray(
+                    random_result.get("num_qfim_samples", NUM_QFIM_SAMPLES),
+                    dtype=NP_INT_DTYPE,
+                ).reshape(-1)[0]
+            )
+            rank_by_layer = _load_layer_arrays_from_npz(
+                random_result,
+                random_layers,
+                "rank",
+                dtype=NP_REAL_DTYPE,
+            )
+            eigs_by_layer = _load_layer_arrays_from_npz(
+                random_result,
+                random_layers,
+                "eigs_desc",
+                dtype=NP_REAL_DTYPE,
+            )
+            rho_rank_by_layer = _load_layer_arrays_from_npz(
+                random_result,
+                random_layers,
+                "rho_rank",
+                dtype=NP_REAL_DTYPE,
+            )
+            trace_by_layer = _load_layer_arrays_from_npz(
+                random_result,
+                random_layers,
+                "trace",
+                dtype=NP_REAL_DTYPE,
+            )
+            abs_entry_sum_by_layer = _load_layer_arrays_from_npz(
+                random_result,
+                random_layers,
+                "abs_entry_sum",
+                dtype=NP_REAL_DTYPE,
+            )
+
+            for L in random_layers:
+                if int(L) not in eigs_by_layer:
+                    continue
+                save_qfim_eigs_by_index(
+                    eigs_by_layer[int(L)],
+                    title=(
+                        rf"QFIM eigenvalues at {num_random_samples} random "
+                        rf"points (L={int(L)}, {keep_label_5})"
+                    ),
+                    outpath=os.path.join(
+                        qfim_eigs_dir_red5,
+                        f"L{int(L)}_reduced_01234.pdf",
+                    ),
+                )
+
+            save_qfim_eigs_by_index_colored_by_layer(
+                eigs_by_layer,
+                random_layers,
+                title=(
+                    rf"QFIM eigenvalues at {num_random_samples} random "
+                    rf"points ({keep_label_5})"
+                ),
+                outpath=os.path.join(
+                    qfim_eigs_dir,
+                    "qfim_eigs_by_index_layers_reduced_keep_01234.pdf",
+                ),
+                cmap=cmap,
+            )
+
+            if any(
+                np.asarray(values).size > 0
+                for values in rank_by_layer.values()
+            ):
+                plot_single_qfim_rank_mean_min_sem_by_layer(
+                    rank_by_layer,
+                    rho_rank_by_layer,
+                    random_layers,
+                    d_keep=2 ** len(KEEP_WIRES_5),
+                    color_min="C0",
+                    color_mean="C1",
+                    label=None,
+                    title=(
+                        rf"QFIM effective rank mean/minimum and upper bound "
+                        rf"at {num_random_samples} random points "
+                        rf"({keep_label_5})"
+                    ),
+                    outpath=os.path.join(
+                        qfim_rank_random_dir,
+                        (
+                            "qfim_rank_mean_min_upper_bound_random_points_"
+                            "reduced_01234.pdf"
+                        ),
+                    ),
+                    marker_min="o",
+                    marker_mean="s",
+                    lw=1.4,
+                )
+                random_rank_rendered = True
+
+            plot_qfim_random_eigcount_threshold_overlay(
+                eigs_by_layer,
+                random_layers,
+                QFIM_PATH_EIGCOUNT_THRESHOLDS,
+                title=(
+                    "QFIM eigenvalue count at random points by threshold "
+                    f"({keep_label_5})"
+                ),
+                outpath=os.path.join(
+                    qfim_eigcount_random_dir,
+                    (
+                        "qfim_eigcount_threshold_overlay_random_points_"
+                        f"{keep_key_5}.pdf"
+                    ),
+                ),
+                cmap=cmap,
+            )
+
+            plot_qfim_trace_max_mean_sem_by_layer(
+                trace_by_layer,
+                random_layers,
+                title=(
+                    rf"QFIM trace maximum and mean $\pm$ SEM at "
+                    rf"{num_random_samples} random points ({keep_label_5})"
+                ),
+                outpath=os.path.join(
+                    qfim_trace_dir,
+                    (
+                        "qfim_trace_max_mean_sem_random_points_"
+                        "reduced_01234.pdf"
+                    ),
+                ),
+                color_max="C0",
+                color_mean="C1",
+                marker_max="o",
+                marker_mean="s",
+                lw=1.4,
+                log_scale=False,
+            )
+
+            plot_metric_mean_sem_by_layer(
+                abs_entry_sum_by_layer,
+                random_layers,
+                ylabel="Mean elementwise absolute sum",
+                title=(
+                    rf"QFIM elementwise-absolute-sum mean $\pm$ SEM vs "
+                    rf"Layers ({keep_label_5}) at {num_random_samples} "
+                    "random points"
+                ),
+                outpath=os.path.join(
+                    qfim_fig_dir,
+                    f"qfim_abs_entry_sum_mean_errorbar_{keep_key_5}.pdf",
+                ),
+                label=r"$\sum_{i,j} |F_{ij}|$",
+                color="C1",
+                marker="s",
+                log_scale=False,
+            )
+    if not random_rank_rendered:
+        # Older result directories contain the active threshold rank in the
+        # sensitivity archive even though the full keep01234 spectrum was not
+        # persisted.  Use it so the requested rank figures remain available.
+        random_rank_fallback_path = os.path.join(
+            qfim_results_dir,
+            (
+                "hamiltonian_qfim_normalized_sensitivity_random_points_"
+                f"{keep_key_5}.npz"
+            ),
+        )
+        random_rank_fallback = _load_optional_npz_result(
+            random_rank_fallback_path,
+            description="keep01234 random-point QFIM-rank fallback",
+        )
+        if random_rank_fallback is not None:
+            fallback_layers = _summary_layers_or_none(
+                random_rank_fallback,
+                description="keep01234 random-point QFIM-rank fallback",
+            )
+            if fallback_layers is not None:
+                fallback_rank_by_layer = _load_layer_arrays_from_npz(
+                    random_rank_fallback,
+                    fallback_layers,
+                    "active_rank",
+                    dtype=NP_REAL_DTYPE,
+                )
+                plot_single_qfim_rank_mean_min_sem_by_layer(
+                    fallback_rank_by_layer,
+                    {},
+                    fallback_layers,
+                    d_keep=2 ** len(KEEP_WIRES_5),
+                    color_min="C0",
+                    color_mean="C1",
+                    label=None,
+                    title=(
+                        "QFIM effective rank mean/minimum and upper bound "
+                        f"at random points ({keep_label_5})"
+                    ),
+                    outpath=os.path.join(
+                        qfim_rank_random_dir,
+                        (
+                            "qfim_rank_mean_min_upper_bound_random_points_"
+                            "reduced_01234.pdf"
+                        ),
+                    ),
+                )
+
+    rank_history_path = os.path.join(
+        qfim_results_dir,
+        f"qfim_rank_history_optimization_path_{keep_key_5}.npz",
+    )
+    rank_history_result = _load_optional_npz_result(
+        rank_history_path,
+        description=(
+            "keep01234 optimization-path QFIM-rank result; rerun "
+            "DPQC_overparam_compute.py for complete keep01234 figures"
+        ),
+    )
+
+    def render_rank_history_result(
+        result,
+        *,
+        suffix,
+        description: str,
+    ) -> bool:
+        if result is None:
+            return False
+
+        result_layers = _summary_layers_or_none(
+            result,
+            description=description,
+        )
+        result_sample_iters = _summary_sample_iters_or_none(
+            result,
+            description=description,
+        )
+
+        if result_layers is None or result_sample_iters is None:
+            return False
+
+        result_rank_by_layer = _load_layer_arrays_from_npz(
+            result,
+            result_layers,
+            suffix,
+            dtype=NP_REAL_DTYPE,
+        )
+        if not any(
+            np.asarray(values).size > 0
+            for values in result_rank_by_layer.values()
+        ):
+            return False
+
+        plot_qfim_rank_history_mean_by_layer(
+            result_rank_by_layer,
+            result_layers,
+            result_sample_iters,
+            title=(
+                "Mean QFIM effective rank along optimization path "
+                f"({keep_label_5})"
+            ),
+            outpath=os.path.join(
+                qfim_rank_optimization_path_mean_dir,
+                (
+                    "qfim_rank_mean_history_optimization_path_"
+                    f"{keep_key_5}.pdf"
+                ),
+            ),
+            cmap=cmap,
+        )
+        plot_qfim_rank_history_min_by_layer(
+            result_rank_by_layer,
+            result_layers,
+            result_sample_iters,
+            title=(
+                "Minimum QFIM effective rank along optimization path "
+                f"({keep_label_5})"
+            ),
+            outpath=os.path.join(
+                qfim_rank_optimization_path_min_dir,
+                (
+                    "qfim_rank_min_history_optimization_path_"
+                    f"{keep_key_5}.pdf"
+                ),
+            ),
+            cmap=cmap,
+        )
+        return True
+
+    rank_history_rendered = render_rank_history_result(
+        rank_history_result,
+        suffix=None,
+        description="keep01234 optimization-path QFIM-rank result",
+    )
+
+    if not rank_history_rendered:
+        rank_history_fallback_path = os.path.join(
+            qfim_results_dir,
+            (
+                "hamiltonian_qfim_normalized_sensitivity_optimization_path_"
+                f"{keep_key_5}.npz"
+            ),
+        )
+        rank_history_result = _load_optional_npz_result(
+            rank_history_fallback_path,
+            description="keep01234 optimization-path QFIM-rank fallback",
+        )
+        render_rank_history_result(
+            rank_history_result,
+            suffix="active_rank",
+            description="keep01234 optimization-path QFIM-rank fallback",
+        )
+
+    eigs_history_path = os.path.join(
+        qfim_results_dir,
+        f"qfim_eigs_history_optimization_path_{keep_key_5}.npz",
+    )
+    eigs_history_result = _load_optional_npz_result(
+        eigs_history_path,
+        description=(
+            "keep01234 optimization-path QFIM-eigenvalue result; rerun "
+            "DPQC_overparam_compute.py for spectrum-dependent figures"
+        ),
+    )
+
+    eigs_history_layers = None
+    eigs_history_sample_iters = None
+    eigs_history_by_layer = {}
+
+    if eigs_history_result is not None:
+        eigs_history_layers = _summary_layers_or_none(
+            eigs_history_result,
+            description="keep01234 optimization-path QFIM-eigenvalue result",
+        )
+        eigs_history_sample_iters = _summary_sample_iters_or_none(
+            eigs_history_result,
+            description="keep01234 optimization-path QFIM-eigenvalue result",
+        )
+
+        if (
+            eigs_history_layers is not None
+            and eigs_history_sample_iters is not None
+        ):
+            eigs_history_by_layer = _load_layer_arrays_from_npz(
+                eigs_history_result,
+                eigs_history_layers,
+                suffix=None,
+                dtype=NP_REAL_DTYPE,
+            )
+            target_iterations = qfim_path_eig_target_iterations(
+                eigs_history_sample_iters,
+                every=sample_every,
+            )
+            save_qfim_eigs_optimization_path_by_iteration(
+                eigs_history_by_layer,
+                eigs_history_layers,
+                eigs_history_sample_iters,
+                outdir=os.path.join(
+                    qfim_eigs_dir,
+                    f"optimization_path_{keep_key_5}",
+                ),
+                result_key=keep_key_5,
+                result_label=keep_label_5,
+                target_iterations=target_iterations,
+                eps=QFIM_EIG_PLOT_EPS,
+            )
+
+            for threshold in QFIM_PATH_EIGCOUNT_THRESHOLDS:
+                eigcount_history_by_layer = qfim_eigcount_history_by_layer(
+                    eigs_history_by_layer,
+                    eigs_history_layers,
+                    eigs_history_sample_iters,
+                    threshold=threshold,
+                )
+                threshold_tag = _thr_tag(threshold)
+                threshold_label = _threshold_tex(threshold)
+
+                plot_qfim_eigcount_history_mean_by_layer(
+                    eigcount_history_by_layer,
+                    eigs_history_layers,
+                    eigs_history_sample_iters,
+                    threshold=threshold,
+                    title=(
+                        "Mean QFIM eigenvalue count along optimization path "
+                        rf"($\lambda_i \geq {threshold_label}$, "
+                        f"{keep_label_5})"
+                    ),
+                    outpath=os.path.join(
+                        qfim_eigcount_optimization_path_mean_dir,
+                        (
+                            "qfim_eigcount_mean_history_optimization_path_"
+                            f"thr_{threshold_tag}_{keep_key_5}.pdf"
+                        ),
+                    ),
+                    cmap=cmap,
+                )
+                plot_qfim_eigcount_history_min_by_layer(
+                    eigcount_history_by_layer,
+                    eigs_history_layers,
+                    eigs_history_sample_iters,
+                    threshold=threshold,
+                    title=(
+                        "Minimum QFIM eigenvalue count along optimization "
+                        rf"path ($\lambda_i \geq {threshold_label}$, "
+                        f"{keep_label_5})"
+                    ),
+                    outpath=os.path.join(
+                        qfim_eigcount_optimization_path_min_dir,
+                        (
+                            "qfim_eigcount_min_history_optimization_path_"
+                            f"thr_{threshold_tag}_{keep_key_5}.pdf"
+                        ),
+                    ),
+                    cmap=cmap,
+                )
+
+    trace_history_path = os.path.join(
+        qfim_results_dir,
+        f"qfim_trace_history_optimization_path_{keep_key_5}.npz",
+    )
+    trace_history_result = (
+        _load_optional_npz_result(
+            trace_history_path,
+            description="keep01234 optimization-path QFIM-trace result",
+        )
+        if os.path.exists(trace_history_path)
+        else None
+    )
+
+    trace_history_layers = None
+    trace_history_sample_iters = None
+    trace_history_by_layer = {}
+
+    if trace_history_result is not None:
+        trace_history_layers = _summary_layers_or_none(
+            trace_history_result,
+            description="keep01234 optimization-path QFIM-trace result",
+        )
+        trace_history_sample_iters = _summary_sample_iters_or_none(
+            trace_history_result,
+            description="keep01234 optimization-path QFIM-trace result",
+        )
+        if trace_history_layers is not None:
+            trace_history_by_layer = _load_layer_arrays_from_npz(
+                trace_history_result,
+                trace_history_layers,
+                suffix=None,
+                dtype=NP_REAL_DTYPE,
+            )
+
+    if (
+        (
+            trace_history_layers is None
+            or trace_history_sample_iters is None
+            or not trace_history_by_layer
+        )
+        and eigs_history_layers is not None
+        and eigs_history_sample_iters is not None
+    ):
+        trace_history_layers = eigs_history_layers
+        trace_history_sample_iters = eigs_history_sample_iters
+        trace_history_by_layer = {
+            int(L): np.sum(np.asarray(eigs, dtype=NP_REAL_DTYPE), axis=2)
+            for L, eigs in eigs_history_by_layer.items()
+        }
+
+    if (
+        trace_history_layers is not None
+        and trace_history_sample_iters is not None
+    ):
+        plot_qfim_trace_history_mean_by_layer(
+            trace_history_by_layer,
+            trace_history_layers,
+            trace_history_sample_iters,
+            title=(
+                "Mean QFIM trace along optimization path "
+                f"({keep_label_5})"
+            ),
+            outpath=os.path.join(
+                qfim_trace_dir,
+                f"qfim_trace_mean_history_optimization_path_{keep_key_5}.pdf",
+            ),
+            cmap=cmap,
+            log_scale=False,
+        )
+        plot_metric_mean_sem_by_layer(
+            trace_history_by_layer,
+            trace_history_layers,
+            ylabel="Mean QFIM trace",
+            title=(
+                rf"QFIM trace mean $\pm$ SEM vs Layers along optimization "
+                rf"path ({keep_label_5})"
+            ),
+            outpath=os.path.join(
+                qfim_trace_dir,
+                (
+                    "qfim_trace_mean_errorbar_optimization_path_"
+                    f"{keep_key_5}.pdf"
+                ),
+            ),
+            label=r"$\sum_k \lambda_k(F)$",
+            color="C0",
+            marker="o",
+            log_scale=False,
+        )
+
+
+render_qfim_keep01234_core_figures()
+
+
 def _finite_sample_mean_sem(samples):
     samples = np.asarray(samples, dtype=NP_REAL_DTYPE).reshape(-1)
     samples = samples[np.isfinite(samples)]
@@ -3195,6 +3996,7 @@ def plot_qfim_threshold_vs_participation_random_points(
     participation_rank_by_layer: dict,
     layers,
     *,
+    state_label: str = keep_label,
     outpath: str,
 ) -> bool:
     valid_layers = [
@@ -3278,7 +4080,7 @@ def plot_qfim_threshold_vs_participation_random_points(
     ax.set_ylabel("QFIM effective dimension")
     ax.set_title(
         rf"Threshold and participation QFIM ranks at random points "
-        rf"({keep_label})"
+        rf"({state_label})"
     )
     ax.set_xticks(x)
     ax.set_xticklabels([str(L) for L in valid_layers])
@@ -3531,6 +4333,7 @@ def plot_qfim_vs_gradient_cumulative_table(
     iteration: int,
     outpath: str,
     source_path: str,
+    state_label: str = keep_label,
 ) -> bool:
     required_keys = (
         "eig_index",
@@ -3673,7 +4476,7 @@ def plot_qfim_vs_gradient_cumulative_table(
     ax.set_ylabel("Cumulative fraction")
     ax.set_title(
         rf"Cumulative QFIM and gradient concentration, "
-        rf"L={int(layer)}, iteration {int(iteration)}"
+        rf"L={int(layer)}, iteration {int(iteration)} ({state_label})"
     )
     ax.set_ylim(-0.02, 1.02)
     ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
@@ -3690,11 +4493,12 @@ def _load_alignment_table_for_cumulative_figure(
     iteration: int,
     final_iteration: int,
     cache: dict,
+    result_key: str = keep_key,
 ):
-    alignment_roots = (
-        os.path.join(qfim_results_dir, "qfim_grad_alignment"),
-        os.path.join(qfim_fig_dir, "qfim_grad_alignment"),
+    alignment_figure_dir, alignment_result_dir = (
+        qfim_grad_alignment_dirs_for_key(result_key)
     )
+    alignment_roots = (alignment_result_dir, alignment_figure_dir)
     iter_tag = f"iter{int(iteration):06d}"
     exact_candidates = [
         os.path.join(
@@ -3761,10 +4565,15 @@ def _load_alignment_table_for_cumulative_figure(
     return None, None
 
 
-def render_qfim_spectral_effective_rank_figures() -> None:
+def render_qfim_spectral_effective_rank_figures(
+    result_key: str = keep_key,
+    state_label: str = keep_label,
+    *,
+    include_cumulative_alignment: bool = True,
+) -> None:
     random_summary_path = os.path.join(
         qfim_results_dir,
-        f"qfim_effective_rank_random_points_{keep_key}.npz",
+        f"qfim_effective_rank_random_points_{result_key}.npz",
     )
     random_summary = _load_optional_npz_result(
         random_summary_path,
@@ -3793,11 +4602,12 @@ def render_qfim_spectral_effective_rank_figures() -> None:
                 threshold_rank_by_layer,
                 participation_rank_by_layer,
                 random_layers,
+                state_label=state_label,
                 outpath=os.path.join(
                     qfim_effective_rank_fig_dir,
                     (
                         "qfim_threshold_vs_participation_rank_"
-                        f"random_points_{keep_key}.pdf"
+                        f"random_points_{result_key}.pdf"
                     ),
                 ),
             )
@@ -3806,7 +4616,7 @@ def render_qfim_spectral_effective_rank_figures() -> None:
         qfim_results_dir,
         (
             "qfim_spectral_gradient_summary_optimization_path_"
-            f"{keep_key}.npz"
+            f"{result_key}.npz"
         ),
     )
     path_summary = _load_optional_npz_result(
@@ -3852,10 +4662,10 @@ def render_qfim_spectral_effective_rank_figures() -> None:
                     "participation_rank",
                     r"QFIM participation rank $r_{\mathrm{part}}(F)$",
                     rf"QFIM participation rank along optimization path "
-                    rf"({keep_label})",
+                    rf"({state_label})",
                     os.path.join(
                         qfim_effective_rank_fig_dir,
-                        f"qfim_participation_rank_history_{keep_key}.pdf",
+                        f"qfim_participation_rank_history_{result_key}.pdf",
                     ),
                     "QFIM participation rank",
                     False,
@@ -3864,10 +4674,10 @@ def render_qfim_spectral_effective_rank_figures() -> None:
                     "gradient_participation_rank",
                     r"Gradient participation rank $r_{\mathrm{grad}}$",
                     rf"Gradient participation rank in the QFIM eigenbasis "
-                    rf"({keep_label})",
+                    rf"({state_label})",
                     os.path.join(
                         qfim_spectral_gradient_fig_dir,
-                        f"gradient_participation_rank_history_{keep_key}.pdf",
+                        f"gradient_participation_rank_history_{result_key}.pdf",
                     ),
                     "gradient participation rank",
                     False,
@@ -3876,12 +4686,12 @@ def render_qfim_spectral_effective_rank_figures() -> None:
                     "gradient_weighted_qfim_eigenvalue",
                     r"Gradient-weighted QFIM eigenvalue $\overline{\lambda}_g$",
                     rf"Gradient-weighted QFIM eigenvalue along optimization "
-                    rf"path ({keep_label})",
+                    rf"path ({state_label})",
                     os.path.join(
                         qfim_spectral_gradient_fig_dir,
                         (
                             "gradient_weighted_qfim_eigenvalue_history_"
-                            f"{keep_key}.pdf"
+                            f"{result_key}.pdf"
                         ),
                     ),
                     "gradient-weighted QFIM eigenvalue",
@@ -3915,6 +4725,9 @@ def render_qfim_spectral_effective_rank_figures() -> None:
                     cmap=cmap,
                 )
 
+    if not include_cumulative_alignment:
+        return
+
     if cumulative_sample_iters.size == 0 or not cumulative_layers:
         _warn_skip_new_figure(
             "no layers or sampled iterations are available for cumulative "
@@ -3926,6 +4739,12 @@ def render_qfim_spectral_effective_rank_figures() -> None:
     missing_alignment_tables = 0
     rendered_cumulative_figures = 0
     final_iteration = int(cumulative_sample_iters[-1])
+    cumulative_output_dir = (
+        qfim_cumulative_alignment_fig_dir
+        if result_key == keep_key
+        else os.path.join(qfim_cumulative_alignment_fig_dir, result_key)
+    )
+    os.makedirs(cumulative_output_dir, exist_ok=True)
 
     for L in cumulative_layers:
         for iteration in cumulative_sample_iters:
@@ -3934,6 +4753,7 @@ def render_qfim_spectral_effective_rank_figures() -> None:
                 iteration=int(iteration),
                 final_iteration=final_iteration,
                 cache=alignment_cache,
+                result_key=result_key,
             )
             if table is None:
                 missing_alignment_tables += 1
@@ -3944,8 +4764,9 @@ def render_qfim_spectral_effective_rank_figures() -> None:
                 layer=int(L),
                 iteration=int(iteration),
                 source_path=source_path,
+                state_label=state_label,
                 outpath=os.path.join(
-                    qfim_cumulative_alignment_fig_dir,
+                    cumulative_output_dir,
                     (
                         f"qfim_vs_gradient_cumulative_L{int(L)}_"
                         f"iter{int(iteration)}.pdf"
@@ -3967,6 +4788,11 @@ def render_qfim_spectral_effective_rank_figures() -> None:
 
 
 render_qfim_spectral_effective_rank_figures()
+render_qfim_spectral_effective_rank_figures(
+    keep_key_5,
+    keep_label_5,
+    include_cumulative_alignment=True,
+)
 
 # ============================================================
 
@@ -4527,85 +5353,134 @@ def _load_alignment_table_or_none(path: str):
         return None
     return load_npz_result(path)
 
-if RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER or RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES:
-    for use_all_times in (False, True):
-        if use_all_times and not RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES:
-            continue
-        if (not use_all_times) and not RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER:
-            continue
+def render_saved_qfim_grad_alignment_figures(
+    result_key: str,
+    state_label: str,
+) -> None:
+    alignment_figure_dir, alignment_result_dir = (
+        qfim_grad_alignment_dirs_for_key(result_key)
+    )
 
-        time_tag = "all_times" if use_all_times else "final_iter"
-        title_time = "all sampled iterations" if use_all_times else f"final iteration {int(sample_iters[-1])}"
-        color_by = "iteration" if use_all_times else None
-        point_size = 12.0 if use_all_times else 14.0
-        scatter_alpha = 0.40 if use_all_times else 0.45
+    if RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER or RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES:
+        for use_all_times in (False, True):
+            if use_all_times and not RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES:
+                continue
+            if (not use_all_times) and not RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER:
+                continue
 
-        table_by_layer = {}
+            time_tag = "all_times" if use_all_times else "final_iter"
+            title_time = (
+                "all sampled iterations"
+                if use_all_times
+                else f"final iteration {int(sample_iters[-1])}"
+            )
+            color_by = "iteration" if use_all_times else None
+            point_size = 12.0 if use_all_times else 14.0
+            scatter_alpha = 0.40 if use_all_times else 0.45
+
+            table_by_layer = {}
+            for L in vqe_layer_list:
+                path = os.path.join(
+                    alignment_result_dir,
+                    (
+                        "qfim_grad_alignment_scatter_data_"
+                        f"L{int(L)}_{time_tag}.npz"
+                    ),
+                )
+                table = _load_alignment_table_or_none(path)
+                if table is None:
+                    continue
+                table_by_layer[int(L)] = table
+                plot_qfim_grad_alignment_table(
+                    table,
+                    title=(
+                        "QFIM eigenvalue vs gradient weight, "
+                        f"L={int(L)}, {title_time} ({state_label})"
+                    ),
+                    outpath=os.path.join(
+                        alignment_figure_dir,
+                        (
+                            "qfim_grad_weight_scatter_"
+                            f"L{int(L)}_{time_tag}.pdf"
+                        ),
+                    ),
+                    log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
+                    log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
+                    color_by=color_by,
+                    point_size=point_size,
+                    alpha=scatter_alpha,
+                )
+
+            if table_by_layer:
+                plot_qfim_grad_alignment_layer_overlay(
+                    table_by_layer,
+                    sorted(table_by_layer),
+                    title=(
+                        "QFIM eigenvalue vs gradient weight across layers, "
+                        f"{time_tag.replace('_', ' ')} ({state_label})"
+                    ),
+                    outpath=os.path.join(
+                        alignment_figure_dir,
+                        (
+                            "qfim_grad_weight_scatter_overlay_layers_"
+                            f"{time_tag}.pdf"
+                        ),
+                    ),
+                    log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
+                    log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
+                    point_size=12.0,
+                    alpha=0.40,
+                )
+
+    if RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION:
         for L in vqe_layer_list:
-            path = os.path.join(
-                qfim_grad_align_results_dir,
-                f"qfim_grad_alignment_scatter_data_L{int(L)}_{time_tag}.npz",
-            )
-            table = _load_alignment_table_or_none(path)
-            if table is None:
-                continue
-            table_by_layer[int(L)] = table
-            plot_qfim_grad_alignment_table(
-                table,
-                title=rf"QFIM eigenvalue vs gradient weight, L={int(L)}, {title_time}",
-                outpath=os.path.join(
-                    qfim_grad_align_dir,
-                    f"qfim_grad_weight_scatter_L{int(L)}_{time_tag}.pdf",
-                ),
-                log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-                log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-                color_by=color_by,
-                point_size=point_size,
-                alpha=scatter_alpha,
-            )
-
-        if table_by_layer:
-            plot_qfim_grad_alignment_layer_overlay(
-                table_by_layer,
-                sorted(table_by_layer),
-                title=rf"QFIM eigenvalue vs gradient weight across layers, {time_tag.replace('_', ' ')}",
-                outpath=os.path.join(
-                    qfim_grad_align_dir,
-                    f"qfim_grad_weight_scatter_overlay_layers_{time_tag}.pdf",
-                ),
-                log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-                log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-                point_size=12.0,
-                alpha=0.40,
-            )
-
-if RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION:
-    for L in vqe_layer_list:
-        layer_dir = os.path.join(qfim_grad_align_dir, f"L{int(L)}")
-        os.makedirs(layer_dir, exist_ok=True)
-        for iteration in QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS:
-            iteration = int(iteration)
-            iter_tag = f"iter{iteration:06d}"
-            path = os.path.join(
-                qfim_grad_align_results_dir,
+            layer_dir = os.path.join(
+                alignment_figure_dir,
                 f"L{int(L)}",
-                f"qfim_grad_alignment_scatter_data_L{int(L)}_{iter_tag}.npz",
             )
-            table = _load_alignment_table_or_none(path)
-            if table is None:
-                continue
-            plot_qfim_grad_alignment_table(
-                table,
-                title=rf"QFIM eigenvalue vs gradient weight, L={int(L)}, iteration {iteration}",
-                outpath=os.path.join(
-                    layer_dir,
-                    f"qfim_grad_weight_scatter_L{int(L)}_{iter_tag}.pdf",
-                ),
-                log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-                log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-                color_by=None,
-                point_size=14.0,
-                alpha=0.45,
-            )
+            os.makedirs(layer_dir, exist_ok=True)
+            for iteration in QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS:
+                iteration = int(iteration)
+                iter_tag = f"iter{iteration:06d}"
+                path = os.path.join(
+                    alignment_result_dir,
+                    f"L{int(L)}",
+                    (
+                        "qfim_grad_alignment_scatter_data_"
+                        f"L{int(L)}_{iter_tag}.npz"
+                    ),
+                )
+                table = _load_alignment_table_or_none(path)
+                if table is None:
+                    continue
+                plot_qfim_grad_alignment_table(
+                    table,
+                    title=(
+                        "QFIM eigenvalue vs gradient weight, "
+                        f"L={int(L)}, iteration {iteration} ({state_label})"
+                    ),
+                    outpath=os.path.join(
+                        layer_dir,
+                        (
+                            "qfim_grad_weight_scatter_"
+                            f"L{int(L)}_{iter_tag}.pdf"
+                        ),
+                    ),
+                    log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
+                    log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
+                    color_by=None,
+                    point_size=14.0,
+                    alpha=0.45,
+                )
+
+
+for _alignment_result_key, _alignment_state_label in (
+    (keep_key, keep_label),
+    (keep_key_5, keep_label_5),
+):
+    render_saved_qfim_grad_alignment_figures(
+        _alignment_result_key,
+        _alignment_state_label,
+    )
 
 print(f"Saved figures to: {save_dir}")

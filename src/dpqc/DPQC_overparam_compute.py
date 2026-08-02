@@ -4,17 +4,34 @@
 
 This script is split from DPQC_overparam.ipynb. It performs the expensive
 VQE/QFIM calculations and writes reusable .npz files under
-figs/dpqc/h_<h_param>/numerical_results. Plot generation is handled by
-DPQC_overparam_visualize.py.
+figs/dpqc/h_<h_param>/numerical_results.  Both the keep=(0,1,2,3) and
+keep=(0,1,2,3,4) QFIM results are computed and saved by the ``all`` and
+``qfim`` stages. Their QFIM paths share one rho5/d_rho5 evaluation and obtain
+rho4/d_rho4 by partial trace. Plot generation is handled by
+DPQC_overparam_visualize.py,
+and optimized-circuit drawing is handled separately by
+DPQC_overparam_draw_circuits.py.
+
+DPQC_overparam_compute_keep01234.py is an optional backfill/recovery entry
+point for adding only the keep=(0,1,2,3,4) archives to an existing VQE/QFIM
+history. It is not required for a fresh run of this script.
+
+Examples::
+
+    python DPQC_overparam_compute.py --h-param 0.10
+    python DPQC_overparam_compute.py --stage vqe
+    python DPQC_overparam_compute.py --stage qfim
+    python DPQC_overparam_compute.py --stage all --vqe-batch-size 5
 """
 
 
+import argparse
+import math
 import os
 import sys
 import warnings
-from copy import copy as shallow_copy
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 
 # Support direct execution from any working directory, for example:
@@ -33,6 +50,75 @@ for _path in (_MODULE_DIR, _COMMON_DIR):
 
 import config_overparam as cfg
 
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("value must be a finite number")
+    return parsed
+
+
+def _parse_cli_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compute DPQC VQE histories and QFIM diagnostics for both "
+            "keep=(0,1,2,3) and keep=(0,1,2,3,4). The qfim stage reuses "
+            "the saved VQE archive. Circuit drawing is not performed; use "
+            "DPQC_overparam_draw_circuits.py afterward."
+        )
+    )
+    parser.add_argument(
+        "--h-param",
+        type=_finite_float,
+        default=float(cfg.H_PARAM),
+        help=(
+            "Hamiltonian parameter H_PARAM (default: value from "
+            "config_overparam.py)."
+        ),
+    )
+    parser.add_argument(
+        "--stage",
+        choices=("all", "vqe", "qfim"),
+        default="all",
+        help=(
+            "all: run VQE then both kept-state QFIM analyses (default); "
+            "vqe: stop after saving VQE; qfim: load the saved VQE history "
+            "and run both kept-state QFIM analyses"
+        ),
+    )
+    parser.add_argument(
+        "--vqe-batch-size",
+        type=_positive_int,
+        default=int(getattr(cfg, "VQE_BATCH_SIZE", 5)),
+        help="Number of independent VQE trials evaluated by each vmap call.",
+    )
+    return parser.parse_args(argv)
+
+
+if __name__ == "__main__":
+    _CLI_ARGS = _parse_cli_args()
+else:
+    # Preserve the historical import semantics for callers that execute this
+    # module programmatically.  The dedicated CLI is the supported way to
+    # select a compute stage.
+    _CLI_ARGS = argparse.Namespace(
+        h_param=float(cfg.H_PARAM),
+        stage="all",
+        vqe_batch_size=int(getattr(cfg, "VQE_BATCH_SIZE", 5)),
+    )
+
+COMPUTE_STAGE = str(_CLI_ARGS.stage)
+VQE_BATCH_SIZE = int(_CLI_ARGS.vqe_batch_size)
+RUN_VQE_STAGE = COMPUTE_STAGE in ("all", "vqe")
+RUN_QFIM_STAGE = COMPUTE_STAGE in ("all", "qfim")
+
 # ------------------------------------------------------------
 # IMPORTANT: env vars should be set BEFORE importing jax
 # ------------------------------------------------------------
@@ -40,27 +126,20 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 import jax
 import jax.numpy as jnp
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 import optax
 import tensorcircuit as tc
 from plot import (
-    CIRCUIT_SAVE_PDF,
-    CIRCUIT_SAVE_PNG,
-    SAVE_DPI,
-    new_fig_ax,
     plot_qfim_grad_alignment_layer_overlay,
     plot_qfim_grad_alignment_table,
-    save_fig,
-    style_axes_for_prx,
 )
-from qiskit import QuantumCircuit
-from qiskit.visualization import circuit_drawer
 from tqdm.auto import tqdm
 
 jax.config.update("jax_enable_x64", True)
 
+# The shared Hamiltonian helper obtains Pauli tensors from TensorCircuit.
+# Preserve its historical JAX/complex128 backend; no circuit is constructed or
+# drawn in this compute script.
 tc.set_backend("jax")
 tc.set_dtype("complex128")
 
@@ -75,7 +154,6 @@ from dpqc_overparam_common import (
     build_H_matrix_jax,
     build_layer_list,
     hamiltonian_terms,
-    ket0_density,
     load_npz_result,
     rho_zero_state,
     threshold_psd_eigvals_for_rank,
@@ -85,11 +163,11 @@ from dpqc_overparam_common import (
 # Shared constants / helpers
 # ============================================================
 num_system_qubits = 5
-h_param = cfg.H_PARAM
+h_param = float(_CLI_ARGS.h_param)
 tolerance = cfg.TOLERANCE
 steps = cfg.STEPS
 num_runs = int(cfg.NUM_RUNS)
-if num_runs <= 0:
+if RUN_VQE_STAGE and num_runs <= 0:
     raise ValueError("cfg.NUM_RUNS must be a positive integer.")
 lr = cfg.LEARNING_RATE
 success_probability_thresholds = np.asarray(
@@ -126,7 +204,7 @@ PARAMS_PER_BLOCK = 3
 EXTRA_PARAMS_PER_LAYER = 2
 n_param_per_layer = NUM_BLOCKS * PARAMS_PER_BLOCK + EXTRA_PARAMS_PER_LAYER
 
-TOP, LEFT, RIGHT, BOTTOM, ANC_CENTER, FRESH_ANCILLA = 0, 1, 2, 3, 4, 5
+TOP, LEFT, RIGHT, BOTTOM, ANC_CENTER = 0, 1, 2, 3, 4
 
 LAYER_PAIRS = (
     (LEFT, BOTTOM),
@@ -137,7 +215,7 @@ LAYER_PAIRS = (
 
 RED4_COLOR = "blue"
 
-# Reduced-system QFIM identifier used in filenames and figure titles.
+# Reduced-system QFIM identifiers used in filenames and figure titles.
 # Define these near the top so later cells/sections cannot hit NameError.
 keep_key = "keep0123"
 keep_label = "Reduced (0,1,2,3)"
@@ -147,188 +225,6 @@ keep_label_5 = "Reduced (0,1,2,3,4)"
 
 def jax_to_np(x, dtype=None):
     return np.asarray(jax.device_get(x), dtype=dtype)
-
-
-# ==============================
-# Circuit blocks TensorCircuit
-# ==============================
-def qg_layer(c: tc.Circuit, q0: int, q1: int, p: jnp.ndarray) -> None:
-    c.rz(q0, theta=p[0])
-    c.rz(q1, theta=p[1])
-    c.rxx(q0, q1, theta=p[2])
-
-
-def qg_dyn_delay(
-    c: tc.Circuit,
-    ctrl: int,
-    tgt: int,
-    varphi: float,
-    phi: float,
-) -> None:
-    c.cx(ctrl, tgt)
-    c.crz(tgt, ctrl, theta=varphi)
-    c.crx(tgt, ctrl, theta=2.0 * phi)
-    c.crz(tgt, ctrl, theta=varphi)
-
-
-def create_dpqc(theta: jnp.ndarray, n_layer: int, num_system: int) -> tc.Circuit:
-    qc = tc.Circuit(num_system + n_layer)
-    theta_layers = jnp.reshape(theta, (n_layer, n_param_per_layer))
-
-    for layer_idx, layer_theta in enumerate(theta_layers):
-        blocks = jnp.reshape(
-            layer_theta[:-EXTRA_PARAMS_PER_LAYER],
-            (NUM_BLOCKS, PARAMS_PER_BLOCK),
-        )
-
-        for (q0, q1), p in zip(LAYER_PAIRS, blocks):
-            qg_layer(qc, q0, q1, p)
-
-        varphi = layer_theta[-2]
-        phi = layer_theta[-1]
-
-        qg_dyn_delay(
-            qc,
-            ANC_CENTER,
-            num_system + layer_idx,
-            varphi,
-            phi,
-        )
-
-    return qc
-
-
-# ==============================
-# TC -> Qiskit drawing
-# ==============================
-def tc_to_qiskit_qc(
-    tc_circ: tc.Circuit,
-    n_qubits: Optional[int] = None,
-) -> QuantumCircuit:
-    if hasattr(tc_circ, "to_qiskit"):
-        try:
-            return tc_circ.to_qiskit()
-        except Exception:
-            pass
-
-    if n_qubits is None:
-        n_qubits = next(
-            (
-                int(getattr(tc_circ, attr))
-                for attr in ("nqubits", "_nqubits", "n")
-                if hasattr(tc_circ, attr)
-            ),
-            None,
-        )
-
-    if n_qubits is None:
-        raise ValueError("n_qubits could not be inferred. Pass n_qubits explicitly.")
-
-    return tc.translation.qir2qiskit(tc_circ.to_qir(), n_qubits)
-
-
-PARAMETER_FREE_GATE_LABELS = {
-    "rz": r"$R_z$",
-    "rx": r"$R_x$",
-    "ry": r"$R_y$",
-    "rxx": r"$R_{xx}$",
-    "crx": r"$CR_x$",
-    "cry": r"$CR_y$",
-    "crz": r"$CR_z$",
-    "cx": r"$CX$",
-    "x": r"$X$",
-    "z": r"$Z$",
-    "h": r"$H$",
-}
-
-
-def make_parameter_free_qiskit_for_drawing(qc: QuantumCircuit) -> QuantumCircuit:
-    if qc.num_clbits > 0:
-        qc_draw = QuantumCircuit(qc.num_qubits, qc.num_clbits, name=qc.name)
-    else:
-        qc_draw = QuantumCircuit(qc.num_qubits, name=qc.name)
-
-    qc_draw.global_phase = 0.0
-
-    for inst in qc.data:
-        if hasattr(inst, "operation"):
-            operation = inst.operation
-            qargs = inst.qubits
-            cargs = inst.clbits
-        else:
-            operation, qargs, cargs = inst
-
-        if hasattr(operation, "to_mutable"):
-            op_draw = operation.to_mutable()
-        else:
-            try:
-                op_draw = operation.copy()
-            except Exception:
-                op_draw = shallow_copy(operation)
-
-        gate_name = str(getattr(op_draw, "name", "")).lower()
-
-        if gate_name in PARAMETER_FREE_GATE_LABELS:
-            op_draw.label = PARAMETER_FREE_GATE_LABELS[gate_name]
-        elif getattr(op_draw, "params", None):
-            op_draw.label = rf"${gate_name}$"
-
-        q_indices = [qc.find_bit(q).index for q in qargs]
-        c_indices = [qc.find_bit(c).index for c in cargs]
-
-        qc_draw.append(op_draw, q_indices, c_indices)
-
-    return qc_draw
-
-
-def save_circuit_matplotlib_png(
-    tc_circ: tc.Circuit,
-    outpath: str,
-    n_qubits: Optional[int] = None,
-    dpi: int = SAVE_DPI,
-    save_png: bool = CIRCUIT_SAVE_PNG,
-    save_pdf: bool = CIRCUIT_SAVE_PDF,
-    hide_params: bool = True,
-) -> None:
-    qc = tc_to_qiskit_qc(tc_circ, n_qubits=n_qubits)
-
-    if hide_params:
-        qc_for_draw = make_parameter_free_qiskit_for_drawing(qc)
-        drawer_style = {
-            "displaytext": PARAMETER_FREE_GATE_LABELS,
-        }
-    else:
-        qc_for_draw = qc
-        drawer_style = None
-
-    fig = circuit_drawer(
-        qc_for_draw,
-        output="mpl",
-        fold=-1,
-        style=drawer_style,
-    )
-
-    outdir = os.path.dirname(os.path.abspath(outpath))
-    os.makedirs(outdir, exist_ok=True)
-
-    root, _ = os.path.splitext(outpath)
-
-    if save_png:
-        fig.savefig(
-            root + ".png",
-            dpi=dpi,
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-    if save_pdf:
-        fig.savefig(
-            root + ".pdf",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-    plt.close(fig)
 
 
 # ==============================
@@ -383,12 +279,10 @@ def rms_theta_distance_periodic_only(
 
 
 # ============================================================
-# Sequential trace-out machinery
+# Sequential Kraus-channel machinery
 # ============================================================
-I2 = jnp.eye(2, dtype=COMPLEX_DTYPE)
 X2 = jnp.array([[0, 1], [1, 0]], dtype=COMPLEX_DTYPE)
-P0 = jnp.array([[1, 0], [0, 0]], dtype=COMPLEX_DTYPE)
-P1 = jnp.array([[0, 0], [0, 1]], dtype=COMPLEX_DTYPE)
+_RHO_QUBIT_ZERO = jnp.array([[1, 0], [0, 0]], dtype=COMPLEX_DTYPE)
 
 
 def U_rz(theta: jnp.ndarray) -> jnp.ndarray:
@@ -403,61 +297,12 @@ def U_rz(theta: jnp.ndarray) -> jnp.ndarray:
     )
 
 
-def U_rx(theta: jnp.ndarray) -> jnp.ndarray:
-    th = jnp.asarray(theta, dtype=REAL_DTYPE)
-    c = jnp.cos(0.5 * th).astype(COMPLEX_DTYPE)
-    s = jnp.sin(0.5 * th).astype(COMPLEX_DTYPE)
-
-    return jnp.array(
-        [
-            [c, -1j * s],
-            [-1j * s, c],
-        ],
-        dtype=COMPLEX_DTYPE,
-    )
-
-
 def U_rxx(theta: jnp.ndarray) -> jnp.ndarray:
     th = jnp.asarray(theta, dtype=REAL_DTYPE)
     c = jnp.cos(0.5 * th).astype(COMPLEX_DTYPE)
     s = jnp.sin(0.5 * th).astype(COMPLEX_DTYPE)
 
     return c * jnp.eye(4, dtype=COMPLEX_DTYPE) - 1j * s * jnp.kron(X2, X2)
-
-
-_U_CX = jnp.array(
-    [
-        [1, 0, 0, 0],
-        [0, 1, 0, 0],
-        [0, 0, 0, 1],
-        [0, 0, 1, 0],
-    ],
-    dtype=COMPLEX_DTYPE,
-)
-
-
-def U_crx(theta: jnp.ndarray, control_pos: int, target_pos: int) -> jnp.ndarray:
-    U = U_rx(theta)
-
-    if (control_pos, target_pos) == (0, 1):
-        return jnp.kron(P0, I2) + jnp.kron(P1, U)
-
-    if (control_pos, target_pos) == (1, 0):
-        return jnp.kron(I2, P0) + jnp.kron(U, P1)
-
-    raise ValueError("control_pos and target_pos must be different and in {0,1}.")
-
-
-def U_crz(theta: jnp.ndarray, control_pos: int, target_pos: int) -> jnp.ndarray:
-    U = U_rz(theta)
-
-    if (control_pos, target_pos) == (0, 1):
-        return jnp.kron(P0, I2) + jnp.kron(P1, U)
-
-    if (control_pos, target_pos) == (1, 0):
-        return jnp.kron(I2, P0) + jnp.kron(U, P1)
-
-    raise ValueError("control_pos and target_pos must be different and in {0,1}.")
 
 
 def apply_unitary_on_rho(
@@ -495,23 +340,6 @@ def apply_unitary_on_rho(
     return jnp.reshape(jnp.transpose(rho2, inv_perm), (2**k, 2**k))
 
 
-def append_fresh_ancilla_zero(rho_k: jnp.ndarray) -> jnp.ndarray:
-    return jnp.kron(rho_k, ket0_density(dtype=rho_k.dtype))
-
-
-def partial_trace_last_qubit(rho_kplus1: jnp.ndarray, k: int) -> jnp.ndarray:
-    dimk = 2**k
-    rho = jnp.reshape(rho_kplus1, (dimk, 2, dimk, 2))
-    return rho[:, 0, :, 0] + rho[:, 1, :, 1]
-
-
-def z_expectation_last_qubit(rho_kplus1: jnp.ndarray, k: int) -> jnp.ndarray:
-    dimk = 2**k
-    rho = jnp.reshape(rho_kplus1, (dimk, 2, dimk, 2))
-    z = jnp.trace(rho[:, 0, :, 0]) - jnp.trace(rho[:, 1, :, 1])
-    return jnp.real(z)
-
-
 def _hermitian(a: jnp.ndarray) -> jnp.ndarray:
     return 0.5 * (a + jnp.conjugate(a.T))
 
@@ -538,51 +366,80 @@ def _apply_kept_blocks(
     return rho
 
 
-def _rho6_after_layer(rho: jnp.ndarray, layer_theta: jnp.ndarray) -> jnp.ndarray:
+def _apply_dynamic_delay_kraus(
+    rho: jnp.ndarray,
+    varphi: jnp.ndarray,
+    phi: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Apply the fresh-ancilla interaction without constructing the ancilla.
+
+    The original dilation initializes a fresh ancilla in ``|0>``, applies
+
+        CX(center -> ancilla),
+        CRZ(ancilla -> center, varphi),
+        CRX(ancilla -> center, 2 * phi),
+        CRZ(ancilla -> center, varphi),
+
+    and then traces out the ancilla.  Because the ancilla is only a control
+    after the CX, the exactly equivalent channel on the center qubit has
+
+        K0 = |0><0|,
+        K1 = |psi><1|,
+        |psi> = -i sin(phi)|0> + exp(i varphi) cos(phi)|1>.
+
+    ``ANC_CENTER`` is the final kept-system wire, so the density matrix can be
+    viewed as blocks indexed by that qubit.  The off-diagonal blocks vanish
+    on tracing out the fresh ancilla.  The returned probability is the same
+    final fresh-ancilla ``p(1)`` used by the historical implementation.
+    """
+    expected_shape = (2**num_system_qubits, 2**num_system_qubits)
+    if rho.shape != expected_shape:
+        raise ValueError(
+            f"Expected a kept-state density matrix of shape {expected_shape}, "
+            f"got {rho.shape}."
+        )
+    if ANC_CENTER != num_system_qubits - 1:
+        raise ValueError("The direct Kraus channel requires ANC_CENTER last.")
+
+    dim_rest = 2 ** (num_system_qubits - 1)
+    rho_blocks = jnp.reshape(rho, (dim_rest, 2, dim_rest, 2))
+    rho00 = rho_blocks[:, 0, :, 0]
+    rho11 = rho_blocks[:, 1, :, 1]
+
+    sin_phi = jnp.sin(jnp.asarray(phi, dtype=REAL_DTYPE)).astype(COMPLEX_DTYPE)
+    cos_phi = jnp.cos(jnp.asarray(phi, dtype=REAL_DTYPE)).astype(COMPLEX_DTYPE)
+    phase = jnp.exp(
+        1j * jnp.asarray(varphi, dtype=REAL_DTYPE)
+    ).astype(COMPLEX_DTYPE)
+    psi = jnp.stack((-1j * sin_phi, phase * cos_phi))
+    rho_psi = psi[:, None] * jnp.conjugate(psi[None, :])
+
+    rho_next = (
+        jnp.einsum("rs,ab->rasb", rho00, _RHO_QUBIT_ZERO)
+        + jnp.einsum("rs,ab->rasb", rho11, rho_psi)
+    )
+    p1 = jnp.real(jnp.trace(rho11))
+
+    return jnp.reshape(rho_next, expected_shape), p1
+
+
+def _rho5_after_layer(
+    rho: jnp.ndarray,
+    layer_theta: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
     rho = _apply_kept_blocks(rho, layer_theta)
 
     varphi = layer_theta[-2]
     phi = layer_theta[-1]
 
-    rho6 = append_fresh_ancilla_zero(rho)
-
-    rho6 = apply_unitary_on_rho(
-        rho6,
-        _U_CX,
-        (ANC_CENTER, FRESH_ANCILLA),
-        6,
-    )
-
-    rho6 = apply_unitary_on_rho(
-        rho6,
-        U_crz(varphi, control_pos=1, target_pos=0),
-        (ANC_CENTER, FRESH_ANCILLA),
-        6,
-    )
-
-    rho6 = apply_unitary_on_rho(
-        rho6,
-        U_crx(2.0 * phi, control_pos=1, target_pos=0),
-        (ANC_CENTER, FRESH_ANCILLA),
-        6,
-    )
-
-    rho6 = apply_unitary_on_rho(
-        rho6,
-        U_crz(varphi, control_pos=1, target_pos=0),
-        (ANC_CENTER, FRESH_ANCILLA),
-        6,
-    )
-
-    return rho6
+    return _apply_dynamic_delay_kraus(rho, varphi, phi)
 
 
 def rho_keep_sequential_dpqc(theta: jnp.ndarray, n_layer: int) -> jnp.ndarray:
     theta_layers = jnp.reshape(theta, (n_layer, n_param_per_layer))
 
     def one_layer(rho: jnp.ndarray, layer_theta: jnp.ndarray):
-        rho6 = _rho6_after_layer(rho, layer_theta)
-        rho_next = partial_trace_last_qubit(rho6, k=num_system_qubits)
+        rho_next, _ = _rho5_after_layer(rho, layer_theta)
         return rho_next, None
 
     rho_final, _ = jax.lax.scan(one_layer, _RHO_KEEP_INIT, theta_layers)
@@ -594,9 +451,7 @@ def ancilla_p1_sequential_dpqc(theta: jnp.ndarray, n_layer: int) -> jnp.ndarray:
     theta_layers = jnp.reshape(theta, (n_layer, n_param_per_layer))
 
     def one_layer(rho: jnp.ndarray, layer_theta: jnp.ndarray):
-        rho6 = _rho6_after_layer(rho, layer_theta)
-        p1 = 0.5 * (1.0 - z_expectation_last_qubit(rho6, k=num_system_qubits))
-        rho_next = partial_trace_last_qubit(rho6, k=num_system_qubits)
+        rho_next, p1 = _rho5_after_layer(rho, layer_theta)
         return rho_next, p1
 
     _, p1_vec = jax.lax.scan(one_layer, _RHO_KEEP_INIT, theta_layers)
@@ -634,20 +489,25 @@ def partial_trace_one_qubit(
 
 
 def rho4_from_rho5(rho5: jnp.ndarray) -> jnp.ndarray:
-    return partial_trace_one_qubit(rho5, n_qubits=5, trace_wire=4)
+    """Trace wire 4 from rho5, preserving any leading batch dimensions."""
+    rho5 = jnp.asarray(rho5)
+    expected_shape = (2**num_system_qubits, 2**num_system_qubits)
+    if rho5.ndim < 2 or tuple(rho5.shape[-2:]) != expected_shape:
+        raise ValueError(
+            "rho5 must end in density-matrix dimensions "
+            f"{expected_shape}, got {rho5.shape}."
+        )
 
+    dim_keep = 2 ** (num_system_qubits - 1)
+    rho5_tensor = jnp.reshape(
+        rho5,
+        rho5.shape[:-2] + (dim_keep, 2, dim_keep, 2),
+    )
 
-# ==============================
-# Optimization loop per layer
-# ==============================
-success_rates_history = {}
+    # The final two-dimensional axes are ket/bra wire 4.  This works for both
+    # rho5 with shape (32, 32) and d_rho5 chunks with shape (B, 32, 32).
+    return jnp.trace(rho5_tensor, axis1=-3, axis2=-1)
 
-final_stats = {
-    "layer": [],
-    "success_rate": [],
-    "mean_energy": [],
-    "std_energy": [],
-}
 
 # ------------------------------------------------------------
 # Layer schedules
@@ -672,13 +532,13 @@ qfim_layer_list = build_layer_list(
     qfim_sparse_step,
 )
 
-if not vqe_layer_list:
+if RUN_VQE_STAGE and not vqe_layer_list:
     raise ValueError(
         "vqe_layer_list is empty. Check vqe_max_layer, "
         "vqe_dense_until_layer, and vqe_sparse_step."
     )
 
-if not qfim_layer_list:
+if RUN_QFIM_STAGE and not qfim_layer_list:
     raise ValueError(
         "qfim_layer_list is empty. Check qfim_max_layer, "
         "qfim_dense_until_layer, and qfim_sparse_step."
@@ -688,7 +548,6 @@ save_dir = f"./figs/dpqc/h_{h_param}"
 
 energy_fig_dir = os.path.join(save_dir, "energy_figures")
 qfim_fig_dir = os.path.join(save_dir, "qfim_figures")
-circuit_dir = os.path.join(save_dir, "optimized_circuits")
 numerical_results_dir = os.path.join(save_dir, "numerical_results")
 energy_results_dir = os.path.join(numerical_results_dir, "energy")
 qfim_results_dir = os.path.join(numerical_results_dir, "qfim")
@@ -696,7 +555,6 @@ qfim_results_dir = os.path.join(numerical_results_dir, "qfim")
 os.makedirs(save_dir, exist_ok=True)
 os.makedirs(energy_fig_dir, exist_ok=True)
 os.makedirs(qfim_fig_dir, exist_ok=True)
-os.makedirs(circuit_dir, exist_ok=True)
 os.makedirs(numerical_results_dir, exist_ok=True)
 os.makedirs(energy_results_dir, exist_ok=True)
 os.makedirs(qfim_results_dir, exist_ok=True)
@@ -865,382 +723,733 @@ def _multiple_tolerance_success_statistics(
 # ============================================================
 # VQE optimization: compute and save numerical results
 # ============================================================
-optimizer = optax.adam(learning_rate=lr)
+vqe_optimization_result_path = os.path.join(
+    energy_results_dir,
+    "vqe_optimization_histories.npz",
+)
 
-theta_history = {L: [] for L in vqe_layer_list}
-ancilla_p1_stats_by_layer = {}
-final_theta_periodic_only_rmsdist_by_layer = {}
-energy_traces_by_layer = {}
-grad_norm_traces_by_layer = {}
 
-# These store the optimization-time states and gradients at sample_iters.
-# They are later used to compute the QFIM eigenbasis gradient-sector weights.
-theta_sample_traces_by_layer = {}
-grad_sample_traces_by_layer = {}
+def _vqe_sample_slot_by_iteration(
+    num_steps: int,
+    sample_iterations,
+) -> np.ndarray:
+    """Map an optimization iteration to its fixed sample-buffer slot."""
+    num_steps = int(num_steps)
+    sample_iterations = np.asarray(sample_iterations, dtype=NP_INT_DTYPE)
 
-cmap = matplotlib.colormaps.get_cmap("viridis")
+    if num_steps < 0:
+        raise ValueError("num_steps must be nonnegative.")
+    if sample_iterations.ndim != 1:
+        raise ValueError("sample_iterations must be one-dimensional.")
+    if np.unique(sample_iterations).size != sample_iterations.size:
+        raise ValueError("sample_iterations must not contain duplicates.")
+    if np.any(sample_iterations < 0) or np.any(sample_iterations > num_steps):
+        raise ValueError(
+            "sample_iterations must lie in the inclusive range "
+            f"[0, {num_steps}]."
+        )
 
-for current_layer in tqdm(vqe_layer_list, desc="Layers (VQE)", unit="layer"):
+    slot_by_iteration = np.full(num_steps + 1, -1, dtype=np.int32)
+    slot_by_iteration[sample_iterations] = np.arange(
+        sample_iterations.size,
+        dtype=np.int32,
+    )
+    return slot_by_iteration
+
+
+def make_vqe_batch_runner(
+    current_layer: int,
+    *,
+    num_steps: int,
+    sample_iterations,
+    optimizer,
+):
+    """Compile one fixed-size batch of independent VQE optimization runs."""
+    current_layer = int(current_layer)
+    num_steps = int(num_steps)
     n_total_params = n_param_per_layer * current_layer
+    slot_by_iteration = _vqe_sample_slot_by_iteration(
+        num_steps,
+        sample_iterations,
+    )
+    num_samples = int(np.asarray(sample_iterations).size)
+    initial_sample_slot = int(slot_by_iteration[0])
+    scan_sample_slots = jnp.asarray(
+        slot_by_iteration[1:],
+        dtype=jnp.int32,
+    )
 
     def energy_fn(theta: jnp.ndarray) -> jnp.ndarray:
         return energy_from_rho_keep(
             rho_keep_sequential_dpqc(theta, n_layer=current_layer)
         )
 
-    energy_and_grad = jax.jit(jax.value_and_grad(energy_fn))
+    # The outer jit(vmap(scan)) compiles this differentiation together with
+    # the complete optimizer loop, avoiding one Python dispatch per step.
+    energy_and_grad = jax.value_and_grad(energy_fn)
 
-    @jax.jit
-    def optimization_step_and_measure(theta, opt_state, g_old):
-        updates, new_opt_state = optimizer.update(g_old, opt_state, theta)
-
-        theta_new = wrap_theta_periodic_only(
-            optax.apply_updates(theta, updates),
-            n_layer=current_layer,
-        )
-
-        e_new, g_new = energy_and_grad(theta_new)
-        g_new_norm = jnp.linalg.norm(g_new)
-
-        return theta_new, new_opt_state, e_new, g_new, g_new_norm
-
-    best_final_theta = None
-    best_final_energy = np.inf
-    all_energy_traces = []
-    all_gradnorm_traces = []
-    all_theta_sample_traces = []
-    all_grad_sample_traces = []
-
-    keys = jax.random.split(jax.random.PRNGKey(current_layer), num_runs)
-
-    for i in tqdm(
-        range(num_runs),
-        desc=f"Runs (L={current_layer})",
-        unit="run",
-        leave=False,
-    ):
-        theta = jax.random.uniform(
-            keys[i],
-            shape=(n_total_params,),
-            dtype=REAL_DTYPE,
-            minval=jnp.asarray(-jnp.pi, dtype=REAL_DTYPE),
-            maxval=jnp.asarray(jnp.pi, dtype=REAL_DTYPE),
-        )
-
+    def optimize_one_run(theta_initial: jnp.ndarray):
+        theta = jnp.asarray(theta_initial, dtype=REAL_DTYPE)
         opt_state = optimizer.init(theta)
+        energy_initial, grad = energy_and_grad(theta)
 
-        e_current, g_current = energy_and_grad(theta)
-        trace = [float(e_current)]
-        grad_trace = [float(jnp.linalg.norm(g_current))]
+        theta_samples = jnp.zeros(
+            (num_samples, n_total_params),
+            dtype=REAL_DTYPE,
+        )
+        grad_samples = jnp.zeros_like(theta_samples)
 
-        theta_sample_trace = []
-        grad_sample_trace = []
+        if initial_sample_slot >= 0:
+            theta_samples = theta_samples.at[initial_sample_slot].set(theta)
+            grad_samples = grad_samples.at[initial_sample_slot].set(grad)
 
-        if 0 in sample_iter_set:
-            theta_sample_trace.append(jax_to_np(theta, dtype=NP_REAL_DTYPE))
-            grad_sample_trace.append(jax_to_np(g_current, dtype=NP_REAL_DTYPE))
+        def one_step(carry, sample_slot):
+            (
+                theta_old,
+                opt_state_old,
+                grad_old,
+                theta_samples_old,
+                grad_samples_old,
+            ) = carry
 
-        for step_idx in range(1, steps + 1):
+            updates, opt_state_new = optimizer.update(
+                grad_old,
+                opt_state_old,
+                theta_old,
+            )
+            theta_new = wrap_theta_periodic_only(
+                optax.apply_updates(theta_old, updates),
+                n_layer=current_layer,
+            )
+            energy_new, grad_new = energy_and_grad(theta_new)
+            grad_norm_new = jnp.linalg.norm(grad_new)
+
+            def record_sample(sample_buffers):
+                theta_buffer, grad_buffer = sample_buffers
+                return (
+                    theta_buffer.at[sample_slot].set(theta_new),
+                    grad_buffer.at[sample_slot].set(grad_new),
+                )
+
+            theta_samples_new, grad_samples_new = jax.lax.cond(
+                sample_slot >= 0,
+                record_sample,
+                lambda sample_buffers: sample_buffers,
+                (theta_samples_old, grad_samples_old),
+            )
+
+            new_carry = (
+                theta_new,
+                opt_state_new,
+                grad_new,
+                theta_samples_new,
+                grad_samples_new,
+            )
+            measurements = (energy_new, grad_norm_new)
+            return new_carry, measurements
+
+        (
+            (
+                theta_final,
+                _,
+                _,
+                theta_samples_final,
+                grad_samples_final,
+            ),
+            (energy_after_steps, grad_norm_after_steps),
+        ) = jax.lax.scan(
+            one_step,
             (
                 theta,
                 opt_state,
-                e_current,
-                g_current,
-                g_current_norm,
-            ) = optimization_step_and_measure(
-                theta,
-                opt_state,
-                g_current,
-            )
-
-            trace.append(float(e_current))
-            grad_trace.append(float(g_current_norm))
-
-            if step_idx in sample_iter_set:
-                theta_sample_trace.append(jax_to_np(theta, dtype=NP_REAL_DTYPE))
-                grad_sample_trace.append(jax_to_np(g_current, dtype=NP_REAL_DTYPE))
-
-        all_energy_traces.append(np.asarray(trace, dtype=NP_REAL_DTYPE))
-        all_gradnorm_traces.append(np.asarray(grad_trace, dtype=NP_REAL_DTYPE))
-        all_theta_sample_traces.append(
-            np.asarray(theta_sample_trace, dtype=NP_REAL_DTYPE)
+                grad,
+                theta_samples,
+                grad_samples,
+            ),
+            scan_sample_slots,
         )
-        all_grad_sample_traces.append(
-            np.asarray(grad_sample_trace, dtype=NP_REAL_DTYPE)
+
+        energy_trace = jnp.concatenate(
+            (energy_initial[None], energy_after_steps),
+            axis=0,
         )
-        theta_history[current_layer].append(jax_to_np(theta))
-
-        final_e = trace[-1]
-
-        if final_e < best_final_energy:
-            best_final_energy = final_e
-            best_final_theta = jax_to_np(theta)
-
-    theta_history[current_layer] = np.stack(theta_history[current_layer], axis=0)
-    theta_runs_jnp = jnp.asarray(theta_history[current_layer], dtype=REAL_DTYPE)
-
-    theta_ref_jnp = jnp.asarray(best_final_theta, dtype=REAL_DTYPE)
-
-    d_theta_runs = jax.vmap(
-        lambda th: rms_theta_distance_periodic_only(
-            th,
-            theta_ref_jnp,
-            n_layer=current_layer,
+        grad_norm_trace = jnp.concatenate(
+            (jnp.linalg.norm(grad)[None], grad_norm_after_steps),
+            axis=0,
         )
-    )(theta_runs_jnp)
 
-    final_theta_periodic_only_rmsdist_by_layer[current_layer] = jax_to_np(
-        d_theta_runs,
-        dtype=NP_REAL_DTYPE,
-    )
+        return (
+            theta_final,
+            energy_trace,
+            grad_norm_trace,
+            theta_samples_final,
+            grad_samples_final,
+        )
 
-    energy_data = np.stack(all_energy_traces, axis=0)
-    gradnorm_data = np.stack(all_gradnorm_traces, axis=0)
-    theta_sample_data = np.stack(all_theta_sample_traces, axis=0)
-    grad_sample_data = np.stack(all_grad_sample_traces, axis=0)
+    return jax.jit(jax.vmap(optimize_one_run))
 
-    energy_traces_by_layer[current_layer] = energy_data
-    grad_norm_traces_by_layer[current_layer] = gradnorm_data
-    theta_sample_traces_by_layer[current_layer] = theta_sample_data
-    grad_sample_traces_by_layer[current_layer] = grad_sample_data
 
-    best_tc_circ = create_dpqc(
-        jnp.asarray(best_final_theta, dtype=REAL_DTYPE),
-        n_layer=current_layer,
-        num_system=num_system_qubits,
-    )
+def _pad_vqe_theta_batch(
+    theta_batch: jnp.ndarray,
+    batch_size: int,
+) -> Tuple[jnp.ndarray, int]:
+    """Pad a final partial batch without changing any valid vmap lane."""
+    batch_size = int(batch_size)
+    valid_count = int(theta_batch.shape[0])
 
-    save_circuit_matplotlib_png(
-        best_tc_circ,
-        os.path.join(circuit_dir, f"optimized_circuit_L{current_layer}.png"),
-        n_qubits=num_system_qubits + current_layer,
-        dpi=SAVE_DPI,
-        hide_params=True,
-    )
+    if not 1 <= valid_count <= batch_size:
+        raise ValueError(
+            f"Expected between 1 and {batch_size} runs, got {valid_count}."
+        )
+    if valid_count == batch_size:
+        return theta_batch, valid_count
 
-    p1_runs = np.array(
-        jax.jit(
-            jax.vmap(
-                lambda th: ancilla_p1_sequential_dpqc(
-                    th,
-                    n_layer=current_layer,
-                )
-            )
-        )(theta_runs_jnp),
-        dtype=NP_REAL_DTYPE,
-    )
-
-    anc_ids = np.arange(
-        num_system_qubits,
-        num_system_qubits + current_layer,
-        dtype=NP_INT_DTYPE,
-    )
-
-    ancilla_p1_stats_by_layer[current_layer] = {
-        "ancilla_qubits": anc_ids.copy(),
-        "p1_runs": p1_runs,
-        "mean": np.mean(p1_runs, axis=0),
-        "var": np.var(p1_runs, axis=0, ddof=0),
-        "std": np.std(p1_runs, axis=0, ddof=0),
-    }
-
-    mean_trace = np.mean(energy_data, axis=0)
-    std_trace = np.std(energy_data, axis=0)
-
-    success_rate_per_step = np.mean(
-        np.abs(energy_data - smallest_eigval) <= tolerance,
+    padding = jnp.repeat(
+        theta_batch[-1:, :],
+        repeats=batch_size - valid_count,
         axis=0,
     )
-
-    success_rates_history[current_layer] = success_rate_per_step
-
-    final_stats["layer"].append(current_layer)
-    final_stats["success_rate"].append(success_rate_per_step[-1])
-    final_stats["mean_energy"].append(mean_trace[-1])
-    final_stats["std_energy"].append(std_trace[-1])
+    return jnp.concatenate((theta_batch, padding), axis=0), valid_count
 
 
-vqe_optimization_result_path = os.path.join(
-    energy_results_dir,
-    "vqe_optimization_histories.npz",
-)
+def _run_vqe_optimization():
+    """Run scan/vmap VQE, save the historical NPZ schema, and return samples."""
+    optimizer = optax.adam(learning_rate=lr)
 
-save_npz_result(
-    vqe_optimization_result_path,
-    h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-    tolerance=np.asarray(tolerance, dtype=NP_REAL_DTYPE),
-    steps=np.asarray(steps, dtype=NP_INT_DTYPE),
-    num_runs=np.asarray(num_runs, dtype=NP_INT_DTYPE),
-    lr=np.asarray(lr, dtype=NP_REAL_DTYPE),
-    smallest_eigval=np.asarray(smallest_eigval, dtype=NP_REAL_DTYPE),
-    sample_every=np.asarray(sample_every, dtype=NP_INT_DTYPE),
-    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-    vqe_layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-    qfim_layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
-    final_stats_layer=np.asarray(final_stats["layer"], dtype=NP_INT_DTYPE),
-    final_stats_success_rate=np.asarray(final_stats["success_rate"], dtype=NP_REAL_DTYPE),
-    final_stats_mean_energy=np.asarray(final_stats["mean_energy"], dtype=NP_REAL_DTYPE),
-    final_stats_std_energy=np.asarray(final_stats["std_energy"], dtype=NP_REAL_DTYPE),
-    **_layer_arrays_for_npz(energy_traces_by_layer, "energy_traces"),
-    **_layer_arrays_for_npz(grad_norm_traces_by_layer, "grad_norm_traces"),
-    **_layer_arrays_for_npz(theta_history, "theta_final"),
-    **_layer_arrays_for_npz(theta_sample_traces_by_layer, "theta_samples"),
-    **_layer_arrays_for_npz(grad_sample_traces_by_layer, "grad_samples"),
-    **_layer_arrays_for_npz(success_rates_history, "success_rates"),
-    **_layer_arrays_for_npz(final_theta_periodic_only_rmsdist_by_layer, "theta_rmsdist"),
-    **{
-        f"L{int(L)}_ancilla_qubits": data["ancilla_qubits"]
-        for L, data in ancilla_p1_stats_by_layer.items()
-    },
-    **{
-        f"L{int(L)}_ancilla_p1_runs": data["p1_runs"]
-        for L, data in ancilla_p1_stats_by_layer.items()
-    },
-    **{
-        f"L{int(L)}_ancilla_p1_mean": data["mean"]
-        for L, data in ancilla_p1_stats_by_layer.items()
-    },
-    **{
-        f"L{int(L)}_ancilla_p1_var": data["var"]
-        for L, data in ancilla_p1_stats_by_layer.items()
-    },
-    **{
-        f"L{int(L)}_ancilla_p1_std": data["std"]
-        for L, data in ancilla_p1_stats_by_layer.items()
-    },
-)
+    theta_history = {}
+    ancilla_p1_stats_by_layer = {}
+    final_theta_periodic_only_rmsdist_by_layer = {}
+    energy_traces_by_layer = {}
+    grad_norm_traces_by_layer = {}
+    theta_sample_traces_by_layer = {}
+    grad_sample_traces_by_layer = {}
+    success_rates_history = {}
+    final_stats = {
+        "layer": [],
+        "success_rate": [],
+        "mean_energy": [],
+        "std_energy": [],
+    }
 
+    for current_layer in tqdm(
+        vqe_layer_list,
+        desc="Layers (VQE)",
+        unit="layer",
+    ):
+        n_total_params = n_param_per_layer * current_layer
+        run_vqe_batch = make_vqe_batch_runner(
+            current_layer,
+            num_steps=steps,
+            sample_iterations=sample_iters,
+            optimizer=optimizer,
+        )
 
-# ------------------------------------------------------------
-# Final-energy success probabilities at multiple error thresholds
-# ------------------------------------------------------------
-# Keep this archive separate from the legacy single-tolerance history above:
-# the latter is an optimization-step time series, while this analysis uses
-# only the final energy from each independent optimization trial.
-final_energies_by_layer = {
-    int(layer): np.asarray(
-        energy_traces_by_layer[int(layer)][:, -1],
-        dtype=NP_REAL_DTYPE,
+        # Preserve the exact historical key sequence and run ordering.
+        keys = jax.random.split(
+            jax.random.PRNGKey(current_layer),
+            num_runs,
+        )
+        theta_initial_runs = jnp.stack(
+            [
+                jax.random.uniform(
+                    keys[run_index],
+                    shape=(n_total_params,),
+                    dtype=REAL_DTYPE,
+                    minval=jnp.asarray(-jnp.pi, dtype=REAL_DTYPE),
+                    maxval=jnp.asarray(jnp.pi, dtype=REAL_DTYPE),
+                )
+                for run_index in range(num_runs)
+            ],
+            axis=0,
+        )
+
+        output_parts = tuple([] for _ in range(5))
+        batch_starts = range(0, num_runs, VQE_BATCH_SIZE)
+
+        for batch_start in tqdm(
+            batch_starts,
+            total=(num_runs + VQE_BATCH_SIZE - 1) // VQE_BATCH_SIZE,
+            desc=f"Run batches (L={current_layer}, batch={VQE_BATCH_SIZE})",
+            unit="batch",
+            leave=False,
+        ):
+            batch_end = min(batch_start + VQE_BATCH_SIZE, num_runs)
+            theta_batch, valid_count = _pad_vqe_theta_batch(
+                theta_initial_runs[batch_start:batch_end],
+                VQE_BATCH_SIZE,
+            )
+
+            # One transfer/synchronization per five runs replaces the former
+            # two scalar synchronizations at every optimizer step.
+            host_outputs = jax.device_get(run_vqe_batch(theta_batch))
+            for parts, values in zip(output_parts, host_outputs):
+                parts.append(
+                    np.asarray(
+                        values[:valid_count],
+                        dtype=NP_REAL_DTYPE,
+                    )
+                )
+
+        (
+            theta_final_data,
+            energy_data,
+            gradnorm_data,
+            theta_sample_data,
+            grad_sample_data,
+        ) = (
+            np.concatenate(parts, axis=0)
+            for parts in output_parts
+        )
+
+        expected_shapes = (
+            (num_runs, n_total_params),
+            (num_runs, steps + 1),
+            (num_runs, steps + 1),
+            (num_runs, sample_iters.size, n_total_params),
+            (num_runs, sample_iters.size, n_total_params),
+        )
+        actual_shapes = tuple(
+            array.shape
+            for array in (
+                theta_final_data,
+                energy_data,
+                gradnorm_data,
+                theta_sample_data,
+                grad_sample_data,
+            )
+        )
+        if actual_shapes != expected_shapes:
+            raise AssertionError(
+                f"Unexpected VQE output shapes for L={current_layer}: "
+                f"{actual_shapes} != {expected_shapes}."
+            )
+
+        best_final_theta = None
+        best_final_energy = np.inf
+        for run_index in range(num_runs):
+            final_energy = energy_data[run_index, -1]
+            if final_energy < best_final_energy:
+                best_final_energy = final_energy
+                best_final_theta = theta_final_data[run_index].copy()
+
+        if best_final_theta is None:
+            raise FloatingPointError(
+                f"No finite final VQE energy was produced for L={current_layer}."
+            )
+
+        theta_history[current_layer] = theta_final_data
+        theta_runs_jnp = jnp.asarray(theta_final_data, dtype=REAL_DTYPE)
+        theta_ref_jnp = jnp.asarray(best_final_theta, dtype=REAL_DTYPE)
+
+        d_theta_runs = jax.vmap(
+            lambda th: rms_theta_distance_periodic_only(
+                th,
+                theta_ref_jnp,
+                n_layer=current_layer,
+            )
+        )(theta_runs_jnp)
+
+        final_theta_periodic_only_rmsdist_by_layer[current_layer] = (
+            jax_to_np(d_theta_runs, dtype=NP_REAL_DTYPE)
+        )
+        energy_traces_by_layer[current_layer] = energy_data
+        grad_norm_traces_by_layer[current_layer] = gradnorm_data
+        theta_sample_traces_by_layer[current_layer] = theta_sample_data
+        grad_sample_traces_by_layer[current_layer] = grad_sample_data
+
+        p1_runs = jax_to_np(
+            jax.jit(
+                jax.vmap(
+                    lambda th: ancilla_p1_sequential_dpqc(
+                        th,
+                        n_layer=current_layer,
+                    )
+                )
+            )(theta_runs_jnp),
+            dtype=NP_REAL_DTYPE,
+        )
+        anc_ids = np.arange(
+            num_system_qubits,
+            num_system_qubits + current_layer,
+            dtype=NP_INT_DTYPE,
+        )
+        ancilla_p1_stats_by_layer[current_layer] = {
+            "ancilla_qubits": anc_ids.copy(),
+            "p1_runs": p1_runs,
+            "mean": np.mean(p1_runs, axis=0),
+            "var": np.var(p1_runs, axis=0, ddof=0),
+            "std": np.std(p1_runs, axis=0, ddof=0),
+        }
+
+        mean_trace = np.mean(energy_data, axis=0)
+        std_trace = np.std(energy_data, axis=0)
+        success_rate_per_step = np.mean(
+            np.abs(energy_data - smallest_eigval) <= tolerance,
+            axis=0,
+        )
+        success_rates_history[current_layer] = success_rate_per_step
+        final_stats["layer"].append(current_layer)
+        final_stats["success_rate"].append(success_rate_per_step[-1])
+        final_stats["mean_energy"].append(mean_trace[-1])
+        final_stats["std_energy"].append(std_trace[-1])
+
+    save_npz_result(
+        vqe_optimization_result_path,
+        h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+        tolerance=np.asarray(tolerance, dtype=NP_REAL_DTYPE),
+        steps=np.asarray(steps, dtype=NP_INT_DTYPE),
+        num_runs=np.asarray(num_runs, dtype=NP_INT_DTYPE),
+        lr=np.asarray(lr, dtype=NP_REAL_DTYPE),
+        smallest_eigval=np.asarray(
+            smallest_eigval,
+            dtype=NP_REAL_DTYPE,
+        ),
+        sample_every=np.asarray(sample_every, dtype=NP_INT_DTYPE),
+        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+        vqe_layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+        qfim_layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
+        final_stats_layer=np.asarray(
+            final_stats["layer"],
+            dtype=NP_INT_DTYPE,
+        ),
+        final_stats_success_rate=np.asarray(
+            final_stats["success_rate"],
+            dtype=NP_REAL_DTYPE,
+        ),
+        final_stats_mean_energy=np.asarray(
+            final_stats["mean_energy"],
+            dtype=NP_REAL_DTYPE,
+        ),
+        final_stats_std_energy=np.asarray(
+            final_stats["std_energy"],
+            dtype=NP_REAL_DTYPE,
+        ),
+        **_layer_arrays_for_npz(energy_traces_by_layer, "energy_traces"),
+        **_layer_arrays_for_npz(
+            grad_norm_traces_by_layer,
+            "grad_norm_traces",
+        ),
+        **_layer_arrays_for_npz(theta_history, "theta_final"),
+        **_layer_arrays_for_npz(
+            theta_sample_traces_by_layer,
+            "theta_samples",
+        ),
+        **_layer_arrays_for_npz(
+            grad_sample_traces_by_layer,
+            "grad_samples",
+        ),
+        **_layer_arrays_for_npz(success_rates_history, "success_rates"),
+        **_layer_arrays_for_npz(
+            final_theta_periodic_only_rmsdist_by_layer,
+            "theta_rmsdist",
+        ),
+        **{
+            f"L{int(layer)}_ancilla_qubits": data["ancilla_qubits"]
+            for layer, data in ancilla_p1_stats_by_layer.items()
+        },
+        **{
+            f"L{int(layer)}_ancilla_p1_runs": data["p1_runs"]
+            for layer, data in ancilla_p1_stats_by_layer.items()
+        },
+        **{
+            f"L{int(layer)}_ancilla_p1_mean": data["mean"]
+            for layer, data in ancilla_p1_stats_by_layer.items()
+        },
+        **{
+            f"L{int(layer)}_ancilla_p1_var": data["var"]
+            for layer, data in ancilla_p1_stats_by_layer.items()
+        },
+        **{
+            f"L{int(layer)}_ancilla_p1_std": data["std"]
+            for layer, data in ancilla_p1_stats_by_layer.items()
+        },
     )
-    for layer in vqe_layer_list
-}
 
-multiple_tolerance_success = _multiple_tolerance_success_statistics(
-    final_energies_by_layer,
-    layers=vqe_layer_list,
-    thresholds=success_probability_thresholds,
-    ground_energy=smallest_eigval,
-    num_trials=num_runs,
-)
+    final_energies_by_layer = {
+        int(layer): np.asarray(
+            energy_traces_by_layer[int(layer)][:, -1],
+            dtype=NP_REAL_DTYPE,
+        )
+        for layer in vqe_layer_list
+    }
+    multiple_tolerance_success = _multiple_tolerance_success_statistics(
+        final_energies_by_layer,
+        layers=vqe_layer_list,
+        thresholds=success_probability_thresholds,
+        ground_energy=smallest_eigval,
+        num_trials=num_runs,
+    )
+    multiple_tolerance_success_result_path = os.path.join(
+        energy_results_dir,
+        "vqe_success_probability_multiple_tolerances.npz",
+    )
 
-multiple_tolerance_success_result_path = os.path.join(
-    energy_results_dir,
-    "vqe_success_probability_multiple_tolerances.npz",
-)
+    save_npz_result(
+        multiple_tolerance_success_result_path,
+        h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+        final_iteration=np.asarray(steps, dtype=NP_INT_DTYPE),
+        layers=multiple_tolerance_success["layers"],
+        thresholds=multiple_tolerance_success["thresholds"],
+        tolerances=multiple_tolerance_success["thresholds"],
+        num_trials=multiple_tolerance_success["num_trials"],
+        num_runs=multiple_tolerance_success["num_trials"],
+        R=multiple_tolerance_success["num_trials"],
+        trial_indices=np.arange(1, num_runs + 1, dtype=NP_INT_DTYPE),
+        ground_energy=multiple_tolerance_success["ground_energy"],
+        smallest_eigval=multiple_tolerance_success["ground_energy"],
+        final_energies=multiple_tolerance_success["final_energies"],
+        raw_final_energies=multiple_tolerance_success["final_energies"],
+        raw_final_energy_errors=multiple_tolerance_success[
+            "raw_final_energy_errors"
+        ],
+        final_energy_errors=multiple_tolerance_success[
+            "final_energy_errors"
+        ],
+        success_indicators=multiple_tolerance_success[
+            "success_indicators"
+        ],
+        success_counts=multiple_tolerance_success["success_counts"],
+        success_probabilities=multiple_tolerance_success[
+            "success_probabilities"
+        ],
+        energy_error_clipped_at_zero=np.asarray(True, dtype=np.bool_),
+        success_comparison=np.asarray("<="),
+        probability_denominator=np.asarray("num_trials"),
+        **_layer_arrays_for_npz(
+            {
+                int(layer): multiple_tolerance_success["final_energies"][
+                    layer_index
+                ]
+                for layer_index, layer in enumerate(
+                    multiple_tolerance_success["layers"]
+                )
+            },
+            "final_energies",
+        ),
+        **_layer_arrays_for_npz(
+            {
+                int(layer): multiple_tolerance_success[
+                    "raw_final_energy_errors"
+                ][layer_index]
+                for layer_index, layer in enumerate(
+                    multiple_tolerance_success["layers"]
+                )
+            },
+            "raw_final_energy_errors",
+        ),
+        **_layer_arrays_for_npz(
+            {
+                int(layer): multiple_tolerance_success[
+                    "final_energy_errors"
+                ][layer_index]
+                for layer_index, layer in enumerate(
+                    multiple_tolerance_success["layers"]
+                )
+            },
+            "final_energy_errors",
+        ),
+        **_layer_arrays_for_npz(
+            {
+                int(layer): multiple_tolerance_success[
+                    "success_indicators"
+                ][layer_index]
+                for layer_index, layer in enumerate(
+                    multiple_tolerance_success["layers"]
+                )
+            },
+            "success_indicators",
+        ),
+        **_layer_arrays_for_npz(
+            {
+                int(layer): multiple_tolerance_success["success_counts"][
+                    layer_index
+                ]
+                for layer_index, layer in enumerate(
+                    multiple_tolerance_success["layers"]
+                )
+            },
+            "success_counts",
+        ),
+        **_layer_arrays_for_npz(
+            {
+                int(layer): multiple_tolerance_success[
+                    "success_probabilities"
+                ][layer_index]
+                for layer_index, layer in enumerate(
+                    multiple_tolerance_success["layers"]
+                )
+            },
+            "success_probabilities",
+        ),
+    )
 
-save_npz_result(
-    multiple_tolerance_success_result_path,
-    h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-    final_iteration=np.asarray(steps, dtype=NP_INT_DTYPE),
-    layers=multiple_tolerance_success["layers"],
-    thresholds=multiple_tolerance_success["thresholds"],
-    # ``tolerances`` is an explicit compatibility alias for visualization.
-    tolerances=multiple_tolerance_success["thresholds"],
-    num_trials=multiple_tolerance_success["num_trials"],
-    num_runs=multiple_tolerance_success["num_trials"],
-    R=multiple_tolerance_success["num_trials"],
-    trial_indices=np.arange(1, num_runs + 1, dtype=NP_INT_DTYPE),
-    ground_energy=multiple_tolerance_success["ground_energy"],
-    smallest_eigval=multiple_tolerance_success["ground_energy"],
-    final_energies=multiple_tolerance_success["final_energies"],
-    # Final energies are stored without post-processing; retain this alias to
-    # make the distinction from the clipped error matrix self-documenting.
-    raw_final_energies=multiple_tolerance_success["final_energies"],
-    raw_final_energy_errors=multiple_tolerance_success[
-        "raw_final_energy_errors"
-    ],
-    final_energy_errors=multiple_tolerance_success["final_energy_errors"],
-    success_indicators=multiple_tolerance_success["success_indicators"],
-    success_counts=multiple_tolerance_success["success_counts"],
-    success_probabilities=multiple_tolerance_success[
-        "success_probabilities"
-    ],
-    energy_error_clipped_at_zero=np.asarray(True, dtype=np.bool_),
-    success_comparison=np.asarray("<="),
-    probability_denominator=np.asarray("num_trials"),
-    **_layer_arrays_for_npz(
-        {
-            int(layer): multiple_tolerance_success["final_energies"][layer_idx]
-            for layer_idx, layer in enumerate(
-                multiple_tolerance_success["layers"]
+    return theta_sample_traces_by_layer, grad_sample_traces_by_layer
+
+
+def _load_saved_vqe_samples(inpath: str):
+    """Load only the float64 VQE arrays required by the QFIM stage."""
+    if not os.path.isfile(inpath):
+        raise FileNotFoundError(
+            "The QFIM-only stage requires an existing VQE archive: "
+            f"{inpath}"
+        )
+
+    with np.load(inpath, allow_pickle=False) as data:
+        metadata_keys = (
+            "h_param",
+            "num_runs",
+            "sample_iters",
+            "vqe_layers",
+        )
+        missing_metadata = [key for key in metadata_keys if key not in data]
+        if missing_metadata:
+            raise KeyError(
+                "VQE archive is missing required metadata: "
+                + ", ".join(missing_metadata)
             )
-        },
-        "final_energies",
-    ),
-    **_layer_arrays_for_npz(
-        {
-            int(layer): multiple_tolerance_success[
-                "raw_final_energy_errors"
-            ][layer_idx]
-            for layer_idx, layer in enumerate(
-                multiple_tolerance_success["layers"]
+
+        archived_h_param = np.asarray(data["h_param"])
+        archived_num_runs = np.asarray(data["num_runs"])
+        archived_sample_iters = np.array(
+            data["sample_iters"],
+            dtype=NP_INT_DTYPE,
+            copy=True,
+        )
+        archived_layers = np.array(
+            data["vqe_layers"],
+            dtype=NP_INT_DTYPE,
+            copy=True,
+        )
+
+        if archived_h_param.shape != () or archived_num_runs.shape != ():
+            raise ValueError(
+                "h_param and num_runs must be scalar values in the VQE archive."
             )
-        },
-        "raw_final_energy_errors",
-    ),
-    **_layer_arrays_for_npz(
-        {
-            int(layer): multiple_tolerance_success["final_energy_errors"][
-                layer_idx
+        archived_h_value = NP_REAL_DTYPE(archived_h_param.item())
+        if archived_h_value != NP_REAL_DTYPE(h_param):
+            raise ValueError(
+                "Saved VQE h_param does not match the current Hamiltonian: "
+                f"{float(archived_h_value)} != {float(h_param)}."
+            )
+
+        archived_num_runs_int = int(archived_num_runs.item())
+        if archived_num_runs_int <= 0:
+            raise ValueError("Saved num_runs must be positive.")
+        if archived_layers.ndim != 1 or archived_layers.size == 0:
+            raise ValueError("Saved vqe_layers must be a non-empty 1D array.")
+        if np.any(archived_layers <= 0):
+            raise ValueError("Saved vqe_layers must be positive.")
+        if np.unique(archived_layers).size != archived_layers.size:
+            raise ValueError("Saved vqe_layers must not contain duplicates.")
+        if (
+            archived_sample_iters.ndim != 1
+            or archived_sample_iters.size == 0
+        ):
+            raise ValueError(
+                "Saved sample_iters must be a non-empty 1D array."
+            )
+        if np.any(archived_sample_iters < 0) or np.any(
+            np.diff(archived_sample_iters) <= 0
+        ):
+            raise ValueError(
+                "Saved sample_iters must be nonnegative and strictly increasing."
+            )
+
+        theta_by_layer = {}
+        grad_by_layer = {}
+        expected_real_dtype = np.dtype(NP_REAL_DTYPE)
+
+        for layer_value in archived_layers:
+            layer = int(layer_value)
+            theta_key = f"L{layer}_theta_samples"
+            grad_key = f"L{layer}_grad_samples"
+            missing_keys = [
+                key for key in (theta_key, grad_key)
+                if key not in data
             ]
-            for layer_idx, layer in enumerate(
-                multiple_tolerance_success["layers"]
-            )
-        },
-        "final_energy_errors",
-    ),
-    **_layer_arrays_for_npz(
-        {
-            int(layer): multiple_tolerance_success["success_indicators"][
-                layer_idx
-            ]
-            for layer_idx, layer in enumerate(
-                multiple_tolerance_success["layers"]
-            )
-        },
-        "success_indicators",
-    ),
-    **_layer_arrays_for_npz(
-        {
-            int(layer): multiple_tolerance_success["success_counts"][layer_idx]
-            for layer_idx, layer in enumerate(
-                multiple_tolerance_success["layers"]
-            )
-        },
-        "success_counts",
-    ),
-    **_layer_arrays_for_npz(
-        {
-            int(layer): multiple_tolerance_success[
-                "success_probabilities"
-            ][layer_idx]
-            for layer_idx, layer in enumerate(
-                multiple_tolerance_success["layers"]
-            )
-        },
-        "success_probabilities",
-    ),
-)
+            if missing_keys:
+                raise KeyError(
+                    "VQE archive is missing required arrays: "
+                    + ", ".join(missing_keys)
+                )
 
+            theta_raw = data[theta_key]
+            grad_raw = data[grad_key]
+            if (
+                theta_raw.dtype != expected_real_dtype
+                or grad_raw.dtype != expected_real_dtype
+            ):
+                raise TypeError(
+                    f"Saved L={layer} theta/gradient samples must be "
+                    f"float64, got {theta_raw.dtype} and {grad_raw.dtype}."
+                )
+
+            theta = np.array(theta_raw, dtype=NP_REAL_DTYPE, copy=True)
+            grad = np.array(grad_raw, dtype=NP_REAL_DTYPE, copy=True)
+            expected_shape = (
+                archived_num_runs_int,
+                archived_sample_iters.size,
+                n_param_per_layer * layer,
+            )
+            if theta.shape != expected_shape or grad.shape != expected_shape:
+                raise ValueError(
+                    f"Saved L={layer} sample shape mismatch: "
+                    f"theta={theta.shape}, grad={grad.shape}, "
+                    f"expected={expected_shape}."
+                )
+            if not np.all(np.isfinite(theta)) or not np.all(np.isfinite(grad)):
+                raise ValueError(
+                    f"Saved L={layer} theta/gradient samples contain "
+                    "non-finite values."
+                )
+
+            theta_by_layer[layer] = theta
+            grad_by_layer[layer] = grad
+
+    return (
+        theta_by_layer,
+        grad_by_layer,
+        [int(layer) for layer in archived_layers.tolist()],
+        archived_sample_iters.astype(NP_INT_DTYPE, copy=True),
+        archived_num_runs_int,
+    )
+
+
+if RUN_VQE_STAGE:
+    (
+        theta_sample_traces_by_layer,
+        grad_sample_traces_by_layer,
+    ) = _run_vqe_optimization()
+else:
+    (
+        theta_sample_traces_by_layer,
+        grad_sample_traces_by_layer,
+        vqe_layer_list,
+        sample_iters,
+        num_runs,
+    ) = _load_saved_vqe_samples(vqe_optimization_result_path)
+    sample_iter_set = set(int(value) for value in sample_iters.tolist())
+    print(
+        "Loaded saved float64 VQE samples for the QFIM stage: "
+        f"{vqe_optimization_result_path}"
+    )
+
+if not RUN_QFIM_STAGE:
+    print(f"Saved VQE numerical results to: {energy_results_dir}")
+    print(
+        "Circuit drawing was skipped. To draw the saved optimized circuits, "
+        "run src/dpqc/DPQC_overparam_draw_circuits.py separately."
+    )
+    raise SystemExit(0)
 
 # ============================================================
 # Random-parameter QFIM: compute and save numerical results
 # ============================================================
-# QFIM rank + eigenvalue plots
-#   Only reduced-system QFIM for keep=(0,1,2,3)
+# QFIM rank + eigenvalue diagnostics for both retained subsystems.
 # ============================================================
 KEEP_WIRES_4 = (0, 1, 2, 3)
 assert KEEP_WIRES_4 == tuple(range(num_system_qubits - 1))
+KEEP_WIRES_5 = tuple(range(num_system_qubits))
 
 QFIM_EFFECTIVE_RANK_THRESHOLD = cfg.QFIM_EFFECTIVE_RANK_THRESHOLD
 
@@ -1702,17 +1911,189 @@ def make_reduced01234_qfim_matrix_fn_for_layer_sequential(
     )
 
 
-def make_reduced0123_rho_rank_fn_for_layer_sequential(n_layer: int):
+def make_reduced_rho_rank_fn_for_layer_sequential(
+    n_layer: int,
+    *,
+    rho_from_rho5_fn,
+):
     @jax.jit
-    def rho_rank_reduced0123(theta: jnp.ndarray) -> jnp.ndarray:
+    def rho_rank(theta: jnp.ndarray) -> jnp.ndarray:
         rho5 = rho_keep_sequential_dpqc(theta, n_layer=n_layer)
-        rho4 = _hermitian(rho4_from_rho5(rho5))
-        evals = jnp.clip(jnp.linalg.eigvalsh(rho4), a_min=0.0)
+        rho_reduced = _hermitian(rho_from_rho5_fn(rho5))
+        evals = jnp.clip(jnp.linalg.eigvalsh(rho_reduced), a_min=0.0)
         threshold = jnp.asarray(QFIM_EFFECTIVE_RANK_THRESHOLD, dtype=evals.dtype)
 
         return jnp.sum(evals > threshold)
 
-    return rho_rank_reduced0123
+    return rho_rank
+
+
+def make_reduced0123_rho_rank_fn_for_layer_sequential(n_layer: int):
+    return make_reduced_rho_rank_fn_for_layer_sequential(
+        n_layer,
+        rho_from_rho5_fn=rho4_from_rho5,
+    )
+
+
+def make_reduced01234_rho_rank_fn_for_layer_sequential(n_layer: int):
+    return make_reduced_rho_rank_fn_for_layer_sequential(
+        n_layer,
+        rho_from_rho5_fn=lambda rho5: rho5,
+    )
+
+
+def make_joint_reduced_qfim_data_fn_for_layer_sequential(
+    n_layer: int,
+    *,
+    jvp_chunk: int = RED_JVP_CHUNK,
+    compute_hamiltonian_gradient: bool = True,
+):
+    """Build F4/F5 and auxiliary data from one rho5 linearization.
+
+    At each parameter point, ``rho5`` and its linear map are evaluated once.
+    Every parameter-direction chunk ``d_rho5`` is also evaluated once; the
+    corresponding ``rho4`` and ``d_rho4`` are obtained only by tracing wire 4.
+    The same state eigendecompositions provide the two density-matrix ranks,
+    and the same ``d_rho5`` chunks provide the Hamiltonian gradient.
+
+    The returned tuple is ``(F4, F5, rho_rank4, rho_rank5, grad_hamiltonian)``.
+    When ``compute_hamiltonian_gradient`` is false, its final entry is an empty
+    array. Callers should JIT the returned function once per layer.
+    """
+    n_layer = int(n_layer)
+    jvp_chunk = int(jvp_chunk)
+    compute_hamiltonian_gradient = bool(compute_hamiltonian_gradient)
+    if n_layer <= 0:
+        raise ValueError(f"n_layer must be positive, got {n_layer}.")
+    if jvp_chunk <= 0:
+        raise ValueError(f"jvp_chunk must be positive, got {jvp_chunk}.")
+
+    n_params = n_param_per_layer * n_layer
+    dim4 = 2 ** (num_system_qubits - 1)
+    dim5 = 2**num_system_qubits
+
+    def _state_sld_factors(rho: jnp.ndarray):
+        rho = _hermitian(rho)
+        eigenvalues, eigenvectors = jnp.linalg.eigh(rho)
+        eigenvalues = jnp.clip(eigenvalues, a_min=0.0)
+        pair_sums = eigenvalues[:, None] + eigenvalues[None, :]
+        sqrt_weight = jnp.sqrt(
+            jnp.where(
+                pair_sums > EIG_SUM_EPS,
+                2.0 / pair_sums,
+                0.0,
+            )
+        )
+        rho_rank = jnp.sum(eigenvalues > QFIM_EFFECTIVE_RANK_THRESHOLD)
+        return eigenvectors, sqrt_weight, rho_rank
+
+    def _feature_block(
+        d_rho_block: jnp.ndarray,
+        eigenvectors: jnp.ndarray,
+        sqrt_weight: jnp.ndarray,
+    ) -> jnp.ndarray:
+        eigenvectors_dagger = jnp.conjugate(eigenvectors).T
+        d_rho_eigenbasis = jax.vmap(
+            lambda d_rho: eigenvectors_dagger @ d_rho @ eigenvectors
+        )(d_rho_block)
+        return jnp.reshape(
+            d_rho_eigenbasis * sqrt_weight[None, :, :],
+            (d_rho_block.shape[0], -1),
+        )
+
+    def joint_qfim_data(theta: jnp.ndarray):
+        theta = jnp.asarray(theta, dtype=REAL_DTYPE)
+        if theta.shape != (n_params,):
+            raise ValueError(
+                f"Expected theta shape {(n_params,)}, got {theta.shape}."
+            )
+
+        def rho5_fn(theta_value: jnp.ndarray) -> jnp.ndarray:
+            return _hermitian(
+                rho_keep_sequential_dpqc(theta_value, n_layer=n_layer)
+            )
+
+        # This is the only primal rho5 evaluation and the only rho5 JVP map
+        # created for this parameter point.
+        rho5, rho5_jvp = jax.linearize(rho5_fn, theta)
+        rho4 = _hermitian(rho4_from_rho5(rho5))
+
+        eigenvectors4, sqrt_weight4, rho_rank4 = _state_sld_factors(rho4)
+        eigenvectors5, sqrt_weight5, rho_rank5 = _state_sld_factors(rho5)
+
+        identity_tangents = jnp.eye(n_params, dtype=theta.dtype)
+        feature4_blocks = []
+        feature5_blocks = []
+        gradient_blocks = [] if compute_hamiltonian_gradient else None
+
+        for start in range(0, n_params, jvp_chunk):
+            tangent_block = identity_tangents[
+                start: min(start + jvp_chunk, n_params), :
+            ]
+
+            # Evaluate each d_rho5 direction once.  Linearity of partial trace
+            # gives d_rho4 = Tr_4(d_rho5), without a second circuit/JVP pass.
+            d_rho5_block = jax.vmap(rho5_jvp)(tangent_block)
+            d_rho5_block = 0.5 * (
+                d_rho5_block
+                + jnp.conjugate(jnp.swapaxes(d_rho5_block, -2, -1))
+            )
+            d_rho4_block = rho4_from_rho5(d_rho5_block)
+            d_rho4_block = 0.5 * (
+                d_rho4_block
+                + jnp.conjugate(jnp.swapaxes(d_rho4_block, -2, -1))
+            )
+
+            feature4_blocks.append(
+                _feature_block(
+                    d_rho4_block,
+                    eigenvectors4,
+                    sqrt_weight4,
+                )
+            )
+            feature5_blocks.append(
+                _feature_block(
+                    d_rho5_block,
+                    eigenvectors5,
+                    sqrt_weight5,
+                )
+            )
+            if compute_hamiltonian_gradient:
+                gradient_blocks.append(
+                    jnp.real(
+                        jnp.einsum(
+                            "bij,ji->b",
+                            d_rho5_block,
+                            H_matrix,
+                        )
+                    )
+                )
+
+        feature4 = jnp.concatenate(feature4_blocks, axis=0)
+        feature5 = jnp.concatenate(feature5_blocks, axis=0)
+        grad_hamiltonian = (
+            jnp.concatenate(gradient_blocks, axis=0)
+            if compute_hamiltonian_gradient
+            else jnp.empty((0,), dtype=theta.dtype)
+        )
+
+        if feature4.shape != (n_params, dim4 * dim4):
+            raise AssertionError(
+                f"Unexpected F4 feature shape {feature4.shape}."
+            )
+        if feature5.shape != (n_params, dim5 * dim5):
+            raise AssertionError(
+                f"Unexpected F5 feature shape {feature5.shape}."
+            )
+
+        F4 = jnp.real(feature4 @ jnp.conjugate(feature4).T)
+        F5 = jnp.real(feature5 @ jnp.conjugate(feature5).T)
+        F4 = 0.5 * (F4 + F4.T)
+        F5 = 0.5 * (F5 + F5.T)
+
+        return F4, F5, rho_rank4, rho_rank5, grad_hamiltonian
+
+    return joint_qfim_data
 
 
 qfim_rank_reduced_0123_by_layer = {}
@@ -1730,9 +2111,18 @@ hamiltonian_qfim_sensitivity_random_by_layer = {}
 gradient_image_residual_norm_sq_random_by_layer = {}
 qfim_active_rank_random_by_layer = {}
 
-# Hamiltonian-direction sensitivity for the full five-qubit kept state.
-# These have dedicated names so every existing keep0123 variable and archive
-# remains unchanged.
+# Full five-qubit kept-state diagnostics.  These have dedicated names so every
+# existing keep0123 variable and archive remains unchanged.
+qfim_rank_reduced_01234_by_layer = {}
+qfim_eigs_reduced_01234_by_layer = {}
+qfim_rho_rank_reduced_01234_by_layer = {}
+qfim_eigsum_reduced_01234_by_layer = {}
+qfim_abs_entry_sum_reduced_01234_by_layer = {}
+qfim_participation_rank_random_keep01234_by_layer = {}
+qfim_frobenius_norm_sq_random_keep01234_by_layer = {}
+qfim_largest_eigenvalue_random_keep01234_by_layer = {}
+qfim_smallest_active_eigenvalue_random_keep01234_by_layer = {}
+qfim_active_condition_number_random_keep01234_by_layer = {}
 hamiltonian_qfim_sensitivity_random_keep01234_by_layer = {}
 gradient_image_residual_norm_sq_random_keep01234_by_layer = {}
 qfim_active_rank_random_keep01234_by_layer = {}
@@ -1757,27 +2147,12 @@ for L in tqdm(
         maxval=jnp.asarray(jnp.pi, dtype=REAL_DTYPE),
     )
 
-    red4_qfim_fn = make_reduced0123_qfim_matrix_fn_for_layer_sequential(
-        n_layer=L,
-        jvp_chunk=RED_JVP_CHUNK,
-    )
-    red4_rho_rank_fn = make_reduced0123_rho_rank_fn_for_layer_sequential(
-        n_layer=L,
-    )
-    red5_qfim_fn = make_reduced01234_qfim_matrix_fn_for_layer_sequential(
-        n_layer=L,
-        jvp_chunk=RED_JVP_CHUNK,
-    )
-
-    def random_point_energy_fn(theta: jnp.ndarray) -> jnp.ndarray:
-        return energy_from_rho_keep(
-            rho_keep_sequential_dpqc(theta, n_layer=L)
+    joint_qfim_data_fn = jax.jit(
+        make_joint_reduced_qfim_data_fn_for_layer_sequential(
+            n_layer=L,
+            jvp_chunk=RED_JVP_CHUNK,
         )
-
-    # One compiled Hamiltonian-gradient callable per layer.  The Hamiltonian
-    # acts only on kept wires (0,1,2,3), so this is the gradient associated
-    # with the same reduced state used to construct F4.
-    random_point_energy_grad_fn = jax.jit(jax.grad(random_point_energy_fn))
+    )
 
     rr4_list = []
     eigs4_list = []
@@ -1792,6 +2167,16 @@ for L in tqdm(
     chi_hamiltonian4_list = []
     gradient_image_residual_norm_sq4_list = []
     active_rank4_list = []
+    rr5_list = []
+    eigs5_list = []
+    rho_rank5_list = []
+    eigsum5_list = []
+    abs_entry_sum5_list = []
+    participation_rank5_list = []
+    frobenius_norm_sq5_list = []
+    largest_eigenvalue5_list = []
+    smallest_active_eigenvalue5_list = []
+    active_condition_number5_list = []
     chi_hamiltonian5_list = []
     gradient_image_residual_norm_sq5_list = []
     active_rank5_list = []
@@ -1804,20 +2189,19 @@ for L in tqdm(
     ):
         th = thetas_L[s]
 
-        F4 = red4_qfim_fn(th)
-        grad_hamiltonian = random_point_energy_grad_fn(th)
+        (
+            F4,
+            F5,
+            rho_rank4,
+            rho_rank5,
+            grad_hamiltonian,
+        ) = joint_qfim_data_fn(th)
         diagnostics4 = qfim_spectral_gradient_diagnostics_from_matrix(
             F4,
             grad_hamiltonian,
             sector_thresholds=(),
             warn_degenerate=False,
         )
-        rho_rank4 = red4_rho_rank_fn(th)
-
-        # The Hamiltonian gradient is the same derivative used above because
-        # H acts on the full kept rho5.  F5 and its eigendecomposition are each
-        # evaluated exactly once for this sample.
-        F5 = red5_qfim_fn(th)
         diagnostics5 = qfim_spectral_gradient_diagnostics_from_matrix(
             F5,
             grad_hamiltonian,
@@ -1830,6 +2214,11 @@ for L in tqdm(
             dtype=NP_REAL_DTYPE,
         )
         F4_np = jax_to_np(F4, dtype=NP_REAL_DTYPE)
+        evals5_np = np.asarray(
+            diagnostics5["evals"],
+            dtype=NP_REAL_DTYPE,
+        )
+        F5_np = jax_to_np(F5, dtype=NP_REAL_DTYPE)
 
         rr4_list.append(int(diagnostics4["qfim_threshold_rank"]))
         eigs4_list.append(evals4_np)
@@ -1864,6 +2253,26 @@ for L in tqdm(
         )
         active_rank4_list.append(
             diagnostics4["qfim_threshold_rank"]
+        )
+        rr5_list.append(int(diagnostics5["qfim_threshold_rank"]))
+        eigs5_list.append(evals5_np)
+        rho_rank5_list.append(int(jax.device_get(rho_rank5)))
+        eigsum5_list.append(NP_REAL_DTYPE(np.sum(evals5_np)))
+        abs_entry_sum5_list.append(NP_REAL_DTYPE(np.sum(np.abs(F5_np))))
+        participation_rank5_list.append(
+            diagnostics5["qfim_participation_rank"]
+        )
+        frobenius_norm_sq5_list.append(
+            diagnostics5["qfim_frobenius_norm_sq"]
+        )
+        largest_eigenvalue5_list.append(
+            diagnostics5["largest_qfim_eigenvalue"]
+        )
+        smallest_active_eigenvalue5_list.append(
+            diagnostics5["smallest_active_qfim_eigenvalue"]
+        )
+        active_condition_number5_list.append(
+            diagnostics5["condition_number_active"]
         )
         chi_hamiltonian5_list.append(
             diagnostics5["hamiltonian_qfim_sensitivity"]
@@ -1928,6 +2337,43 @@ for L in tqdm(
     qfim_active_rank_random_by_layer[L] = np.asarray(
         active_rank4_list,
         dtype=NP_INT_DTYPE,
+    )
+    qfim_rank_reduced_01234_by_layer[L] = np.asarray(
+        rr5_list,
+        dtype=NP_INT_DTYPE,
+    )
+    qfim_eigs_reduced_01234_by_layer[L] = np.stack(eigs5_list, axis=0)
+    qfim_rho_rank_reduced_01234_by_layer[L] = np.asarray(
+        rho_rank5_list,
+        dtype=NP_INT_DTYPE,
+    )
+    qfim_eigsum_reduced_01234_by_layer[L] = np.asarray(
+        eigsum5_list,
+        dtype=NP_REAL_DTYPE,
+    )
+    qfim_abs_entry_sum_reduced_01234_by_layer[L] = np.asarray(
+        abs_entry_sum5_list,
+        dtype=NP_REAL_DTYPE,
+    )
+    qfim_participation_rank_random_keep01234_by_layer[L] = np.asarray(
+        participation_rank5_list,
+        dtype=NP_REAL_DTYPE,
+    )
+    qfim_frobenius_norm_sq_random_keep01234_by_layer[L] = np.asarray(
+        frobenius_norm_sq5_list,
+        dtype=NP_REAL_DTYPE,
+    )
+    qfim_largest_eigenvalue_random_keep01234_by_layer[L] = np.asarray(
+        largest_eigenvalue5_list,
+        dtype=NP_REAL_DTYPE,
+    )
+    qfim_smallest_active_eigenvalue_random_keep01234_by_layer[L] = np.asarray(
+        smallest_active_eigenvalue5_list,
+        dtype=NP_REAL_DTYPE,
+    )
+    qfim_active_condition_number_random_keep01234_by_layer[L] = np.asarray(
+        active_condition_number5_list,
+        dtype=NP_REAL_DTYPE,
     )
     hamiltonian_qfim_sensitivity_random_keep01234_by_layer[L] = np.asarray(
         chi_hamiltonian5_list,
@@ -1996,6 +2442,80 @@ save_npz_result(
     ),
     **_layer_arrays_for_npz(
         qfim_active_rank_random_by_layer,
+        "active_rank",
+    ),
+)
+
+qfim_random_points_keep01234_result_path = os.path.join(
+    qfim_results_dir,
+    f"qfim_random_points_{keep_key_5}.npz",
+)
+
+save_npz_result(
+    qfim_random_points_keep01234_result_path,
+    h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+    num_qfim_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
+    qfim_sample_seed_base=np.asarray(QFIM_SAMPLE_SEED_BASE, dtype=NP_INT_DTYPE),
+    qfim_effective_rank_threshold=np.asarray(
+        QFIM_EFFECTIVE_RANK_THRESHOLD,
+        dtype=NP_REAL_DTYPE,
+    ),
+    eig_sum_eps=np.asarray(EIG_SUM_EPS, dtype=NP_REAL_DTYPE),
+    qfim_eig_plot_eps=np.asarray(QFIM_EIG_PLOT_EPS, dtype=NP_REAL_DTYPE),
+    red_jvp_chunk=np.asarray(RED_JVP_CHUNK, dtype=NP_INT_DTYPE),
+    keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
+    state_label=np.asarray(keep_label_5),
+    representation=np.asarray("reduced_keep_01234"),
+    layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
+    grad_sector_thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
+    **_layer_arrays_for_npz(qfim_rank_reduced_01234_by_layer, "rank"),
+    **_layer_arrays_for_npz(
+        qfim_eigs_reduced_01234_by_layer,
+        "eigs_desc",
+    ),
+    **_layer_arrays_for_npz(
+        qfim_rho_rank_reduced_01234_by_layer,
+        "rho_rank",
+    ),
+    **_layer_arrays_for_npz(qfim_eigsum_reduced_01234_by_layer, "trace"),
+    **_layer_arrays_for_npz(
+        qfim_abs_entry_sum_reduced_01234_by_layer,
+        "abs_entry_sum",
+    ),
+    **_layer_arrays_for_npz(
+        qfim_rank_reduced_01234_by_layer,
+        "threshold_rank",
+    ),
+    **_layer_arrays_for_npz(
+        qfim_participation_rank_random_keep01234_by_layer,
+        "participation_rank",
+    ),
+    **_layer_arrays_for_npz(
+        qfim_frobenius_norm_sq_random_keep01234_by_layer,
+        "frobenius_norm_sq",
+    ),
+    **_layer_arrays_for_npz(
+        qfim_largest_eigenvalue_random_keep01234_by_layer,
+        "largest_eigenvalue",
+    ),
+    **_layer_arrays_for_npz(
+        qfim_smallest_active_eigenvalue_random_keep01234_by_layer,
+        "smallest_active_eigenvalue",
+    ),
+    **_layer_arrays_for_npz(
+        qfim_active_condition_number_random_keep01234_by_layer,
+        "active_condition_number",
+    ),
+    **_layer_arrays_for_npz(
+        hamiltonian_qfim_sensitivity_random_keep01234_by_layer,
+        "chi_hamiltonian",
+    ),
+    **_layer_arrays_for_npz(
+        gradient_image_residual_norm_sq_random_keep01234_by_layer,
+        "gradient_image_residual_norm_sq",
+    ),
+    **_layer_arrays_for_npz(
+        qfim_active_rank_random_keep01234_by_layer,
         "active_rank",
     ),
 )
@@ -2210,6 +2730,10 @@ qfim_effective_rank_random_points_result_path = os.path.join(
     qfim_results_dir,
     f"qfim_effective_rank_random_points_{keep_key}.npz",
 )
+qfim_effective_rank_random_points_keep01234_result_path = os.path.join(
+    qfim_results_dir,
+    f"qfim_effective_rank_random_points_{keep_key_5}.npz",
+)
 
 if RUN_QFIM_EFFECTIVE_RANK_RANDOM_POINTS:
     save_npz_result(
@@ -2255,6 +2779,54 @@ if RUN_QFIM_EFFECTIVE_RANK_RANDOM_POINTS:
         ),
         **_layer_arrays_for_npz(
             qfim_active_condition_number_random_by_layer,
+            "active_condition_number",
+        ),
+    )
+    save_npz_result(
+        qfim_effective_rank_random_points_keep01234_result_path,
+        h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+        num_qfim_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
+        qfim_sample_seed_base=np.asarray(
+            QFIM_SAMPLE_SEED_BASE,
+            dtype=NP_INT_DTYPE,
+        ),
+        qfim_effective_rank_threshold=np.asarray(
+            QFIM_EFFECTIVE_RANK_THRESHOLD,
+            dtype=NP_REAL_DTYPE,
+        ),
+        participation_effective_rank_eps=np.asarray(
+            PARTICIPATION_EFFECTIVE_RANK_EPS,
+            dtype=NP_REAL_DTYPE,
+        ),
+        keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
+        state_label=np.asarray(keep_label_5),
+        layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
+        **_layer_arrays_for_npz(
+            qfim_rank_reduced_01234_by_layer,
+            "threshold_rank",
+        ),
+        **_layer_arrays_for_npz(
+            qfim_participation_rank_random_keep01234_by_layer,
+            "participation_rank",
+        ),
+        **_layer_arrays_for_npz(
+            qfim_eigsum_reduced_01234_by_layer,
+            "trace",
+        ),
+        **_layer_arrays_for_npz(
+            qfim_frobenius_norm_sq_random_keep01234_by_layer,
+            "frobenius_norm_sq",
+        ),
+        **_layer_arrays_for_npz(
+            qfim_largest_eigenvalue_random_keep01234_by_layer,
+            "largest_eigenvalue",
+        ),
+        **_layer_arrays_for_npz(
+            qfim_smallest_active_eigenvalue_random_keep01234_by_layer,
+            "smallest_active_eigenvalue",
+        ),
+        **_layer_arrays_for_npz(
+            qfim_active_condition_number_random_keep01234_by_layer,
             "active_condition_number",
         ),
     )
@@ -2562,6 +3134,196 @@ def compute_qfim_spectral_gradient_history_by_layer(
     )
 
 
+def compute_joint_qfim_spectral_gradient_history_by_layer(
+    theta_samples_by_layer,
+    grad_samples_by_layer,
+    layers,
+    *,
+    jvp_chunk=RED_JVP_CHUNK,
+    sector_thresholds=THRESHOLDS,
+):
+    """Compute both kept-state histories from one rho5/d_rho5 pass per point."""
+    scalar_metric_names = (
+        "qfim_threshold_rank",
+        "qfim_participation_rank",
+        "qfim_trace",
+        "qfim_frobenius_norm_sq",
+        "gradient_norm_sq",
+        "hamiltonian_qfim_sensitivity",
+        "gradient_image_projection_norm_sq",
+        "gradient_image_residual_norm_sq",
+        "gradient_image_residual_norm",
+        "gradient_image_residual_fraction",
+        "gradient_participation_rank",
+        "gradient_weighted_qfim_eigenvalue",
+        "gradient_weight_sum",
+        "largest_qfim_eigenvalue",
+        "smallest_active_qfim_eigenvalue",
+        "condition_number_active",
+        "parseval_relative_error",
+    )
+    sector_thresholds = tuple(float(value) for value in sector_thresholds)
+
+    diagnostics_caches = ({}, {})
+    summaries_by_layer = ({}, {})
+    eigs_by_layer = ({}, {})
+    large_sectors_by_layer = ({}, {})
+
+    for L in tqdm(
+        layers,
+        desc=(
+            "Joint QFIM spectral diagnostics; "
+            "keep=(0,1,2,3) and keep=(0,1,2,3,4)"
+        ),
+        unit="layer",
+    ):
+        L = int(L)
+        if theta_samples_by_layer.get(L) is None:
+            continue
+        if grad_samples_by_layer.get(L) is None:
+            continue
+
+        theta_samples = np.asarray(
+            theta_samples_by_layer[L],
+            dtype=NP_REAL_DTYPE,
+        )
+        grad_samples = np.asarray(
+            grad_samples_by_layer[L],
+            dtype=NP_REAL_DTYPE,
+        )
+        if theta_samples.shape != grad_samples.shape:
+            raise ValueError(
+                f"theta_samples and grad_samples must match for L={L}: "
+                f"{theta_samples.shape} != {grad_samples.shape}."
+            )
+        if theta_samples.ndim != 3:
+            raise ValueError(
+                "theta_samples and grad_samples must have shape "
+                "(num_runs, num_sample_iters, num_params)."
+            )
+
+        n_runs_L, n_times_L, n_params_L = theta_samples.shape
+        expected_n_params = n_param_per_layer * L
+        if n_params_L != expected_n_params:
+            raise ValueError(
+                f"Expected M=14L={expected_n_params} parameters for L={L}, "
+                f"got {n_params_L}."
+            )
+
+        joint_qfim_data_fn = jax.jit(
+            make_joint_reduced_qfim_data_fn_for_layer_sequential(
+                n_layer=L,
+                jvp_chunk=jvp_chunk,
+                compute_hamiltonian_gradient=False,
+            )
+        )
+        summaries_L = tuple(
+            {
+                name: np.full(
+                    (n_runs_L, n_times_L),
+                    np.nan,
+                    dtype=NP_REAL_DTYPE,
+                )
+                for name in scalar_metric_names
+            }
+            for _ in range(2)
+        )
+        for summary_L in summaries_L:
+            for threshold in sector_thresholds:
+                summary_L[
+                    f"grad_weight_above_{_spectral_threshold_tag(threshold)}"
+                ] = np.full(
+                    (n_runs_L, n_times_L),
+                    np.nan,
+                    dtype=NP_REAL_DTYPE,
+                )
+        eigs_L = tuple(
+            np.full(
+                (n_runs_L, n_times_L, n_params_L),
+                np.nan,
+                dtype=NP_REAL_DTYPE,
+            )
+            for _ in range(2)
+        )
+
+        for run_idx in tqdm(
+            range(n_runs_L),
+            desc=f"Joint QFIM spectral runs (L={L})",
+            unit="run",
+            leave=False,
+        ):
+            for time_idx in range(n_times_L):
+                F4, F5, _, _, _ = joint_qfim_data_fn(
+                    jnp.asarray(
+                        theta_samples[run_idx, time_idx],
+                        dtype=REAL_DTYPE,
+                    )
+                )
+                gradient = grad_samples[run_idx, time_idx]
+                cache_key = (L, run_idx, time_idx)
+
+                for state_index, F in enumerate((F4, F5)):
+                    diagnostics = qfim_spectral_gradient_diagnostics_from_matrix(
+                        F,
+                        gradient,
+                        sector_thresholds=sector_thresholds,
+                    )
+                    diagnostics_caches[state_index][cache_key] = diagnostics
+                    eigs_L[state_index][run_idx, time_idx, :] = diagnostics[
+                        "evals"
+                    ]
+                    for metric_name in summaries_L[state_index]:
+                        summaries_L[state_index][metric_name][
+                            run_idx,
+                            time_idx,
+                        ] = diagnostics[metric_name]
+
+        for state_index in range(2):
+            summary_L = summaries_L[state_index]
+            summaries_by_layer[state_index][L] = summary_L
+            eigs_by_layer[state_index][L] = eigs_L[state_index]
+            large_sectors_by_layer[state_index][L] = {
+                threshold: summary_L[
+                    f"grad_weight_above_{_spectral_threshold_tag(threshold)}"
+                ]
+                for threshold in sector_thresholds
+            }
+
+    state_names = ("keep0123", "keep01234")
+    for state_index, state_name in enumerate(state_names):
+        parseval_parts = [
+            np.ravel(metrics["parseval_relative_error"])
+            for metrics in summaries_by_layer[state_index].values()
+        ]
+        finite_parseval_errors = (
+            np.concatenate(parseval_parts)
+            if parseval_parts
+            else np.empty(0, dtype=NP_REAL_DTYPE)
+        )
+        finite_parseval_errors = finite_parseval_errors[
+            np.isfinite(finite_parseval_errors)
+        ]
+        max_parseval_error = (
+            float(np.max(finite_parseval_errors))
+            if finite_parseval_errors.size
+            else float("nan")
+        )
+        print(
+            f"QFIM gradient Parseval check ({state_name}): "
+            f"max relative error={max_parseval_error:.3e}"
+        )
+
+    return tuple(
+        (
+            diagnostics_caches[state_index],
+            summaries_by_layer[state_index],
+            eigs_by_layer[state_index],
+            large_sectors_by_layer[state_index],
+        )
+        for state_index in range(2)
+    )
+
+
 def validate_qfim_spectral_diagnostics_smoke(
     diagnostics,
     *,
@@ -2660,11 +3422,19 @@ def validate_qfim_spectral_diagnostics_smoke(
 
 
 (
-    qfim_spectral_gradient_diagnostics_cache,
-    qfim_spectral_gradient_summary_by_layer,
-    qfim_eigs_history_optimization_path_by_layer,
-    qfim_gradient_large_sector_weight_by_layer,
-) = compute_qfim_spectral_gradient_history_by_layer(
+    (
+        qfim_spectral_gradient_diagnostics_cache,
+        qfim_spectral_gradient_summary_by_layer,
+        qfim_eigs_history_optimization_path_by_layer,
+        qfim_gradient_large_sector_weight_by_layer,
+    ),
+    (
+        qfim_spectral_gradient_diagnostics_cache_keep01234,
+        qfim_spectral_gradient_summary_keep01234_by_layer,
+        qfim_eigs_history_optimization_path_keep01234_by_layer,
+        qfim_gradient_large_sector_weight_keep01234_by_layer,
+    ),
+) = compute_joint_qfim_spectral_gradient_history_by_layer(
     theta_sample_traces_by_layer,
     grad_sample_traces_by_layer,
     vqe_layer_list,
@@ -2682,29 +3452,6 @@ if qfim_spectral_gradient_diagnostics_cache:
         qfim_spectral_gradient_diagnostics_cache[_smoke_cache_key],
         layer=_smoke_cache_key[0],
     )
-
-# Repeat the same one-QFIM/one-eigendecomposition analysis for the full kept
-# five-qubit state.  The previously sampled VQE parameters and gradients are
-# reused, so this adds no optimizer or Hamiltonian-gradient evaluations.
-(
-    qfim_spectral_gradient_diagnostics_cache_keep01234,
-    qfim_spectral_gradient_summary_keep01234_by_layer,
-    qfim_eigs_history_optimization_path_keep01234_by_layer,
-    qfim_gradient_large_sector_weight_keep01234_by_layer,
-) = compute_qfim_spectral_gradient_history_by_layer(
-    theta_sample_traces_by_layer,
-    grad_sample_traces_by_layer,
-    vqe_layer_list,
-    jvp_chunk=RED_JVP_CHUNK,
-    sector_thresholds=(),
-    qfim_matrix_fn_factory=(
-        make_reduced01234_qfim_matrix_fn_for_layer_sequential
-    ),
-    progress_description=(
-        "QFIM spectral diagnostics along optimization path; "
-        "keep=(0,1,2,3,4)"
-    ),
-)
 
 if qfim_spectral_gradient_diagnostics_cache_keep01234:
     _smoke_cache_key_keep01234 = (
@@ -2732,6 +3479,24 @@ np.savez(
     },
 )
 
+np.savez(
+    os.path.join(
+        qfim_fig_dir,
+        f"qfim_large_sector_gradient_weight_{keep_key_5}.npz",
+    ),
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
+    state_label=np.asarray(keep_label_5),
+    **{
+        f"L{int(L)}_thr_{_thr_tag(thr)}": arr
+        for L, data_L
+        in qfim_gradient_large_sector_weight_keep01234_by_layer.items()
+        for thr, arr in data_L.items()
+    },
+)
+
 
 qfim_large_sector_gradient_weight_result_path = os.path.join(
     qfim_results_dir,
@@ -2746,6 +3511,26 @@ save_npz_result(
     **{
         f"L{int(L)}_thr_{_thr_tag(thr)}": arr
         for L, data_L in qfim_gradient_large_sector_weight_by_layer.items()
+        for thr, arr in data_L.items()
+    },
+)
+
+qfim_large_sector_gradient_weight_keep01234_result_path = os.path.join(
+    qfim_results_dir,
+    f"qfim_large_sector_gradient_weight_{keep_key_5}.npz",
+)
+
+save_npz_result(
+    qfim_large_sector_gradient_weight_keep01234_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
+    state_label=np.asarray(keep_label_5),
+    **{
+        f"L{int(L)}_thr_{_thr_tag(thr)}": arr
+        for L, data_L
+        in qfim_gradient_large_sector_weight_keep01234_by_layer.items()
         for thr, arr in data_L.items()
     },
 )
@@ -2860,6 +3645,13 @@ qfim_rank_history_by_layer = {
     )
     for L, metrics in qfim_spectral_gradient_summary_by_layer.items()
 }
+qfim_rank_history_keep01234_by_layer = {
+    int(L): np.asarray(
+        metrics["qfim_threshold_rank"],
+        dtype=NP_REAL_DTYPE,
+    )
+    for L, metrics in qfim_spectral_gradient_summary_keep01234_by_layer.items()
+}
 
 np.savez(
     os.path.join(qfim_fig_dir, f"qfim_rank_history_optimization_path_{keep_key}.npz"),
@@ -2868,6 +3660,21 @@ np.savez(
     **{
         f"L{int(L)}": arr
         for L, arr in qfim_rank_history_by_layer.items()
+    },
+)
+
+np.savez(
+    os.path.join(
+        qfim_fig_dir,
+        f"qfim_rank_history_optimization_path_{keep_key_5}.npz",
+    ),
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
+    state_label=np.asarray(keep_label_5),
+    **{
+        f"L{int(L)}": arr
+        for L, arr in qfim_rank_history_keep01234_by_layer.items()
     },
 )
 
@@ -2883,6 +3690,23 @@ save_npz_result(
     **{
         f"L{int(L)}": arr
         for L, arr in qfim_rank_history_by_layer.items()
+    },
+)
+
+qfim_rank_history_keep01234_result_path = os.path.join(
+    qfim_results_dir,
+    f"qfim_rank_history_optimization_path_{keep_key_5}.npz",
+)
+
+save_npz_result(
+    qfim_rank_history_keep01234_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
+    state_label=np.asarray(keep_label_5),
+    **{
+        f"L{int(L)}": arr
+        for L, arr in qfim_rank_history_keep01234_by_layer.items()
     },
 )
 
@@ -2902,9 +3726,32 @@ save_npz_result(
     },
 )
 
+qfim_eigs_history_keep01234_result_path = os.path.join(
+    qfim_results_dir,
+    f"qfim_eigs_history_optimization_path_{keep_key_5}.npz",
+)
+
+save_npz_result(
+    qfim_eigs_history_keep01234_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
+    state_label=np.asarray(keep_label_5),
+    **{
+        f"L{int(L)}": arr
+        for L, arr
+        in qfim_eigs_history_optimization_path_keep01234_by_layer.items()
+    },
+)
+
 qfim_trace_history_optimization_path_by_layer = {
     int(L): np.sum(np.asarray(arr, dtype=NP_REAL_DTYPE), axis=2)
     for L, arr in qfim_eigs_history_optimization_path_by_layer.items()
+}
+qfim_trace_history_optimization_path_keep01234_by_layer = {
+    int(L): np.sum(np.asarray(arr, dtype=NP_REAL_DTYPE), axis=2)
+    for L, arr
+    in qfim_eigs_history_optimization_path_keep01234_by_layer.items()
 }
 
 qfim_trace_history_result_path = os.path.join(
@@ -2922,122 +3769,123 @@ save_npz_result(
     },
 )
 
+qfim_trace_history_keep01234_result_path = os.path.join(
+    qfim_results_dir,
+    f"qfim_trace_history_optimization_path_{keep_key_5}.npz",
+)
+
+save_npz_result(
+    qfim_trace_history_keep01234_result_path,
+    sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+    layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+    keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
+    state_label=np.asarray(keep_label_5),
+    **{
+        f"L{int(L)}": arr
+        for L, arr
+        in qfim_trace_history_optimization_path_keep01234_by_layer.items()
+    },
+)
+
 
 # ============================================================
 # Trace-based / gradient-participation summary (new schema)
 # ============================================================
-qfim_spectral_summary_npz_arrays = {}
-for L, metrics in qfim_spectral_gradient_summary_by_layer.items():
-    L_tag = f"L{int(L)}"
-    qfim_spectral_summary_npz_arrays.update(
-        {
-            f"{L_tag}_threshold_rank": np.asarray(
-                metrics["qfim_threshold_rank"],
-                dtype=NP_INT_DTYPE,
-            ),
-            f"{L_tag}_qfim_threshold_rank": np.asarray(
-                metrics["qfim_threshold_rank"],
-                dtype=NP_INT_DTYPE,
-            ),
-            f"{L_tag}_participation_rank": np.asarray(
-                metrics["qfim_participation_rank"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_qfim_participation_rank": np.asarray(
-                metrics["qfim_participation_rank"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_trace": np.asarray(
-                metrics["qfim_trace"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_qfim_trace": np.asarray(
-                metrics["qfim_trace"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_frobenius_norm_sq": np.asarray(
-                metrics["qfim_frobenius_norm_sq"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_qfim_frobenius_norm_sq": np.asarray(
-                metrics["qfim_frobenius_norm_sq"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_gradient_norm_sq": np.asarray(
-                metrics["gradient_norm_sq"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_hamiltonian_qfim_sensitivity": np.asarray(
-                metrics["hamiltonian_qfim_sensitivity"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_chi_hamiltonian": np.asarray(
-                metrics["hamiltonian_qfim_sensitivity"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_gradient_image_projection_norm_sq": np.asarray(
-                metrics["gradient_image_projection_norm_sq"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_gradient_image_residual_norm_sq": np.asarray(
-                metrics["gradient_image_residual_norm_sq"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_gradient_image_residual_norm": np.asarray(
-                metrics["gradient_image_residual_norm"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_gradient_image_residual_fraction": np.asarray(
-                metrics["gradient_image_residual_fraction"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_gradient_participation_rank": np.asarray(
-                metrics["gradient_participation_rank"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_gradient_weighted_qfim_eigenvalue": np.asarray(
-                metrics["gradient_weighted_qfim_eigenvalue"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_gradient_weight_sum": np.asarray(
-                metrics["gradient_weight_sum"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_largest_eigenvalue": np.asarray(
-                metrics["largest_qfim_eigenvalue"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_largest_qfim_eigenvalue": np.asarray(
-                metrics["largest_qfim_eigenvalue"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_smallest_active_eigenvalue": np.asarray(
-                metrics["smallest_active_qfim_eigenvalue"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_smallest_active_qfim_eigenvalue": np.asarray(
-                metrics["smallest_active_qfim_eigenvalue"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_active_condition_number": np.asarray(
-                metrics["condition_number_active"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_condition_number_active": np.asarray(
-                metrics["condition_number_active"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            f"{L_tag}_parseval_relative_error": np.asarray(
-                metrics["parseval_relative_error"],
-                dtype=NP_REAL_DTYPE,
-            ),
-        }
+_QFIM_SPECTRAL_SUMMARY_FIELDS = (
+    ("threshold_rank", "qfim_threshold_rank", NP_INT_DTYPE),
+    ("qfim_threshold_rank", "qfim_threshold_rank", NP_INT_DTYPE),
+    ("participation_rank", "qfim_participation_rank", NP_REAL_DTYPE),
+    ("qfim_participation_rank", "qfim_participation_rank", NP_REAL_DTYPE),
+    ("trace", "qfim_trace", NP_REAL_DTYPE),
+    ("qfim_trace", "qfim_trace", NP_REAL_DTYPE),
+    ("frobenius_norm_sq", "qfim_frobenius_norm_sq", NP_REAL_DTYPE),
+    ("qfim_frobenius_norm_sq", "qfim_frobenius_norm_sq", NP_REAL_DTYPE),
+    ("gradient_norm_sq", "gradient_norm_sq", NP_REAL_DTYPE),
+    (
+        "hamiltonian_qfim_sensitivity",
+        "hamiltonian_qfim_sensitivity",
+        NP_REAL_DTYPE,
+    ),
+    ("chi_hamiltonian", "hamiltonian_qfim_sensitivity", NP_REAL_DTYPE),
+    (
+        "gradient_image_projection_norm_sq",
+        "gradient_image_projection_norm_sq",
+        NP_REAL_DTYPE,
+    ),
+    (
+        "gradient_image_residual_norm_sq",
+        "gradient_image_residual_norm_sq",
+        NP_REAL_DTYPE,
+    ),
+    (
+        "gradient_image_residual_norm",
+        "gradient_image_residual_norm",
+        NP_REAL_DTYPE,
+    ),
+    (
+        "gradient_image_residual_fraction",
+        "gradient_image_residual_fraction",
+        NP_REAL_DTYPE,
+    ),
+    (
+        "gradient_participation_rank",
+        "gradient_participation_rank",
+        NP_REAL_DTYPE,
+    ),
+    (
+        "gradient_weighted_qfim_eigenvalue",
+        "gradient_weighted_qfim_eigenvalue",
+        NP_REAL_DTYPE,
+    ),
+    ("gradient_weight_sum", "gradient_weight_sum", NP_REAL_DTYPE),
+    ("largest_eigenvalue", "largest_qfim_eigenvalue", NP_REAL_DTYPE),
+    ("largest_qfim_eigenvalue", "largest_qfim_eigenvalue", NP_REAL_DTYPE),
+    (
+        "smallest_active_eigenvalue",
+        "smallest_active_qfim_eigenvalue",
+        NP_REAL_DTYPE,
+    ),
+    (
+        "smallest_active_qfim_eigenvalue",
+        "smallest_active_qfim_eigenvalue",
+        NP_REAL_DTYPE,
+    ),
+    ("active_condition_number", "condition_number_active", NP_REAL_DTYPE),
+    ("condition_number_active", "condition_number_active", NP_REAL_DTYPE),
+    ("parseval_relative_error", "parseval_relative_error", NP_REAL_DTYPE),
+)
+
+
+def _qfim_spectral_summary_arrays_for_npz(summary_by_layer: dict) -> dict:
+    arrays = {}
+
+    for L, metrics in summary_by_layer.items():
+        L_tag = f"L{int(L)}"
+
+        for output_name, metric_name, dtype in _QFIM_SPECTRAL_SUMMARY_FIELDS:
+            arrays[f"{L_tag}_{output_name}"] = np.asarray(
+                metrics[metric_name],
+                dtype=dtype,
+            )
+
+        for metric_name, values in metrics.items():
+            if metric_name.startswith("grad_weight_above_"):
+                arrays[f"{L_tag}_{metric_name}"] = np.asarray(
+                    values,
+                    dtype=NP_REAL_DTYPE,
+                )
+
+    return arrays
+
+
+qfim_spectral_summary_npz_arrays = _qfim_spectral_summary_arrays_for_npz(
+    qfim_spectral_gradient_summary_by_layer
+)
+qfim_spectral_summary_keep01234_npz_arrays = (
+    _qfim_spectral_summary_arrays_for_npz(
+        qfim_spectral_gradient_summary_keep01234_by_layer
     )
-    for metric_name, values in metrics.items():
-        if metric_name.startswith("grad_weight_above_"):
-            qfim_spectral_summary_npz_arrays[
-                f"{L_tag}_{metric_name}"
-            ] = np.asarray(values, dtype=NP_REAL_DTYPE)
+)
 
 
 # ============================================================
@@ -3236,6 +4084,10 @@ qfim_effective_rank_optimization_path_result_path = os.path.join(
     qfim_results_dir,
     f"qfim_effective_rank_optimization_path_{keep_key}.npz",
 )
+qfim_effective_rank_optimization_path_keep01234_result_path = os.path.join(
+    qfim_results_dir,
+    f"qfim_effective_rank_optimization_path_{keep_key_5}.npz",
+)
 if RUN_QFIM_EFFECTIVE_RANK_OPTIMIZATION_PATH:
     save_npz_result(
         qfim_effective_rank_optimization_path_result_path,
@@ -3261,11 +4113,42 @@ if RUN_QFIM_EFFECTIVE_RANK_OPTIMIZATION_PATH:
             )
         },
     )
+    save_npz_result(
+        qfim_effective_rank_optimization_path_keep01234_result_path,
+        h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+        layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+        keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
+        state_label=np.asarray(keep_label_5),
+        qfim_effective_rank_threshold=np.asarray(
+            QFIM_EFFECTIVE_RANK_THRESHOLD,
+            dtype=NP_REAL_DTYPE,
+        ),
+        participation_effective_rank_eps=np.asarray(
+            PARTICIPATION_EFFECTIVE_RANK_EPS,
+            dtype=NP_REAL_DTYPE,
+        ),
+        **{
+            key: value
+            for key, value
+            in qfim_spectral_summary_keep01234_npz_arrays.items()
+            if (
+                key.endswith("_threshold_rank")
+                or key.endswith("_participation_rank")
+                or key.endswith("_trace")
+                or key.endswith("_frobenius_norm_sq")
+            )
+        },
+    )
 
 
 qfim_spectral_gradient_summary_result_path = os.path.join(
     qfim_results_dir,
     f"qfim_spectral_gradient_summary_optimization_path_{keep_key}.npz",
+)
+qfim_spectral_gradient_summary_keep01234_result_path = os.path.join(
+    qfim_results_dir,
+    f"qfim_spectral_gradient_summary_optimization_path_{keep_key_5}.npz",
 )
 if RUN_QFIM_SPECTRAL_GRADIENT_SUMMARY:
     save_npz_result(
@@ -3308,6 +4191,46 @@ if RUN_QFIM_SPECTRAL_GRADIENT_SUMMARY:
             "|v_i^dagger g|^2 / ||g||_2^2; NaN when gradient norm is small"
         ),
         **qfim_spectral_summary_npz_arrays,
+    )
+    save_npz_result(
+        qfim_spectral_gradient_summary_keep01234_result_path,
+        h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+        layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
+        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+        keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
+        state_label=np.asarray(keep_label_5),
+        qfim_effective_rank_threshold=np.asarray(
+            QFIM_EFFECTIVE_RANK_THRESHOLD,
+            dtype=NP_REAL_DTYPE,
+        ),
+        participation_effective_rank_eps=np.asarray(
+            PARTICIPATION_EFFECTIVE_RANK_EPS,
+            dtype=NP_REAL_DTYPE,
+        ),
+        qfim_grad_alignment_norm_eps=np.asarray(
+            QFIM_GRAD_ALIGNMENT_NORM_EPS,
+            dtype=NP_REAL_DTYPE,
+        ),
+        gradient_norm_eps=np.asarray(
+            QFIM_GRAD_ALIGNMENT_NORM_EPS,
+            dtype=NP_REAL_DTYPE,
+        ),
+        grad_sector_thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
+        gradient_sector_thresholds=np.asarray(
+            THRESHOLDS,
+            dtype=NP_REAL_DTYPE,
+        ),
+        threshold_rank_definition=np.asarray(
+            "number of QFIM eigenvalues strictly above "
+            "qfim_effective_rank_threshold"
+        ),
+        participation_rank_definition=np.asarray(
+            "(sum(lambda))^2 / sum(lambda^2), with zero-matrix value 0"
+        ),
+        gradient_weight_definition=np.asarray(
+            "|v_i^dagger g|^2 / ||g||_2^2; NaN when gradient norm is small"
+        ),
+        **qfim_spectral_summary_keep01234_npz_arrays,
     )
 
 # ============================================================
@@ -3376,6 +4299,17 @@ qfim_grad_align_dir = os.path.join(qfim_fig_dir, "qfim_grad_alignment")
 qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "qfim_grad_alignment")
 os.makedirs(qfim_grad_align_dir, exist_ok=True)
 os.makedirs(qfim_grad_align_results_dir, exist_ok=True)
+
+
+def qfim_grad_alignment_dirs_for_key(result_key: str):
+    if result_key == keep_key:
+        return qfim_grad_align_dir, qfim_grad_align_results_dir
+
+    figure_dir = os.path.join(qfim_grad_align_dir, result_key)
+    result_dir = os.path.join(qfim_grad_align_results_dir, result_key)
+    os.makedirs(figure_dir, exist_ok=True)
+    os.makedirs(result_dir, exist_ok=True)
+    return figure_dir, result_dir
 
 
 def _normalize_index_list(indices, n):
@@ -3530,6 +4464,9 @@ def compute_qfim_grad_alignment_table_for_layer(
     jvp_chunk=RED_JVP_CHUNK,
     sort_desc=True,
     diagnostics_cache=None,
+    qfim_matrix_fn_factory=(
+        make_reduced0123_qfim_matrix_fn_for_layer_sequential
+    ),
 ):
     """
     Compute QFIM-gradient alignment scatter data for one layer L.
@@ -3580,7 +4517,7 @@ def compute_qfim_grad_alignment_table_for_layer(
     qfim_fn = None
     if diagnostics_cache is None:
         qfim_fn = jax.jit(
-            make_reduced0123_qfim_matrix_fn_for_layer_sequential(
+            qfim_matrix_fn_factory(
                 n_layer=int(L),
                 jvp_chunk=jvp_chunk,
             )
@@ -3703,6 +4640,11 @@ def run_qfim_grad_alignment_by_layer_iteration_folders(
     save_npz=True,
     make_plots=True,
     diagnostics_cache=None,
+    result_key=keep_key,
+    state_label=keep_label,
+    qfim_matrix_fn_factory=(
+        make_reduced0123_qfim_matrix_fn_for_layer_sequential
+    ),
 ):
     """
     Generate qfim_grad_weight_scatter plots layer by layer.
@@ -3731,6 +4673,9 @@ def run_qfim_grad_alignment_by_layer_iteration_folders(
     else:
         target_iterations = tuple(int(t) for t in target_iterations)
 
+    alignment_figure_dir, alignment_result_dir = (
+        qfim_grad_alignment_dirs_for_key(result_key)
+    )
     available_layers = []
 
     for L in candidate_layers:
@@ -3752,7 +4697,7 @@ def run_qfim_grad_alignment_by_layer_iteration_folders(
         desc="QFIM eigenvalue-gradient scatter by layer/iteration",
         unit="layer",
     ):
-        layer_dir = os.path.join(qfim_grad_align_dir, f"L{L}")
+        layer_dir = os.path.join(alignment_figure_dir, f"L{L}")
         os.makedirs(layer_dir, exist_ok=True)
 
         table_by_layer_iteration[L] = {}
@@ -3778,13 +4723,14 @@ def run_qfim_grad_alignment_by_layer_iteration_folders(
                 jvp_chunk=jvp_chunk,
                 sort_desc=True,
                 diagnostics_cache=diagnostics_cache,
+                qfim_matrix_fn_factory=qfim_matrix_fn_factory,
             )
 
             table_by_layer_iteration[L][iteration] = table_L_iter
 
             iter_tag = f"iter{iteration:06d}"
             result_npz_path = os.path.join(
-                qfim_grad_align_results_dir,
+                alignment_result_dir,
                 f"L{L}",
                 f"qfim_grad_alignment_scatter_data_L{L}_{iter_tag}.npz",
             )
@@ -3812,7 +4758,7 @@ def run_qfim_grad_alignment_by_layer_iteration_folders(
                     table_for_plot,
                     title=(
                         rf"QFIM eigenvalue vs gradient weight, "
-                        rf"L={L}, iteration {iteration}"
+                        rf"L={L}, iteration {iteration} ({state_label})"
                     ),
                     outpath=os.path.join(
                         layer_dir,
@@ -3841,6 +4787,11 @@ def run_qfim_grad_alignment_by_layer(
     make_per_layer_plots=True,
     make_overlay_plot=True,
     diagnostics_cache=None,
+    result_key=keep_key,
+    state_label=keep_label,
+    qfim_matrix_fn_factory=(
+        make_reduced0123_qfim_matrix_fn_for_layer_sequential
+    ),
 ):
     """
     Run QFIM eigenvalue-gradient alignment analysis layer by layer.
@@ -3879,6 +4830,9 @@ def run_qfim_grad_alignment_by_layer(
     else:
         candidate_layers = layers
 
+    alignment_figure_dir, alignment_result_dir = (
+        qfim_grad_alignment_dirs_for_key(result_key)
+    )
     available_layers = []
 
     for L in candidate_layers:
@@ -3932,17 +4886,18 @@ def run_qfim_grad_alignment_by_layer(
             jvp_chunk=jvp_chunk,
             sort_desc=True,
             diagnostics_cache=diagnostics_cache,
+            qfim_matrix_fn_factory=qfim_matrix_fn_factory,
         )
 
         result_npz_path = os.path.join(
-            qfim_grad_align_results_dir,
+            alignment_result_dir,
             f"qfim_grad_alignment_scatter_data_L{L}_{time_tag}.npz",
         )
 
         if save_npz:
             np.savez(
                 os.path.join(
-                    qfim_grad_align_dir,
+                    alignment_figure_dir,
                     f"qfim_grad_alignment_scatter_data_L{L}_{time_tag}.npz",
                 ),
                 **table_L,
@@ -3964,10 +4919,10 @@ def run_qfim_grad_alignment_by_layer(
                 table_for_plot,
                 title=(
                     rf"QFIM eigenvalue vs gradient weight, "
-                    rf"L={L}, {title_time}"
+                    rf"L={L}, {title_time} ({state_label})"
                 ),
                 outpath=os.path.join(
-                    qfim_grad_align_dir,
+                    alignment_figure_dir,
                     f"qfim_grad_weight_scatter_L{L}_{time_tag}.pdf",
                 ),
                 log_x=log_x,
@@ -3985,10 +4940,11 @@ def run_qfim_grad_alignment_by_layer(
             available_layers,
             title=(
                 rf"QFIM eigenvalue vs gradient weight "
-                rf"across layers, {overlay_tag.replace('_', ' ')}"
+                rf"across layers, {overlay_tag.replace('_', ' ')} "
+                rf"({state_label})"
             ),
             outpath=os.path.join(
-                qfim_grad_align_dir,
+                alignment_figure_dir,
                 f"qfim_grad_weight_scatter_overlay_layers_{overlay_tag}.pdf",
             ),
             log_x=log_x,
@@ -4033,6 +4989,24 @@ if RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER:
         make_overlay_plot=False,
         diagnostics_cache=qfim_spectral_gradient_diagnostics_cache,
     )
+    run_qfim_grad_alignment_by_layer(
+        layers=vqe_layer_list,
+        use_all_sampled_times=False,
+        run_indices=QFIM_GRAD_ALIGNMENT_RUN_INDICES,
+        sample_iters_for_labels=sample_iters,
+        jvp_chunk=RED_JVP_CHUNK,
+        log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
+        log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
+        save_npz=True,
+        make_per_layer_plots=False,
+        make_overlay_plot=False,
+        diagnostics_cache=qfim_spectral_gradient_diagnostics_cache_keep01234,
+        result_key=keep_key_5,
+        state_label=keep_label_5,
+        qfim_matrix_fn_factory=(
+            make_reduced01234_qfim_matrix_fn_for_layer_sequential
+        ),
+    )
 
 if RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES:
     run_qfim_grad_alignment_by_layer(
@@ -4048,6 +5022,24 @@ if RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES:
         make_overlay_plot=False,
         diagnostics_cache=qfim_spectral_gradient_diagnostics_cache,
     )
+    run_qfim_grad_alignment_by_layer(
+        layers=vqe_layer_list,
+        use_all_sampled_times=True,
+        run_indices=QFIM_GRAD_ALIGNMENT_RUN_INDICES,
+        sample_iters_for_labels=sample_iters,
+        jvp_chunk=RED_JVP_CHUNK,
+        log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
+        log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
+        save_npz=True,
+        make_per_layer_plots=False,
+        make_overlay_plot=False,
+        diagnostics_cache=qfim_spectral_gradient_diagnostics_cache_keep01234,
+        result_key=keep_key_5,
+        state_label=keep_label_5,
+        qfim_matrix_fn_factory=(
+            make_reduced01234_qfim_matrix_fn_for_layer_sequential
+        ),
+    )
 
 if RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION:
     run_qfim_grad_alignment_by_layer_iteration_folders(
@@ -4062,5 +5054,29 @@ if RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION:
         make_plots=False,
         diagnostics_cache=qfim_spectral_gradient_diagnostics_cache,
     )
+    run_qfim_grad_alignment_by_layer_iteration_folders(
+        layers=vqe_layer_list,
+        target_iterations=QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS,
+        run_indices=QFIM_GRAD_ALIGNMENT_RUN_INDICES,
+        sample_iters_for_labels=sample_iters,
+        jvp_chunk=RED_JVP_CHUNK,
+        log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
+        log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
+        save_npz=True,
+        make_plots=False,
+        diagnostics_cache=qfim_spectral_gradient_diagnostics_cache_keep01234,
+        result_key=keep_key_5,
+        state_label=keep_label_5,
+        qfim_matrix_fn_factory=(
+            make_reduced01234_qfim_matrix_fn_for_layer_sequential
+        ),
+    )
 
-print(f"Saved numerical results to: {numerical_results_dir}")
+print(
+    "Saved keep0123 and keep01234 numerical results to: "
+    f"{numerical_results_dir}"
+)
+print(
+    "Circuit drawing was skipped. To draw the saved optimized circuits, run "
+    "src/dpqc/DPQC_overparam_draw_circuits.py separately."
+)
