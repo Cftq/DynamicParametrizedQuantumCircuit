@@ -17,7 +17,7 @@ VQE_SEED_BASE = 0
 # Independent VQE trials are compiled and evaluated in fixed-size batches.
 # Five keeps the density-matrix/autodiff working set modest while removing the
 # per-trial Python dispatch from the optimization hot path.
-VQE_BATCH_SIZE = 5
+VQE_BATCH_SIZE = 20
 
 # Energy-error thresholds used for the final-energy success probabilities.
 # Divide the decade from 1e-1 to 1e-2 into ten equal logarithmic intervals,
@@ -42,7 +42,7 @@ SUCCESS_PROBABILITY_FIGURE_THRESHOLDS = tuple(
 # ------------------------------------------------------------
 # Layer schedules
 # ------------------------------------------------------------
-VQE_MAX_LAYER = 40
+VQE_MAX_LAYER = 44
 VQE_DENSE_UNTIL_LAYER = 8
 VQE_SPARSE_STEP = 4
 
@@ -51,14 +51,14 @@ UNITARY_PQC_DENSE_UNTIL_LAYER = 8
 UNITARY_PQC_SPARSE_STEP = 1
 
 # QFIM layer schedules
-QFIM_MAX_LAYER = 40
-QFIM_DENSE_UNTIL_LAYER = 8
-QFIM_SPARSE_STEP = 4
+QFIM_MAX_LAYER = VQE_MAX_LAYER
+QFIM_DENSE_UNTIL_LAYER = VQE_DENSE_UNTIL_LAYER
+QFIM_SPARSE_STEP = VQE_SPARSE_STEP
 
 # ------------------------------------------------------------
 # QFIM numerical settings
 # ------------------------------------------------------------
-NUM_QFIM_SAMPLES = 100
+NUM_QFIM_SAMPLES = NUM_RUNS
 QFIM_EFFECTIVE_RANK_THRESHOLD = 1e-12
 EIG_SUM_EPS = 1e-12
 QFIM_EIG_PLOT_EPS = 1e-16

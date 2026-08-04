@@ -2,7 +2,7 @@
 # coding: utf-8
 """Draw optimized DPQC circuits from a saved VQE result archive.
 
-Run ``DPQC_overparam_compute.py`` first.  This script reads the resulting
+Run ``DPQC_overparam_vqe.py`` first.  This script reads the resulting
 ``vqe_optimization_histories.npz`` file, selects the run with the lowest
 finite final energy for each requested layer, and writes the circuit figures
 without rerunning VQE or QFIM calculations.
@@ -93,7 +93,7 @@ def _circuit_fold(value: str) -> int:
 
 
 def _default_result_root() -> Path:
-    # DPQC_overparam_compute.py writes ``./figs`` relative to its process CWD.
+    # DPQC_overparam_vqe.py writes ``./figs`` relative to its process CWD.
     # Using the same convention keeps both commands aligned when invoked from
     # the same directory (normally the project root).
     return Path.cwd() / "figs" / "dpqc" / f"h_{cfg.H_PARAM}"

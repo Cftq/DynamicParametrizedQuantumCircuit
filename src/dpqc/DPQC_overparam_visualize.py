@@ -2,9 +2,9 @@
 # coding: utf-8
 """Visualize saved DPQC overparameterization numerical results.
 
-Run DPQC_overparam_compute.py first to create the .npz files under
-figs/dpqc/h_<h_param>/numerical_results. This script loads those saved
-results and generates the figures without recomputing VQE/QFIM quantities.
+Run DPQC_overparam_vqe.py followed by DPQC_overparam_qfim.py to create the
+.npz files under figs/dpqc/h_<h_param>/numerical_results. This script loads
+those saved results and generates figures without recomputing VQE/QFIM.
 """
 
 
@@ -1100,6 +1100,10 @@ qfim_rank_optimization_path_min_dir = os.path.join(
     qfim_rank_optimization_path_dir,
     "min",
 )
+qfim_rank_optimization_path_max_dir = os.path.join(
+    qfim_rank_optimization_path_dir,
+    "max",
+)
 qfim_eigcount_dir = os.path.join(qfim_fig_dir, "qfim_eigcount")
 qfim_eigcount_random_dir = os.path.join(qfim_eigcount_dir, "random_points")
 qfim_eigcount_optimization_path_dir = os.path.join(
@@ -1131,6 +1135,7 @@ os.makedirs(qfim_rank_random_dir, exist_ok=True)
 os.makedirs(qfim_rank_optimization_path_dir, exist_ok=True)
 os.makedirs(qfim_rank_optimization_path_mean_dir, exist_ok=True)
 os.makedirs(qfim_rank_optimization_path_min_dir, exist_ok=True)
+os.makedirs(qfim_rank_optimization_path_max_dir, exist_ok=True)
 os.makedirs(qfim_eigcount_dir, exist_ok=True)
 os.makedirs(qfim_eigcount_random_dir, exist_ok=True)
 os.makedirs(qfim_eigcount_optimization_path_dir, exist_ok=True)
@@ -1797,10 +1802,10 @@ save_qfim_eigs_by_index_colored_by_layer(
 
 
 # ============================================================
-# Mean/minimum QFIM rank + density-rank upper bound by layer
+# Mean/minimum/maximum QFIM rank + density-rank upper bound by layer
 #   reduced keep=(0,1,2,3) only
 # ============================================================
-def _qfim_rank_mean_min_sem_upper_bound_xy(
+def _qfim_rank_mean_min_max_sem_upper_bound_xy(
     rank_by_layer: dict,
     rho_rank_by_layer: dict,
     layers,
@@ -1829,6 +1834,7 @@ def _qfim_rank_mean_min_sem_upper_bound_xy(
             np.asarray([], dtype=NP_REAL_DTYPE),
             np.asarray([], dtype=NP_REAL_DTYPE),
             np.asarray([], dtype=NP_REAL_DTYPE),
+            np.asarray([], dtype=NP_REAL_DTYPE),
             [],
         )
 
@@ -1837,6 +1843,11 @@ def _qfim_rank_mean_min_sem_upper_bound_xy(
 
     min_ranks = np.asarray(
         [np.min(ranks_arr) for _, ranks_arr in valid_items],
+        dtype=NP_REAL_DTYPE,
+    )
+
+    max_ranks = np.asarray(
+        [np.max(ranks_arr) for _, ranks_arr in valid_items],
         dtype=NP_REAL_DTYPE,
     )
 
@@ -1878,10 +1889,18 @@ def _qfim_rank_mean_min_sem_upper_bound_xy(
 
     upper_bounds = np.asarray(upper_bounds, dtype=NP_REAL_DTYPE)
 
-    return x, min_ranks, mean_ranks, sem_ranks, upper_bounds, valid_layers
+    return (
+        x,
+        min_ranks,
+        max_ranks,
+        mean_ranks,
+        sem_ranks,
+        upper_bounds,
+        valid_layers,
+    )
 
 
-def plot_single_qfim_rank_mean_min_sem_by_layer(
+def plot_single_qfim_rank_mean_min_max_sem_by_layer(
     rank_by_layer: dict,
     rho_rank_by_layer: dict,
     layers,
@@ -1889,21 +1908,24 @@ def plot_single_qfim_rank_mean_min_sem_by_layer(
     d_keep: int = 2 ** len(KEEP_WIRES_4),
     color_min,
     color_mean,
+    color_max="C2",
     label=None,
     title,
     outpath,
     marker_min: str = "o",
     marker_mean: str = "s",
+    marker_max: str = "^",
     lw: float = 1.4,
 ):
     (
         x,
         min_ranks,
+        max_ranks,
         mean_ranks,
         sem_ranks,
         upper_bounds,
         valid_layers,
-    ) = _qfim_rank_mean_min_sem_upper_bound_xy(
+    ) = _qfim_rank_mean_min_max_sem_upper_bound_xy(
         rank_by_layer,
         rho_rank_by_layer,
         layers,
@@ -1926,6 +1948,17 @@ def plot_single_qfim_rank_mean_min_sem_by_layer(
         markersize=6.0,
         color=color_min,
         label=rf"Minimum effective rank{label_suffix}",
+    )
+
+    ax.plot(
+        x,
+        max_ranks,
+        marker=marker_max,
+        linestyle="-",
+        linewidth=lw,
+        markersize=6.0,
+        color=color_max,
+        label=rf"Maximum effective rank{label_suffix}",
     )
 
     ax.errorbar(
@@ -1967,20 +2000,25 @@ def plot_single_qfim_rank_mean_min_sem_by_layer(
     save_fig(fig, ax, outpath, outside_legend=False)
 
 
-plot_single_qfim_rank_mean_min_sem_by_layer(
+plot_single_qfim_rank_mean_min_max_sem_by_layer(
     qfim_rank_reduced_0123_by_layer,
     qfim_rho_rank_reduced_0123_by_layer,
     qfim_layer_list,
     color_min="C0",
     color_mean="C1",
+    color_max="C2",
     label=None,
-    title=rf"QFIM effective rank mean/minimum and upper bound at {NUM_QFIM_SAMPLES} random points",
+    title=(
+        rf"QFIM effective rank mean/minimum/maximum and upper bound at "
+        rf"{NUM_QFIM_SAMPLES} random points"
+    ),
     outpath=os.path.join(
         qfim_rank_random_dir,
         "qfim_rank_mean_min_upper_bound_random_points_reduced_0123.pdf",
     ),
     marker_min="o",
     marker_mean="s",
+    marker_max="^",
     lw=1.4,
 )
 
@@ -2472,15 +2510,25 @@ def plot_qfim_rank_history_mean_by_layer(
     )
 
 
-def plot_qfim_rank_history_min_by_layer(
+def _plot_qfim_rank_history_extreme_by_layer(
     rank_history_by_layer: dict,
     layers,
     sample_iters,
     *,
+    statistic: str,
     title: str,
     outpath: str,
     cmap=None,
 ):
+    if statistic == "minimum":
+        reduce_extreme = np.min
+        missing_fill = np.inf
+    elif statistic == "maximum":
+        reduce_extreme = np.max
+        missing_fill = -np.inf
+    else:
+        raise ValueError("statistic must be either 'minimum' or 'maximum'.")
+
     valid_layers = [
         int(L)
         for L in layers
@@ -2516,10 +2564,10 @@ def plot_qfim_rank_history_min_by_layer(
 
         valid = np.isfinite(ranks)
         counts = np.sum(valid, axis=0)
-        ranks_for_min = np.where(valid, ranks, np.inf)
-        min_ranks = np.min(ranks_for_min, axis=0)
-        min_ranks = np.where(counts > 0, min_ranks, np.nan)
-        finite_mask = np.isfinite(min_ranks) & (counts > 0)
+        ranks_for_extreme = np.where(valid, ranks, missing_fill)
+        extreme_ranks = reduce_extreme(ranks_for_extreme, axis=0)
+        extreme_ranks = np.where(counts > 0, extreme_ranks, np.nan)
+        finite_mask = np.isfinite(extreme_ranks) & (counts > 0)
 
         if not np.any(finite_mask):
             continue
@@ -2528,7 +2576,7 @@ def plot_qfim_rank_history_min_by_layer(
 
         ax.plot(
             x[finite_mask],
-            min_ranks[finite_mask],
+            extreme_ranks[finite_mask],
             marker="o",
             linestyle="-",
             linewidth=1.2,
@@ -2538,7 +2586,7 @@ def plot_qfim_rank_history_min_by_layer(
         )
 
     ax.set_xlabel("Iterations")
-    ax.set_ylabel("Minimum QFIM rank")
+    ax.set_ylabel(f"{statistic.title()} QFIM rank")
     ax.set_title(title)
     ax.set_xticks(x)
     ax.set_xticklabels([str(int(t)) for t in x], rotation=45, ha="right")
@@ -2558,6 +2606,46 @@ def plot_qfim_rank_history_min_by_layer(
         outpath,
         outside_legend=True,
         legend_space_frac=0.22,
+    )
+
+
+def plot_qfim_rank_history_min_by_layer(
+    rank_history_by_layer: dict,
+    layers,
+    sample_iters,
+    *,
+    title: str,
+    outpath: str,
+    cmap=None,
+):
+    _plot_qfim_rank_history_extreme_by_layer(
+        rank_history_by_layer,
+        layers,
+        sample_iters,
+        statistic="minimum",
+        title=title,
+        outpath=outpath,
+        cmap=cmap,
+    )
+
+
+def plot_qfim_rank_history_max_by_layer(
+    rank_history_by_layer: dict,
+    layers,
+    sample_iters,
+    *,
+    title: str,
+    outpath: str,
+    cmap=None,
+):
+    _plot_qfim_rank_history_extreme_by_layer(
+        rank_history_by_layer,
+        layers,
+        sample_iters,
+        statistic="maximum",
+        title=title,
+        outpath=outpath,
+        cmap=cmap,
     )
 
 
@@ -2693,6 +2781,18 @@ plot_qfim_rank_history_min_by_layer(
     outpath=os.path.join(
         qfim_rank_optimization_path_min_dir,
         f"qfim_rank_min_history_optimization_path_{keep_key}.pdf",
+    ),
+    cmap=cmap,
+)
+
+plot_qfim_rank_history_max_by_layer(
+    qfim_rank_history_by_layer,
+    vqe_layer_list,
+    sample_iters,
+    title=rf"Maximum QFIM effective rank along optimization path ({keep_label})",
+    outpath=os.path.join(
+        qfim_rank_optimization_path_max_dir,
+        f"qfim_rank_max_history_optimization_path_{keep_key}.pdf",
     ),
     cmap=cmap,
 )
@@ -3458,7 +3558,7 @@ def render_qfim_keep01234_core_figures() -> None:
         random_result_path,
         description=(
             "keep01234 random-point QFIM result; rerun "
-            "DPQC_overparam_compute.py for complete keep01234 figures"
+            "DPQC_overparam_qfim.py for complete keep01234 figures"
         ),
     )
     random_rank_rendered = False
@@ -3540,16 +3640,18 @@ def render_qfim_keep01234_core_figures() -> None:
                 np.asarray(values).size > 0
                 for values in rank_by_layer.values()
             ):
-                plot_single_qfim_rank_mean_min_sem_by_layer(
+                plot_single_qfim_rank_mean_min_max_sem_by_layer(
                     rank_by_layer,
                     rho_rank_by_layer,
                     random_layers,
                     d_keep=2 ** len(KEEP_WIRES_5),
                     color_min="C0",
                     color_mean="C1",
+                    color_max="C2",
                     label=None,
                     title=(
-                        rf"QFIM effective rank mean/minimum and upper bound "
+                        rf"QFIM effective rank mean/minimum/maximum and "
+                        rf"upper bound "
                         rf"at {num_random_samples} random points "
                         rf"({keep_label_5})"
                     ),
@@ -3562,6 +3664,7 @@ def render_qfim_keep01234_core_figures() -> None:
                     ),
                     marker_min="o",
                     marker_mean="s",
+                    marker_max="^",
                     lw=1.4,
                 )
                 random_rank_rendered = True
@@ -3651,16 +3754,18 @@ def render_qfim_keep01234_core_figures() -> None:
                     "active_rank",
                     dtype=NP_REAL_DTYPE,
                 )
-                plot_single_qfim_rank_mean_min_sem_by_layer(
+                plot_single_qfim_rank_mean_min_max_sem_by_layer(
                     fallback_rank_by_layer,
                     {},
                     fallback_layers,
                     d_keep=2 ** len(KEEP_WIRES_5),
                     color_min="C0",
                     color_mean="C1",
+                    color_max="C2",
                     label=None,
                     title=(
-                        "QFIM effective rank mean/minimum and upper bound "
+                        "QFIM effective rank mean/minimum/maximum and "
+                        "upper bound "
                         f"at random points ({keep_label_5})"
                     ),
                     outpath=os.path.join(
@@ -3680,7 +3785,7 @@ def render_qfim_keep01234_core_figures() -> None:
         rank_history_path,
         description=(
             "keep01234 optimization-path QFIM-rank result; rerun "
-            "DPQC_overparam_compute.py for complete keep01234 figures"
+            "DPQC_overparam_qfim.py for complete keep01234 figures"
         ),
     )
 
@@ -3751,6 +3856,23 @@ def render_qfim_keep01234_core_figures() -> None:
             ),
             cmap=cmap,
         )
+        plot_qfim_rank_history_max_by_layer(
+            result_rank_by_layer,
+            result_layers,
+            result_sample_iters,
+            title=(
+                "Maximum QFIM effective rank along optimization path "
+                f"({keep_label_5})"
+            ),
+            outpath=os.path.join(
+                qfim_rank_optimization_path_max_dir,
+                (
+                    "qfim_rank_max_history_optimization_path_"
+                    f"{keep_key_5}.pdf"
+                ),
+            ),
+            cmap=cmap,
+        )
         return True
 
     rank_history_rendered = render_rank_history_result(
@@ -3785,7 +3907,7 @@ def render_qfim_keep01234_core_figures() -> None:
         eigs_history_path,
         description=(
             "keep01234 optimization-path QFIM-eigenvalue result; rerun "
-            "DPQC_overparam_compute.py for spectrum-dependent figures"
+            "DPQC_overparam_qfim.py for spectrum-dependent figures"
         ),
     )
 
