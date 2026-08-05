@@ -5,9 +5,15 @@
 Run DPQC_overparam_vqe.py followed by DPQC_overparam_qfim.py to create the
 .npz files under figs/dpqc/h_<h_param>/numerical_results. This script loads
 those saved results and generates figures without recomputing VQE/QFIM.
+
+Example::
+
+    python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1
 """
 
 
+import argparse
+import math
 import os
 import sys
 import warnings
@@ -28,6 +34,47 @@ for _path in (_MODULE_DIR, _COMMON_DIR):
 
 
 import config_overparam as cfg
+
+
+def _finite_float(value: str) -> float:
+    """Parse one finite floating-point command-line value."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise argparse.ArgumentTypeError("value must be a finite number") from exc
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("value must be a finite number")
+    return parsed
+
+
+def _parse_cli_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description=(
+            "Visualize saved DPQC results for one Hamiltonian parameter h. "
+            "Run this command from the same project directory used by the "
+            "DPQC compute programs."
+        )
+    )
+    parser.add_argument(
+        "--h-param",
+        type=_finite_float,
+        default=float(cfg.H_PARAM),
+        help=(
+            "Hamiltonian parameter h whose saved results are loaded and "
+            "visualized (default: H_PARAM from config_overparam.py)."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+if __name__ == "__main__":
+    _CLI_ARGS = _parse_cli_args()
+else:
+    _CLI_ARGS = argparse.Namespace(h_param=float(cfg.H_PARAM))
+
+h_param = float(_CLI_ARGS.h_param)
+if not math.isfinite(h_param):
+    raise ValueError("h_param must be a finite number.")
 
 # ------------------------------------------------------------
 # IMPORTANT: env vars should be set BEFORE importing jax
@@ -66,16 +113,61 @@ from dpqc_overparam_common import (
     build_H_matrix_jax,
     build_layer_list,
     hamiltonian_terms,
-    load_npz_result,
+    load_npz_result as _load_npz_result_unchecked,
     rho_zero_state,
     threshold_psd_eigvals_for_rank,
 )
+
+
+def _validate_result_h_param(
+    result: dict,
+    result_path,
+    *,
+    required: bool = False,
+) -> None:
+    """Ensure an archive belongs to the h value selected on the CLI."""
+    if "h_param" not in result:
+        if required:
+            raise KeyError(
+                "The required DPQC archive does not contain h_param metadata: "
+                f"{Path(result_path).resolve()}"
+            )
+        return
+
+    archived_value = np.asarray(result["h_param"])
+    if (
+        archived_value.size != 1
+        or not np.issubdtype(archived_value.dtype, np.number)
+        or np.iscomplexobj(archived_value)
+    ):
+        raise ValueError(
+            "Saved h_param must be one real numeric scalar in archive: "
+            f"{Path(result_path).resolve()}"
+        )
+    archived_h_param = float(archived_value.reshape(-1)[0])
+    if not math.isfinite(archived_h_param):
+        raise ValueError(
+            "Saved h_param must be finite in archive: "
+            f"{Path(result_path).resolve()}"
+        )
+    if NP_REAL_DTYPE(archived_h_param) != NP_REAL_DTYPE(h_param):
+        raise ValueError(
+            "Saved DPQC h_param does not match --h-param: "
+            f"{archived_h_param} != {h_param} in "
+            f"{Path(result_path).resolve()}"
+        )
+
+
+def load_npz_result(result_path) -> dict:
+    """Load one h-scoped archive and validate h metadata when available."""
+    result = _load_npz_result_unchecked(str(result_path))
+    _validate_result_h_param(result, result_path, required=False)
+    return result
 
 # ============================================================
 # Shared constants / helpers
 # ============================================================
 num_system_qubits = 5
-h_param = cfg.H_PARAM
 tolerance = cfg.TOLERANCE
 steps = cfg.STEPS
 num_runs = int(cfg.NUM_RUNS)
@@ -1123,30 +1215,6 @@ numerical_results_dir = os.path.join(save_dir, "numerical_results")
 energy_results_dir = os.path.join(numerical_results_dir, "energy")
 qfim_results_dir = os.path.join(numerical_results_dir, "qfim")
 
-os.makedirs(save_dir, exist_ok=True)
-os.makedirs(energy_fig_dir, exist_ok=True)
-os.makedirs(qfim_fig_dir, exist_ok=True)
-os.makedirs(qfim_trace_dir, exist_ok=True)
-os.makedirs(qfim_eigs_dir, exist_ok=True)
-os.makedirs(qfim_eigs_dir_red4, exist_ok=True)
-os.makedirs(qfim_eigs_dir_red5, exist_ok=True)
-os.makedirs(qfim_rank_dir, exist_ok=True)
-os.makedirs(qfim_rank_random_dir, exist_ok=True)
-os.makedirs(qfim_rank_optimization_path_dir, exist_ok=True)
-os.makedirs(qfim_rank_optimization_path_mean_dir, exist_ok=True)
-os.makedirs(qfim_rank_optimization_path_min_dir, exist_ok=True)
-os.makedirs(qfim_rank_optimization_path_max_dir, exist_ok=True)
-os.makedirs(qfim_eigcount_dir, exist_ok=True)
-os.makedirs(qfim_eigcount_random_dir, exist_ok=True)
-os.makedirs(qfim_eigcount_optimization_path_dir, exist_ok=True)
-os.makedirs(qfim_eigcount_optimization_path_mean_dir, exist_ok=True)
-os.makedirs(qfim_eigcount_optimization_path_min_dir, exist_ok=True)
-os.makedirs(circuit_dir, exist_ok=True)
-os.makedirs(numerical_results_dir, exist_ok=True)
-os.makedirs(energy_results_dir, exist_ok=True)
-os.makedirs(qfim_results_dir, exist_ok=True)
-
-
 def _load_layer_arrays_from_npz(
     result: dict,
     layers,
@@ -1183,6 +1251,37 @@ vqe_optimization_result_path = os.path.join(
 )
 
 vqe_optimization_results = load_npz_result(vqe_optimization_result_path)
+_validate_result_h_param(
+    vqe_optimization_results,
+    vqe_optimization_result_path,
+    required=True,
+)
+
+# Create output directories only after confirming that the selected h has a
+# valid VQE archive.  Numerical-result directories are inputs and are never
+# created by the visualization stage.
+for _output_dir in (
+    save_dir,
+    energy_fig_dir,
+    qfim_fig_dir,
+    qfim_trace_dir,
+    qfim_eigs_dir,
+    qfim_eigs_dir_red4,
+    qfim_eigs_dir_red5,
+    qfim_rank_dir,
+    qfim_rank_random_dir,
+    qfim_rank_optimization_path_dir,
+    qfim_rank_optimization_path_mean_dir,
+    qfim_rank_optimization_path_min_dir,
+    qfim_rank_optimization_path_max_dir,
+    qfim_eigcount_dir,
+    qfim_eigcount_random_dir,
+    qfim_eigcount_optimization_path_dir,
+    qfim_eigcount_optimization_path_mean_dir,
+    qfim_eigcount_optimization_path_min_dir,
+    circuit_dir,
+):
+    os.makedirs(_output_dir, exist_ok=True)
 
 vqe_layer_list = [
     int(L)
@@ -5605,4 +5704,5 @@ for _alignment_result_key, _alignment_state_label in (
         _alignment_state_label,
     )
 
+print(f"Visualized Hamiltonian parameter h: {h_param}")
 print(f"Saved figures to: {save_dir}")

@@ -8,6 +8,7 @@ from typing import Optional
 
 import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 
 
@@ -20,6 +21,7 @@ FIGSIZE_DOUBLE = (17.0 * INCH_PER_CM, 8.5 * INCH_PER_CM)
 FIGURE_WIDTH_DEFAULT = "double"
 
 SAVE_DPI = 600
+SAVEFIG_PAD_INCHES = 0.02
 
 # Numerical result figures: PDF only
 NUMERICAL_SAVE_PNG = False
@@ -30,6 +32,7 @@ CIRCUIT_SAVE_PNG = True
 CIRCUIT_SAVE_PDF = False
 
 SHOW_FIGURE_TITLES = False
+SHOW_REDUNDANT_LAYER_LEGENDS = False
 
 BASE_FONT_SIZE = 10
 TITLE_FONT_SIZE = 10
@@ -37,7 +40,7 @@ AXIS_LABEL_FONT_SIZE = 13
 TICK_LABEL_FONT_SIZE = 11
 LEGEND_FONT_SIZE = 12
 
-matplotlib.rcParams.update({
+_PLOT_RCPARAMS = {
     "font.family": "serif",
     "font.serif": ["STIXGeneral", "Times New Roman", "DejaVu Serif"],
     "mathtext.fontset": "stix",
@@ -88,8 +91,16 @@ matplotlib.rcParams.update({
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
     "savefig.bbox": "tight",
-    "savefig.pad_inches": 0.02,
-})
+    "savefig.pad_inches": SAVEFIG_PAD_INCHES,
+}
+
+
+def apply_plot_config() -> None:
+    """Apply the shared publication-style settings to Matplotlib."""
+    matplotlib.rcParams.update(_PLOT_RCPARAMS)
+
+
+apply_plot_config()
 
 _DEFAULT_AXES_MARGINS_PRX = {
     "left": 0.14,
@@ -168,6 +179,28 @@ def new_fig_ax(
     return fig, ax
 
 
+def new_prx_figure(
+    *,
+    width: str = FIGURE_WIDTH_DEFAULT,
+    height_cm: Optional[float] = None,
+):
+    """Create a current Matplotlib figure using the shared dimensions."""
+    figure_size = list(_figsize_from_width(width))
+    if height_cm is not None:
+        figure_size[1] = float(height_cm) * INCH_PER_CM
+    return plt.figure(figsize=tuple(figure_size))
+
+
+def set_prx_title(title: str, *, ax=None) -> None:
+    """Set a title only when titles are enabled by the plot contract."""
+    if not SHOW_FIGURE_TITLES:
+        return
+    if ax is None:
+        plt.title(title)
+    else:
+        ax.set_title(title)
+
+
 def apply_fontsizes(
     ax,
     *,
@@ -185,6 +218,11 @@ def apply_fontsizes(
     if leg is not None:
         for txt in leg.get_texts():
             txt.set_fontsize(legend_size)
+
+
+def apply_prx_axis_style(ax) -> None:
+    """Apply the configured font sizes to one axis."""
+    apply_fontsizes(ax)
 
 
 def style_axes_for_prx(
@@ -277,17 +315,251 @@ def save_fig(
             root + ".png",
             dpi=SAVE_DPI,
             bbox_inches="tight",
-            pad_inches=0.02,
+            pad_inches=SAVEFIG_PAD_INCHES,
         )
 
     if save_pdf:
         fig.savefig(
             root + ".pdf",
             bbox_inches="tight",
-            pad_inches=0.02,
+            pad_inches=SAVEFIG_PAD_INCHES,
         )
 
     plt.close(fig)
+
+
+def save_current_figure(
+    outpath: str,
+    *,
+    outside_legend: bool = False,
+    legend_space_frac: Optional[float] = None,
+    save_png: bool = NUMERICAL_SAVE_PNG,
+    save_pdf: bool = NUMERICAL_SAVE_PDF,
+) -> None:
+    """Save the current figure using the shared numerical-figure settings."""
+    outdir = os.path.dirname(outpath)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
+
+    fig = plt.gcf()
+    axes = list(fig.axes)
+    if not SHOW_FIGURE_TITLES:
+        for axis in axes:
+            axis.set_title("")
+    if axes:
+        apply_axes_prx(
+            fig,
+            axes[0],
+            outside_legend=outside_legend,
+            legend_space_frac=legend_space_frac,
+        )
+    for axis in axes:
+        apply_prx_axis_style(axis)
+        style_axes_for_prx(axis)
+        style_legend_for_prx(axis, frameon=False)
+
+    root, extension = os.path.splitext(outpath)
+    extension = extension.lower()
+    if not extension:
+        root = outpath
+    if save_png:
+        png_path = outpath if extension == ".png" else root + ".png"
+        fig.savefig(
+            png_path,
+            dpi=SAVE_DPI,
+            bbox_inches="tight",
+            pad_inches=SAVEFIG_PAD_INCHES,
+        )
+    if save_pdf:
+        fig.savefig(
+            root + ".pdf",
+            bbox_inches="tight",
+            pad_inches=SAVEFIG_PAD_INCHES,
+        )
+    plt.close(fig)
+
+
+def make_violin_ready(
+    values,
+    *,
+    ensure_positive: bool = False,
+    tiny: float = 1e-12,
+) -> np.ndarray:
+    """Return a plotting-only array accepted by Matplotlib's violinplot."""
+    array = np.asarray(values, dtype=float).reshape(-1)
+    if array.size == 0:
+        base = float(tiny) if ensure_positive else 0.0
+        return np.asarray([base, base + float(tiny)], dtype=float)
+    if ensure_positive:
+        array = np.where(array <= 0.0, float(tiny), array)
+    if array.size == 1:
+        base = float(array[0])
+        delta = float(tiny) * max(abs(base), 1.0)
+        if ensure_positive:
+            return np.asarray([base, base + delta], dtype=float)
+        return np.asarray([base - 0.5 * delta, base + 0.5 * delta])
+    if np.allclose(array, array[0], rtol=0.0, atol=0.0):
+        base = float(array[0])
+        delta = float(tiny) * max(abs(base), 1.0)
+        endpoints = (0.0, 1.0) if ensure_positive else (-0.5, 0.5)
+        return array + delta * np.linspace(*endpoints, array.size)
+    return array
+
+
+def style_violin(
+    violin,
+    *,
+    facecolor=None,
+    edgecolor=None,
+    alpha: float = 0.20,
+    linewidth: float = 1.0,
+    hatch: Optional[str] = None,
+    linecolor=None,
+    linealpha: float = 0.7,
+) -> None:
+    """Apply shared styling to a Matplotlib violinplot result."""
+    for body in violin["bodies"]:
+        if facecolor is not None:
+            body.set_facecolor(facecolor)
+        if edgecolor is not None:
+            body.set_edgecolor(edgecolor)
+        body.set_alpha(alpha)
+        body.set_linewidth(linewidth)
+        if hatch is not None:
+            body.set_hatch(hatch)
+
+    line_color = linecolor
+    if line_color is None:
+        line_color = edgecolor if edgecolor is not None else "black"
+    for key in ("cmeans", "cmins", "cmaxes", "cbars", "cmedians"):
+        artist = violin.get(key)
+        if artist is not None:
+            artist.set_color(line_color)
+            artist.set_linewidth(linewidth)
+            artist.set_alpha(linealpha)
+
+
+_MAX_AUTOMATIC_EIGENVALUE_HISTOGRAM_BINS = 256
+
+
+def _resolve_eigenvalue_histogram_bins(values: np.ndarray, bins):
+    """Bound pathological automatic bin counts for nearly singular spectra."""
+    if not isinstance(bins, str) or bins.lower() not in {"auto", "fd"}:
+        return bins
+    num_values = int(values.size)
+    if num_values <= 1:
+        return 1
+    max_bins = min(num_values, _MAX_AUTOMATIC_EIGENVALUE_HISTOGRAM_BINS)
+    value_range = float(np.max(values) - np.min(values))
+    if not np.isfinite(value_range) or value_range <= 0.0:
+        return 1
+    q25, q75 = np.percentile(values, [25.0, 75.0])
+    iqr = float(q75 - q25)
+    if not np.isfinite(iqr) or iqr <= 0.0:
+        return bins
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        estimated_bins = value_range / (2.0 * iqr / np.cbrt(num_values))
+    if not np.isfinite(estimated_bins) or estimated_bins > max_bins:
+        return max_bins
+    return bins
+
+
+def save_eigenvalue_histogram(
+    eigenvalues: np.ndarray,
+    *,
+    title: str,
+    outpath: str,
+    bins="auto",
+    xlabel: str = "Eigenvalue",
+    color: str = "C0",
+) -> None:
+    """Save an untransformed count histogram for one finite spectrum."""
+    values = np.asarray(eigenvalues, dtype=np.float64).reshape(-1)
+    if values.size == 0 or not np.all(np.isfinite(values)):
+        raise ValueError("eigenvalues must contain at least one finite spectrum.")
+    fig, ax = new_fig_ax(outside_legend=False)
+    ax.hist(
+        values,
+        bins=_resolve_eigenvalue_histogram_bins(values, bins),
+        density=False,
+        color=color,
+        alpha=0.75,
+        edgecolor="black",
+        linewidth=0.6,
+    )
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Count")
+    ax.set_title(title)
+    ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    ax.grid(True, axis="y", alpha=0.3)
+    save_fig(fig, ax, outpath, outside_legend=False)
+
+
+def save_eigenvalue_histograms_by_trial(
+    eigenvalues_by_trial: np.ndarray,
+    *,
+    outdir: str,
+    matrix_tag: str,
+    matrix_label: str,
+    num_layers: int,
+    context_tag: str,
+    context_label: str,
+    condition_tag: Optional[str] = None,
+    condition_label: Optional[str] = None,
+    bins="auto",
+    color: str = "C0",
+    trial_index_start: int = 0,
+) -> list[str]:
+    """Save one eigenvalue histogram per trial and return their paths."""
+    eigs = np.asarray(eigenvalues_by_trial, dtype=np.float64)
+    if eigs.ndim == 1:
+        eigs = eigs[None, :]
+    if eigs.ndim != 2:
+        raise ValueError(
+            "eigenvalues_by_trial must have shape "
+            "(num_trials, num_eigenvalues)."
+        )
+    if eigs.shape[0] == 0 or eigs.shape[1] == 0:
+        return []
+    if not np.all(np.isfinite(eigs)):
+        raise ValueError("eigenvalues_by_trial must contain only finite values.")
+
+    os.makedirs(outdir, exist_ok=True)
+    saved_paths = []
+    num_layers = int(num_layers)
+    num_params = int(eigs.shape[1])
+    for row_index, trial_eigenvalues in enumerate(eigs):
+        trial_index = int(trial_index_start) + row_index
+        tags = [
+            str(matrix_tag).strip("_"),
+            "eig_hist",
+            f"L{num_layers:04d}",
+            f"params{num_params:04d}",
+            f"trial{trial_index:04d}",
+            str(context_tag).strip("_"),
+        ]
+        if condition_tag:
+            tags.append(str(condition_tag).strip("_"))
+        title_parts = [
+            f"{matrix_label} eigenvalue histogram",
+            f"L={num_layers}",
+            f"parameters={num_params}",
+            f"trial={trial_index}",
+            context_label,
+        ]
+        if condition_label:
+            title_parts.append(condition_label)
+        outpath = os.path.join(outdir, "_".join(tags) + ".pdf")
+        save_eigenvalue_histogram(
+            trial_eigenvalues,
+            title=f"{title_parts[0]} ({', '.join(title_parts[1:])})",
+            outpath=outpath,
+            bins=bins,
+            xlabel=f"{matrix_label} eigenvalue",
+            color=color,
+        )
+        saved_paths.append(outpath)
+    return saved_paths
 
 
 def plot_qfim_grad_alignment_table(

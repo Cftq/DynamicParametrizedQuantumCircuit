@@ -46,9 +46,9 @@ VQE_MAX_LAYER = 44
 VQE_DENSE_UNTIL_LAYER = 8
 VQE_SPARSE_STEP = 4
 
-UNITARY_PQC_MAX_LAYER = 8
+UNITARY_PQC_MAX_LAYER = 40
 UNITARY_PQC_DENSE_UNTIL_LAYER = 8
-UNITARY_PQC_SPARSE_STEP = 1
+UNITARY_PQC_SPARSE_STEP = 4
 
 # QFIM layer schedules
 QFIM_MAX_LAYER = VQE_MAX_LAYER
@@ -66,6 +66,11 @@ QFIM_SAMPLE_SEED_BASE = 0
 UNITARY_PQC_QFIM_SAMPLE_SEED_BASE = 123456
 PURE_QFIM_LAYER_THRESHOLD = 8
 RED_JVP_CHUNK = 16
+# Independent parameter points used by QFIM, HS, Hessian, and ORTK analyses
+# are evaluated with a fixed-shape ``jit(vmap(...))`` runner.  Keep this
+# smaller than VQE_BATCH_SIZE because derivative matrices grow quadratically
+# with the number of circuit parameters.
+ANALYSIS_BATCH_SIZE = 5
 
 # Save trace-based / participation-rank QFIM diagnostics in addition to the
 # legacy threshold-rank outputs.  These switches do not trigger independent
