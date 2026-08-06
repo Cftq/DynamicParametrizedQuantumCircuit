@@ -7,8 +7,6 @@ results under figs/unitary_pqc/h_<h_param>/numerical_results and generates
 numerical figures without recomputing VQE or QFIM quantities. Circuit drawings
 are handled independently by unitary_pqc_overparam_draw_circuits.py.
 
-Example::
-
     python src/unitary_pqc/unitary_pqc_overparam_visualize.py --h-param 0.1
 """
 from __future__ import annotations

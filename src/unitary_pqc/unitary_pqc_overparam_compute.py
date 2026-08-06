@@ -19,6 +19,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import gc
 import math
 import os
 import sys
@@ -168,6 +169,13 @@ def tqdm(*args, **kwargs):
     kwargs.setdefault("file", sys.stdout)
     kwargs.setdefault("dynamic_ncols", True)
     return _tqdm(*args, **kwargs)
+
+
+def _release_jax_compilation_cache() -> None:
+    """Release completed layer/metric executables before compiling the next."""
+    gc.collect()
+    jax.clear_caches()
+    gc.collect()
 
 
 jit = jax.jit
@@ -2147,6 +2155,9 @@ def compute_qfim_rank_history_by_layer(
         eigs_history_by_layer[L_int] = eigs_L
         thresh_history_by_layer[L_int] = thresh_L
 
+        del batch_runner
+        _release_jax_compilation_cache()
+
     return rank_history_by_layer, eigs_history_by_layer, thresh_history_by_layer
 
 
@@ -2208,6 +2219,9 @@ def compute_ortk_rank_history_by_layer(
         rank_history_by_layer[L_int] = ranks_L
         effective_rank_history_by_layer[L_int] = effective_ranks_L
         eigs_history_by_layer[L_int] = eigs_L
+
+        del batch_runner
+        _release_jax_compilation_cache()
 
     return (
         rank_history_by_layer,
@@ -2281,6 +2295,9 @@ def compute_hs_rank_history_by_layer(
         eigs_history_by_layer[L_int] = eigs_L
         thresh_history_by_layer[L_int] = thresh_L
 
+        del batch_runner
+        _release_jax_compilation_cache()
+
     return rank_history_by_layer, eigs_history_by_layer, thresh_history_by_layer
 
 def compute_hessian_rank_history_by_layer(
@@ -2340,6 +2357,9 @@ def compute_hessian_rank_history_by_layer(
         rank_history_by_layer[L_int] = ranks_L
         eigs_history_by_layer[L_int] = eigs_L
         thresh_history_by_layer[L_int] = thresh_L
+
+        del batch_runner
+        _release_jax_compilation_cache()
 
     return rank_history_by_layer, eigs_history_by_layer, thresh_history_by_layer
 
@@ -2623,7 +2643,7 @@ def compute_qfim_grad_alignment_table_for_layer(
         ],
         dtype=NP_INT_DTYPE,
     )
-    return {
+    table = {
         "lambda": np.asarray(eigs, dtype=NP_REAL_DTYPE).reshape((-1,)),
         "w_grad": np.asarray(weights, dtype=NP_REAL_DTYPE).reshape((-1,)),
         "coeff_abs2": np.asarray(
@@ -2643,6 +2663,9 @@ def compute_qfim_grad_alignment_table_for_layer(
         "time_index": np.repeat(point_time_ids, num_params),
         "iteration": np.repeat(point_iterations, num_params),
     }
+    del batch_runner
+    _release_jax_compilation_cache()
+    return table
 
 def plot_qfim_grad_alignment_table(
     table,
@@ -3689,6 +3712,9 @@ def run_vqe_optimization(
         final_stats["mean_energy"].append(mean_trace[-1])
         final_stats["std_energy"].append(std_trace[-1])
 
+        del run_vqe_batch
+        _release_jax_compilation_cache()
+
     save_unitary_vqe_results()
     
     
@@ -4423,6 +4449,9 @@ def run_random_qfim_analysis(
             reduced_qfim_thresholds,
             dtype=NP_REAL_DTYPE,
         )
+
+        del red_qfim_batch_runner
+        _release_jax_compilation_cache()
     
         if make_plots:
             _save_qfim_eigs_violinplot_by_index(
@@ -4486,6 +4515,9 @@ def run_random_qfim_analysis(
             reduced_hs_thresholds,
             dtype=NP_REAL_DTYPE,
         )
+
+        del red_hs_batch_runner
+        _release_jax_compilation_cache()
 
         # For a normalized pure state, G_HS = F_Q / 2 exactly.  Evaluate the
         # pure QFIM once in batches and derive both pure result families from
@@ -4562,6 +4594,9 @@ def run_random_qfim_analysis(
             pure_hs_thresholds, dtype=NP_REAL_DTYPE
         )
 
+        del pure_qfim_batch_runner
+        _release_jax_compilation_cache()
+
         if make_plots:
             _save_qfim_eigs_violinplot_by_index(
                 hs_eigs_reduced_by_layer[L],
@@ -4625,6 +4660,9 @@ def run_random_qfim_analysis(
             dtype=NP_REAL_DTYPE,
         )
 
+        del ortk_batch_runner
+        _release_jax_compilation_cache()
+
         if make_plots:
             _save_qfim_eigs_violinplot_by_index(
                 ortk_eigs_by_layer[L],
@@ -4681,6 +4719,9 @@ def run_random_qfim_analysis(
             hessian_abs_eigsums,
             dtype=NP_REAL_DTYPE,
         )
+
+        del hessian_batch_runner
+        _release_jax_compilation_cache()
 
         if make_plots:
             _save_signed_eigs_scatterplot_by_index(
