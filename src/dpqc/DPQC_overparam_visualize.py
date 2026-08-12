@@ -9,12 +9,16 @@ those saved results and generates figures without recomputing VQE/QFIM.
 Example::
 
     python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1
+    python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1 --output-family dpqc_reset
+    python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1 --hessian-only
 """
 
 
 import argparse
+import json
 import math
 import os
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -47,6 +51,43 @@ def _finite_float(value: str) -> float:
     return parsed
 
 
+def _positive_float(value: str) -> float:
+    parsed = _finite_float(value)
+    if parsed <= 0.0:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def _nonnegative_float(value: str) -> float:
+    parsed = _finite_float(value)
+    if parsed < 0.0:
+        raise argparse.ArgumentTypeError("value must be nonnegative")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
+def _comma_separated_ints(value: str) -> tuple[int, ...]:
+    try:
+        parsed = tuple(int(item.strip()) for item in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be a comma-separated integer list"
+        ) from exc
+    if not parsed or any(not item.strip() for item in value.split(",")):
+        raise argparse.ArgumentTypeError(
+            "value must be a non-empty comma-separated integer list"
+        )
+    if len(set(parsed)) != len(parsed):
+        raise argparse.ArgumentTypeError("indices must not be duplicated")
+    return parsed
+
+
 def _parse_cli_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
@@ -64,17 +105,1567 @@ def _parse_cli_args(argv=None):
             "visualized (default: H_PARAM from config_overparam.py)."
         ),
     )
+    parser.add_argument(
+        "--output-family",
+        choices=("dpqc", "dpqc_reset"),
+        default="dpqc",
+        help=(
+            "Result family below ./figs to load and visualize "
+            "(default: dpqc). Use dpqc_reset for the shared-Rz, "
+            "fixed-Rx(pi) reset model."
+        ),
+    )
+    hessian_mode = parser.add_mutually_exclusive_group()
+    hessian_mode.add_argument(
+        "--hessian-only",
+        action="store_true",
+        help=(
+            "Compute/load endpoint Hessians and render Hessian figures only. "
+            "This path does not require TensorCircuit."
+        ),
+    )
+    hessian_mode.add_argument(
+        "--with-hessian",
+        action="store_true",
+        help="Run the Hessian workflow after the existing energy/QFIM figures.",
+    )
+    parser.add_argument(
+        "--reuse-hessian-results",
+        action="store_true",
+        help=(
+            "Do not recompute Hessians; render the existing files in "
+            "numerical_results/hessian. Saved analysis settings are "
+            "authoritative in this mode."
+        ),
+    )
+    parser.add_argument(
+        "--hessian-input",
+        type=Path,
+        default=None,
+        help="Optional path to vqe_optimization_histories.npz.",
+    )
+    parser.add_argument(
+        "--hessian-results-dir",
+        type=Path,
+        default=None,
+        help="Optional Hessian numerical-results directory.",
+    )
+    parser.add_argument(
+        "--hessian-figures-dir",
+        type=Path,
+        default=None,
+        help="Optional Hessian figure output directory.",
+    )
+    parser.add_argument(
+        "--hessian-layers",
+        type=_comma_separated_ints,
+        default=None,
+        help="Comma-separated archive layers to analyze (default: all).",
+    )
+    parser.add_argument(
+        "--hessian-runs",
+        type=_comma_separated_ints,
+        default=None,
+        help="Comma-separated run indices used for endpoint clustering.",
+    )
+    parser.add_argument(
+        "--hessian-epsilon",
+        type=_positive_float,
+        default=1e-8,
+        help="Absolute eigenvalue threshold epsilon (default: 1e-8).",
+    )
+    parser.add_argument(
+        "--hessian-stationarity-tolerance",
+        type=_positive_float,
+        default=1e-6,
+        help="Gradient-norm threshold for stationary labels (default: 1e-6).",
+    )
+    parser.add_argument(
+        "--hessian-basin-energy-tolerance",
+        type=_nonnegative_float,
+        default=1e-3,
+        help="Endpoint-cluster energy tolerance (default: 1e-3).",
+    )
+    parser.add_argument(
+        "--hessian-basin-state-tolerance",
+        type=_nonnegative_float,
+        default=5e-2,
+        help="Endpoint-cluster reduced-state tolerance (default: 5e-2).",
+    )
+    parser.add_argument(
+        "--hessian-energy-only-basins",
+        action="store_true",
+        help="Cluster endpoints using energy only.",
+    )
+    parser.add_argument(
+        "--hessian-all-endpoints",
+        action="store_true",
+        help="Compute every selected endpoint Hessian, not only representatives.",
+    )
+    parser.add_argument(
+        "--hessian-save-matrices",
+        action="store_true",
+        help="Also store the dense Hessian matrices.",
+    )
+    parser.add_argument(
+        "--hessian-hvp-chunk-size",
+        type=_positive_int,
+        default=8,
+        help="Number of Hessian-vector products per compiled batch (default: 8).",
+    )
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     _CLI_ARGS = _parse_cli_args()
 else:
-    _CLI_ARGS = argparse.Namespace(h_param=float(cfg.H_PARAM))
+    _CLI_ARGS = argparse.Namespace(
+        h_param=float(cfg.H_PARAM),
+        output_family="dpqc",
+    )
 
 h_param = float(_CLI_ARGS.h_param)
 if not math.isfinite(h_param):
     raise ValueError("h_param must be a finite number.")
+
+output_family = str(_CLI_ARGS.output_family)
+if output_family not in ("dpqc", "dpqc_reset"):
+    raise ValueError(f"Unsupported output family: {output_family!r}.")
+if output_family == "dpqc_reset" and (
+    getattr(_CLI_ARGS, "hessian_only", False)
+    or getattr(_CLI_ARGS, "with_hessian", False)
+):
+    raise ValueError(
+        "Reset-DPQC Hessian visualization is not supported by the original "
+        "14L-parameter Hessian workflow. Run without --hessian-only or "
+        "--with-hessian."
+    )
+
+
+# ============================================================
+# Saved-endpoint Hessian analysis and visualization
+# ============================================================
+
+_HESSIAN_LAYER_FILE_RE = re.compile(r"^hessian_final_points_L([1-9][0-9]*)\.npz$")
+
+
+def _hessian_h_tag(value: float) -> str:
+    return f"{float(value):.12g}"
+
+
+def _resolve_hessian_paths(args):
+    """Resolve the VQE input, numerical output, and figure directories."""
+    if args.hessian_input is None:
+        h_tags = list(
+            dict.fromkeys((str(float(args.h_param)), _hessian_h_tag(args.h_param)))
+        )
+        candidates = [
+            Path.cwd()
+            / "figs"
+            / str(args.output_family)
+            / f"h_{tag}"
+            / "numerical_results"
+            / "energy"
+            / "vqe_optimization_histories.npz"
+            for tag in h_tags
+        ]
+        input_path = next((path for path in candidates if path.is_file()), candidates[0])
+    else:
+        input_path = Path(args.hessian_input)
+
+    input_path = input_path.expanduser().resolve()
+    numerical_root = input_path.parent.parent
+    h_root = numerical_root.parent
+    results_dir = (
+        numerical_root / "hessian"
+        if args.hessian_results_dir is None
+        else Path(args.hessian_results_dir).expanduser().resolve()
+    )
+    figures_dir = (
+        h_root / "hessian_figures"
+        if args.hessian_figures_dir is None
+        else Path(args.hessian_figures_dir).expanduser().resolve()
+    )
+    return input_path, results_dir, figures_dir
+
+
+def _hessian_result_paths(results_dir: Path, requested_layers=None):
+    """Find layer archives, preferring the completed-run metadata manifest."""
+    results_dir = Path(results_dir).expanduser().resolve()
+    metadata_path = results_dir / "hessian_analysis_metadata.json"
+    paths = []
+    if metadata_path.is_file():
+        with metadata_path.open("r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        metadata_layers = [int(layer) for layer in metadata.get("layers", [])]
+        if not metadata_layers:
+            raise ValueError(f"Hessian metadata contains no layers: {metadata_path}")
+        missing_manifest_files = []
+        for layer in metadata_layers:
+            path = results_dir / f"hessian_final_points_L{int(layer)}.npz"
+            if path.is_file():
+                paths.append(path)
+            else:
+                missing_manifest_files.append(path)
+        if missing_manifest_files:
+            missing_text = ", ".join(str(path) for path in missing_manifest_files)
+            raise FileNotFoundError(
+                "Hessian metadata refers to missing layer archives: "
+                f"{missing_text}"
+            )
+    if not paths:
+        paths = sorted(
+            (
+                path
+                for path in results_dir.glob("hessian_final_points_L*.npz")
+                if _HESSIAN_LAYER_FILE_RE.fullmatch(path.name)
+            ),
+            key=lambda path: int(_HESSIAN_LAYER_FILE_RE.fullmatch(path.name).group(1)),
+        )
+    if requested_layers is not None:
+        requested = {int(layer) for layer in requested_layers}
+        paths = [
+            path
+            for path in paths
+            if int(_HESSIAN_LAYER_FILE_RE.fullmatch(path.name).group(1))
+            in requested
+        ]
+        found = {
+            int(_HESSIAN_LAYER_FILE_RE.fullmatch(path.name).group(1))
+            for path in paths
+        }
+        missing = sorted(requested - found)
+        if missing:
+            raise FileNotFoundError(
+                f"Missing Hessian result archives for layers: {missing} in "
+                f"{results_dir}"
+            )
+    if not paths:
+        raise FileNotFoundError(
+            f"No hessian_final_points_L*.npz files found in {results_dir}"
+        )
+    return paths
+
+
+def _load_validated_hessian_layer(path: Path, expected_h_param: float):
+    """Load one Hessian archive and verify its saved spectral summaries."""
+    required = {
+        "schema_version",
+        "h_param",
+        "layer",
+        "epsilon",
+        "stationarity_tolerance",
+        "basin_energy_tolerance",
+        "basin_state_tolerance",
+        "structural_null_count",
+        "hessian_method",
+        "hvp_chunk_size",
+        "analysis_mode",
+        "basin_member_counts",
+        "analyzed_run_indices",
+        "analyzed_basin_ids",
+        "analyzed_is_representative",
+        "recomputed_energies",
+        "recomputed_gradient_norms",
+        "stationary",
+        "negative_eigenvalue_counts",
+        "zero_eigenvalue_counts",
+        "positive_eigenvalue_counts",
+        "minimum_eigenvalues",
+        "maximum_eigenvalues",
+        "minimum_positive_eigenvalues",
+        "positive_spectrum_condition_numbers",
+        "condition_number_defined",
+        "zero_fractions",
+        "excess_zero_eigenvalue_counts",
+        "hessian_eigenvalues",
+        "classifications",
+        "quotient_negative_eigenvalue_counts",
+        "quotient_zero_eigenvalue_counts",
+        "quotient_positive_eigenvalue_counts",
+        "quotient_minimum_eigenvalues",
+        "quotient_minimum_positive_eigenvalues",
+        "quotient_positive_spectrum_condition_numbers",
+        "quotient_hessian_eigenvalues",
+    }
+    import numpy as hnp
+
+    with hnp.load(path, allow_pickle=False) as archive:
+        missing = sorted(required - set(archive.files))
+        if missing:
+            raise KeyError(f"Missing Hessian arrays in {path}: {missing}")
+        data = {key: hnp.asarray(archive[key]) for key in archive.files}
+
+    archived_h = float(data["h_param"])
+    if not math.isclose(
+        archived_h,
+        float(expected_h_param),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            f"Hessian archive h_param mismatch in {path}: "
+            f"{archived_h} != {expected_h_param}"
+        )
+    layer = int(data["layer"])
+    match = _HESSIAN_LAYER_FILE_RE.fullmatch(path.name)
+    if match is None or int(match.group(1)) != layer:
+        raise ValueError(f"Layer metadata does not match filename: {path}")
+
+    run_indices = hnp.asarray(data["analyzed_run_indices"], dtype=int).reshape(-1)
+    basin_ids = hnp.asarray(data["analyzed_basin_ids"], dtype=int).reshape(-1)
+    representative = hnp.asarray(
+        data["analyzed_is_representative"], dtype=bool
+    ).reshape(-1)
+    eigenvalues = hnp.asarray(data["hessian_eigenvalues"], dtype=float)
+    epsilon = float(data["epsilon"])
+    count = run_indices.size
+    if count == 0 or eigenvalues.ndim != 2 or eigenvalues.shape[0] != count:
+        raise ValueError(f"Invalid analyzed endpoint/eigenvalue shapes in {path}")
+    if epsilon <= 0.0 or not math.isfinite(epsilon):
+        raise ValueError(f"Invalid Hessian epsilon in {path}: {epsilon}")
+    structural_null_count = int(data["structural_null_count"])
+    if not 0 <= structural_null_count < eigenvalues.shape[1]:
+        raise ValueError(f"Invalid structural_null_count in {path}")
+    member_counts = hnp.asarray(data["basin_member_counts"], dtype=int).reshape(-1)
+    if member_counts.size == 0 or hnp.any(member_counts <= 0):
+        raise ValueError(f"Invalid basin_member_counts in {path}")
+    for key in (
+        "recomputed_energies",
+        "recomputed_gradient_norms",
+        "stationary",
+        "negative_eigenvalue_counts",
+        "zero_eigenvalue_counts",
+        "positive_eigenvalue_counts",
+        "minimum_eigenvalues",
+        "maximum_eigenvalues",
+        "minimum_positive_eigenvalues",
+        "positive_spectrum_condition_numbers",
+        "condition_number_defined",
+        "zero_fractions",
+        "excess_zero_eigenvalue_counts",
+        "classifications",
+        "quotient_negative_eigenvalue_counts",
+        "quotient_zero_eigenvalue_counts",
+        "quotient_positive_eigenvalue_counts",
+        "quotient_minimum_eigenvalues",
+        "quotient_minimum_positive_eigenvalues",
+        "quotient_positive_spectrum_condition_numbers",
+    ):
+        if hnp.asarray(data[key]).reshape(-1).size != count:
+            raise ValueError(f"Array {key!r} does not align in {path}")
+    if basin_ids.shape != (count,) or representative.shape != (count,):
+        raise ValueError(f"Basin arrays do not align in {path}")
+    if hnp.any(basin_ids < 0) or hnp.any(basin_ids >= member_counts.size):
+        raise ValueError(f"Analyzed basin IDs are outside the valid range in {path}")
+    energies = hnp.asarray(data["recomputed_energies"], dtype=float)
+    gradient_norms = hnp.asarray(data["recomputed_gradient_norms"], dtype=float)
+    if not hnp.all(hnp.isfinite(energies)):
+        raise FloatingPointError(f"Non-finite recomputed energies in {path}")
+    if not hnp.all(hnp.isfinite(gradient_norms)) or hnp.any(gradient_norms < 0.0):
+        raise FloatingPointError(f"Invalid recomputed gradient norms in {path}")
+    if not hnp.all(hnp.isfinite(eigenvalues)):
+        raise FloatingPointError(f"Non-finite Hessian eigenvalues in {path}")
+    if hnp.any(hnp.diff(eigenvalues, axis=1) < -1e-12):
+        raise ValueError(f"Hessian eigenvalues are not sorted in {path}")
+
+    negative = hnp.count_nonzero(eigenvalues < -epsilon, axis=1)
+    zero = hnp.count_nonzero(hnp.abs(eigenvalues) <= epsilon, axis=1)
+    positive = hnp.count_nonzero(eigenvalues > epsilon, axis=1)
+    for calculated, key in (
+        (negative, "negative_eigenvalue_counts"),
+        (zero, "zero_eigenvalue_counts"),
+        (positive, "positive_eigenvalue_counts"),
+    ):
+        if not hnp.array_equal(calculated, hnp.asarray(data[key], dtype=int)):
+            raise ValueError(f"Saved {key} is inconsistent with eigenvalues in {path}")
+    if not hnp.all(negative + zero + positive == eigenvalues.shape[1]):
+        raise ValueError(f"Hessian sign counts do not sum to the dimension in {path}")
+    if not hnp.allclose(
+        hnp.asarray(data["minimum_eigenvalues"], dtype=float),
+        eigenvalues[:, 0],
+        rtol=1e-12,
+        atol=1e-14,
+    ):
+        raise ValueError(f"Saved minimum eigenvalues are inconsistent in {path}")
+    if not hnp.allclose(
+        hnp.asarray(data["maximum_eigenvalues"], dtype=float),
+        eigenvalues[:, -1],
+        rtol=1e-12,
+        atol=1e-14,
+    ):
+        raise ValueError(f"Saved maximum eigenvalues are inconsistent in {path}")
+
+    minimum_positive = hnp.full(count, hnp.nan, dtype=float)
+    condition = hnp.full(count, hnp.nan, dtype=float)
+    condition_defined = hnp.zeros(count, dtype=bool)
+    for position in range(count):
+        positive_values = eigenvalues[position, eigenvalues[position] > epsilon]
+        if positive_values.size:
+            condition_defined[position] = True
+            minimum_positive[position] = positive_values[0]
+            condition[position] = eigenvalues[position, -1] / positive_values[0]
+    if not hnp.array_equal(
+        condition_defined,
+        hnp.asarray(data["condition_number_defined"], dtype=bool),
+    ):
+        raise ValueError(f"Saved condition-number flags are inconsistent in {path}")
+    if not hnp.allclose(
+        minimum_positive,
+        hnp.asarray(data["minimum_positive_eigenvalues"], dtype=float),
+        rtol=1e-11,
+        atol=1e-13,
+        equal_nan=True,
+    ):
+        raise ValueError(f"Saved minimum positive eigenvalues are inconsistent in {path}")
+    if not hnp.allclose(
+        condition,
+        hnp.asarray(data["positive_spectrum_condition_numbers"], dtype=float),
+        rtol=1e-11,
+        atol=1e-12,
+        equal_nan=True,
+    ):
+        raise ValueError(f"Saved condition numbers are inconsistent in {path}")
+    if not hnp.allclose(
+        hnp.asarray(data["zero_fractions"], dtype=float),
+        zero / eigenvalues.shape[1],
+        rtol=0.0,
+        atol=1e-15,
+    ):
+        raise ValueError(f"Saved zero fractions are inconsistent in {path}")
+    expected_excess_zero = hnp.maximum(zero - structural_null_count, 0)
+    if not hnp.array_equal(
+        expected_excess_zero,
+        hnp.asarray(data["excess_zero_eigenvalue_counts"], dtype=int),
+    ):
+        raise ValueError(f"Saved excess zero counts are inconsistent in {path}")
+
+    quotient_eigenvalues = hnp.asarray(
+        data["quotient_hessian_eigenvalues"], dtype=float
+    )
+    quotient_dimension = eigenvalues.shape[1] - structural_null_count
+    if quotient_eigenvalues.shape != (count, quotient_dimension):
+        raise ValueError(f"Invalid quotient spectrum shape in {path}")
+    if not hnp.all(hnp.isfinite(quotient_eigenvalues)):
+        raise FloatingPointError(f"Non-finite quotient eigenvalues in {path}")
+    if hnp.any(hnp.diff(quotient_eigenvalues, axis=1) < -1e-12):
+        raise ValueError(f"Quotient eigenvalues are not sorted in {path}")
+    quotient_negative = hnp.count_nonzero(
+        quotient_eigenvalues < -epsilon, axis=1
+    )
+    quotient_zero = hnp.count_nonzero(
+        hnp.abs(quotient_eigenvalues) <= epsilon, axis=1
+    )
+    quotient_positive = hnp.count_nonzero(
+        quotient_eigenvalues > epsilon, axis=1
+    )
+    for calculated, key in (
+        (quotient_negative, "quotient_negative_eigenvalue_counts"),
+        (quotient_zero, "quotient_zero_eigenvalue_counts"),
+        (quotient_positive, "quotient_positive_eigenvalue_counts"),
+    ):
+        if not hnp.array_equal(calculated, hnp.asarray(data[key], dtype=int)):
+            raise ValueError(f"Saved {key} is inconsistent in {path}")
+    if not hnp.all(
+        quotient_negative + quotient_zero + quotient_positive
+        == quotient_dimension
+    ):
+        raise ValueError(f"Quotient sign counts do not sum correctly in {path}")
+    if not hnp.allclose(
+        hnp.asarray(data["quotient_minimum_eigenvalues"], dtype=float),
+        quotient_eigenvalues[:, 0],
+        rtol=1e-12,
+        atol=1e-14,
+    ):
+        raise ValueError(f"Saved quotient minima are inconsistent in {path}")
+    quotient_minimum_positive = hnp.full(count, hnp.nan, dtype=float)
+    quotient_condition = hnp.full(count, hnp.nan, dtype=float)
+    for position in range(count):
+        positive_values = quotient_eigenvalues[
+            position, quotient_eigenvalues[position] > epsilon
+        ]
+        if positive_values.size:
+            quotient_minimum_positive[position] = positive_values[0]
+            quotient_condition[position] = (
+                quotient_eigenvalues[position, -1] / positive_values[0]
+            )
+    if not hnp.allclose(
+        quotient_minimum_positive,
+        hnp.asarray(data["quotient_minimum_positive_eigenvalues"], dtype=float),
+        rtol=1e-11,
+        atol=1e-13,
+        equal_nan=True,
+    ):
+        raise ValueError(f"Saved quotient positive minima are inconsistent in {path}")
+    if not hnp.allclose(
+        quotient_condition,
+        hnp.asarray(
+            data["quotient_positive_spectrum_condition_numbers"], dtype=float
+        ),
+        rtol=1e-11,
+        atol=1e-12,
+        equal_nan=True,
+    ):
+        raise ValueError(f"Saved quotient condition numbers are inconsistent in {path}")
+
+    stationary_flags = hnp.asarray(data["stationary"], dtype=bool)
+    expected_classifications = []
+    for is_stationary, negative_count, zero_count, positive_count in zip(
+        stationary_flags,
+        negative,
+        zero,
+        positive,
+    ):
+        if not is_stationary:
+            expected_classifications.append("nonstationary")
+        elif negative_count and positive_count:
+            expected_classifications.append("saddle")
+        elif negative_count:
+            expected_classifications.append("local_maximum_candidate")
+        elif zero_count:
+            expected_classifications.append("flat_stationary_minimum_candidate")
+        elif positive_count == eigenvalues.shape[1]:
+            expected_classifications.append("strict_local_minimum")
+        else:
+            expected_classifications.append("inconclusive_stationary_point")
+    if not hnp.array_equal(
+        hnp.asarray(expected_classifications),
+        hnp.asarray(data["classifications"]).astype(str),
+    ):
+        raise ValueError(f"Saved stationary classifications are inconsistent in {path}")
+
+    unique_basins = hnp.unique(basin_ids)
+    for basin_id in unique_basins:
+        if hnp.count_nonzero(representative & (basin_ids == basin_id)) != 1:
+            raise ValueError(
+                f"Basin {int(basin_id)} in L={layer} must have one representative"
+            )
+    data["path"] = path
+    data["layer_value"] = layer
+    data["epsilon_value"] = epsilon
+    return data
+
+
+def _validate_hessian_result_collection(layer_results, results_dir: Path) -> None:
+    """Reject mixed partial runs before combining their basin metrics."""
+    import numpy as hnp
+
+    if not layer_results:
+        raise ValueError("At least one Hessian layer result is required")
+    reference = layer_results[0]
+    scalar_fields = (
+        "schema_version",
+        "epsilon",
+        "stationarity_tolerance",
+        "basin_energy_tolerance",
+        "basin_state_tolerance",
+        "structural_null_count",
+        "hessian_method",
+        "hvp_chunk_size",
+        "analysis_mode",
+    )
+    for result in layer_results:
+        for key in scalar_fields:
+            reference_value = hnp.asarray(reference[key]).reshape(-1)
+            value = hnp.asarray(result[key]).reshape(-1)
+            if reference_value.size != 1 or value.size != 1:
+                raise ValueError(f"Hessian setting {key!r} must be scalar")
+            if hnp.issubdtype(reference_value.dtype, hnp.number) and hnp.issubdtype(
+                value.dtype, hnp.number
+            ):
+                equal = bool(
+                    hnp.allclose(
+                        reference_value.astype(float),
+                        value.astype(float),
+                        rtol=0.0,
+                        atol=0.0,
+                        equal_nan=True,
+                    )
+                )
+            else:
+                equal = str(reference_value[0]) == str(value[0])
+            if not equal:
+                raise ValueError(
+                    f"Mixed Hessian setting {key!r} across layer archives: "
+                    f"{reference['path']} and {result['path']}"
+                )
+
+    metadata_path = Path(results_dir) / "hessian_analysis_metadata.json"
+    if not metadata_path.is_file():
+        return
+    with metadata_path.open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    metadata_layers = {int(layer) for layer in metadata.get("layers", [])}
+    loaded_layers = {int(result["layer_value"]) for result in layer_results}
+    if not loaded_layers.issubset(metadata_layers):
+        raise ValueError("Loaded Hessian layers are inconsistent with metadata")
+    analysis_mode = str(hnp.asarray(reference["analysis_mode"]))
+    if metadata.get("analysis_mode") != analysis_mode:
+        raise ValueError("Hessian analysis mode is inconsistent with metadata")
+    metadata_checks = {
+        "schema_version": int(hnp.asarray(reference["schema_version"])),
+        "epsilon": float(hnp.asarray(reference["epsilon"])),
+        "stationarity_tolerance": float(
+            hnp.asarray(reference["stationarity_tolerance"])
+        ),
+        "basin_energy_tolerance": float(
+            hnp.asarray(reference["basin_energy_tolerance"])
+        ),
+        "basin_state_tolerance": float(
+            hnp.asarray(reference["basin_state_tolerance"])
+        ),
+        "structural_null_count": int(
+            hnp.asarray(reference["structural_null_count"])
+        ),
+        "hessian_method": str(hnp.asarray(reference["hessian_method"])),
+        "hvp_chunk_size": int(hnp.asarray(reference["hvp_chunk_size"])),
+        "analysis_mode": analysis_mode,
+    }
+    for key, expected in metadata_checks.items():
+        actual = metadata.get(key)
+        if isinstance(expected, float):
+            if actual is None:
+                actual_value = math.nan
+            else:
+                actual_value = float(actual)
+            equal = math.isclose(
+                expected,
+                actual_value,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            ) or (math.isnan(expected) and math.isnan(actual_value))
+        else:
+            equal = actual == expected
+        if not equal:
+            raise ValueError(
+                f"Hessian metadata field {key!r} does not match layer archives"
+            )
+
+
+def _hessian_point_label(
+    stationary: bool,
+    negative: int,
+    zero: int,
+    structural_null_count: int = 0,
+) -> str:
+    if stationary:
+        if negative:
+            return "stationary_negative_curvature"
+        if zero > structural_null_count:
+            return "flat_stationary_candidate"
+        if zero:
+            return "structurally_flat_stationary_candidate"
+        return "strict_local_minimum"
+    if negative:
+        return "nonstationary_negative_curvature"
+    return "nonstationary_no_detected_negative_curvature"
+
+
+_HESSIAN_CLASS_COLORS = {
+    "stationary_negative_curvature": "#d62728",
+    "flat_stationary_candidate": "#1f77b4",
+    "structurally_flat_stationary_candidate": "#17becf",
+    "strict_local_minimum": "#2ca02c",
+    "nonstationary_negative_curvature": "#ff7f0e",
+    "nonstationary_no_detected_negative_curvature": "#7f7f7f",
+}
+
+_HESSIAN_CLASS_LABELS = {
+    "stationary_negative_curvature": "Stationary, negative curvature",
+    "flat_stationary_candidate": "Extensively flat stationary candidate",
+    "structurally_flat_stationary_candidate": "Structurally flat candidate",
+    "strict_local_minimum": "Strict local minimum",
+    "nonstationary_negative_curvature": "Nonstationary, negative curvature",
+    "nonstationary_no_detected_negative_curvature": (
+        "Nonstationary, no detected negative curvature"
+    ),
+}
+
+
+def _hessian_representative_table(layer_results):
+    import numpy as hnp
+
+    rows = []
+    for result in layer_results:
+        mask = hnp.asarray(result["analyzed_is_representative"], dtype=bool)
+        basin_ids = hnp.asarray(result["analyzed_basin_ids"], dtype=int)
+        member_counts = hnp.asarray(result["basin_member_counts"], dtype=int)
+        structural_null_count = int(result["structural_null_count"])
+        for position in hnp.flatnonzero(mask):
+            basin_id = int(basin_ids[position])
+            negative = int(result["negative_eigenvalue_counts"][position])
+            zero = int(result["zero_eigenvalue_counts"][position])
+            stationary = bool(result["stationary"][position])
+            rows.append(
+                {
+                    "layer": int(result["layer_value"]),
+                    "basin_id": basin_id,
+                    "run_index": int(result["analyzed_run_indices"][position]),
+                    "member_count": int(member_counts[basin_id]),
+                    "parameter_count": int(result["hessian_eigenvalues"].shape[1]),
+                    "epsilon": float(result["epsilon_value"]),
+                    "energy": float(result["recomputed_energies"][position]),
+                    "gradient_norm": float(
+                        result["recomputed_gradient_norms"][position]
+                    ),
+                    "stationary": stationary,
+                    "negative_count": negative,
+                    "zero_count": zero,
+                    "excess_zero_count": int(
+                        result["excess_zero_eigenvalue_counts"][position]
+                    ),
+                    "minimum_eigenvalue": float(
+                        result["minimum_eigenvalues"][position]
+                    ),
+                    "condition_number": float(
+                        result["positive_spectrum_condition_numbers"][position]
+                    ),
+                    "condition_number_defined": bool(
+                        result["condition_number_defined"][position]
+                    ),
+                    "zero_fraction": float(result["zero_fractions"][position]),
+                    "label": _hessian_point_label(
+                        stationary,
+                        negative,
+                        zero,
+                        structural_null_count,
+                    ),
+                    "eigenvalues": hnp.asarray(
+                        result["hessian_eigenvalues"][position], dtype=float
+                    ),
+                }
+            )
+    if not rows:
+        raise ValueError("No basin representatives are present in Hessian results")
+    return rows
+
+
+def _hessian_scatter_coordinates(rows):
+    import numpy as hnp
+
+    coordinates = hnp.empty(len(rows), dtype=float)
+    for layer in sorted({row["layer"] for row in rows}):
+        positions = [index for index, row in enumerate(rows) if row["layer"] == layer]
+        offsets = (
+            hnp.linspace(-0.28, 0.28, len(positions))
+            if len(positions) > 1
+            else hnp.zeros(1)
+        )
+        for index, offset in zip(positions, offsets):
+            coordinates[index] = layer + float(offset)
+    return coordinates
+
+
+def _style_and_save_hessian_figure(
+    fig,
+    outpath: Path,
+    *,
+    legend=False,
+    tight_rect=None,
+    tight_w_pad=None,
+    tight_h_pad=None,
+):
+    import matplotlib.pyplot as hplt
+    from plot import apply_fontsizes, style_axes_for_prx, style_legend_for_prx
+
+    outpath = Path(outpath)
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    for axis in fig.axes:
+        # Colorbar axes do not expose ordinary x/y data, but accept this style.
+        apply_fontsizes(axis)
+        style_axes_for_prx(axis, grid=axis.get_label() != "<colorbar>")
+        if legend:
+            style_legend_for_prx(axis, frameon=False)
+    tight_kwargs = {}
+    if tight_w_pad is not None:
+        tight_kwargs["w_pad"] = float(tight_w_pad)
+    if tight_h_pad is not None:
+        tight_kwargs["h_pad"] = float(tight_h_pad)
+    fig.tight_layout(rect=tight_rect, **tight_kwargs)
+    fig.savefig(outpath, bbox_inches="tight", pad_inches=0.02)
+    hplt.close(fig)
+
+
+def _plot_hessian_metric_overview(rows, figures_dir: Path):
+    import matplotlib.pyplot as hplt
+    import numpy as hnp
+    from matplotlib.lines import Line2D
+
+    x = _hessian_scatter_coordinates(rows)
+    layers = sorted({row["layer"] for row in rows})
+    colors = [_HESSIAN_CLASS_COLORS[row["label"]] for row in rows]
+    sizes = hnp.asarray([16.0 + 8.0 * math.sqrt(row["member_count"]) for row in rows])
+    epsilon = max(row["epsilon"] for row in rows)
+    fig, axes = hplt.subplots(2, 2, figsize=(8.5, 5.8), sharex=True)
+
+    axes[0, 0].scatter(
+        x,
+        [row["negative_count"] for row in rows],
+        c=colors,
+        s=sizes,
+        edgecolors="black",
+        linewidths=0.3,
+        alpha=0.8,
+    )
+    axes[0, 0].set_ylabel(r"Negative count $n_{-}$")
+
+    axes[0, 1].scatter(
+        x,
+        [row["zero_count"] for row in rows],
+        c=colors,
+        s=sizes,
+        edgecolors="black",
+        linewidths=0.3,
+        alpha=0.8,
+        label=r"Full $n_0$",
+    )
+    axes[0, 1].scatter(
+        x,
+        [row["excess_zero_count"] for row in rows],
+        c=colors,
+        s=16,
+        marker="x",
+        linewidths=0.8,
+        label=r"Excess $n_0$",
+    )
+    axes[0, 1].axhline(2, color="black", linestyle=":", linewidth=0.8)
+    axes[0, 1].set_ylabel(r"Near-zero count $n_0$")
+
+    minimum = hnp.asarray([row["minimum_eigenvalue"] for row in rows])
+    axes[1, 0].scatter(
+        x,
+        minimum,
+        c=colors,
+        s=sizes,
+        edgecolors="black",
+        linewidths=0.3,
+        alpha=0.8,
+    )
+    axes[1, 0].axhline(0.0, color="black", linewidth=0.7)
+    axes[1, 0].axhline(-epsilon, color="#d62728", linestyle="--", linewidth=0.7)
+    axes[1, 0].set_yscale("symlog", linthresh=epsilon)
+    axes[1, 0].set_ylabel(r"Minimum eigenvalue $\mu_{\min}$")
+
+    condition = hnp.asarray([row["condition_number"] for row in rows])
+    condition[~hnp.isfinite(condition) | (condition <= 0.0)] = hnp.nan
+    axes[1, 1].scatter(
+        x,
+        condition,
+        c=colors,
+        s=sizes,
+        edgecolors="black",
+        linewidths=0.3,
+        alpha=0.8,
+    )
+    axes[1, 1].set_yscale("log")
+    axes[1, 1].set_ylabel(r"Positive-spectrum condition $\kappa_{+}$")
+
+    for axis in axes.flat:
+        axis.set_xticks(layers)
+        axis.grid(True, axis="y", alpha=0.25)
+    for axis in axes[0, :]:
+        axis.tick_params(labelbottom=False)
+    for axis in axes[1, :]:
+        axis.set_xlabel("Number of layers")
+        axis.set_xticklabels(
+            [str(layer) for layer in layers], rotation=45, ha="right"
+        )
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="none",
+            markerfacecolor=color,
+            markeredgecolor="black",
+            markeredgewidth=0.3,
+            label=_HESSIAN_CLASS_LABELS[label],
+        )
+        for label, color in _HESSIAN_CLASS_COLORS.items()
+        if any(row["label"] == label for row in rows)
+    ]
+    handles.extend(
+        (
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="none",
+                color="#555555",
+                label=r"Full $n_0$",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="x",
+                linestyle="none",
+                color="#555555",
+                label=r"Excess $n_0$",
+            ),
+        )
+    )
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.995),
+        ncol=3,
+        fontsize=8,
+    )
+    outpath = figures_dir / "hessian_metrics_by_basin.pdf"
+    _style_and_save_hessian_figure(
+        fig,
+        outpath,
+        legend=True,
+        tight_rect=(0.0, 0.0, 1.0, 0.87),
+        tight_w_pad=3.5,
+        tight_h_pad=1.0,
+    )
+    return outpath
+
+
+def _plot_hessian_metrics_for_each_layer(rows, figures_dir: Path):
+    """Render the four requested quantities against explicit basin IDs."""
+    import matplotlib.pyplot as hplt
+    import numpy as hnp
+    from matplotlib.lines import Line2D
+
+    output_dir = figures_dir / "basins"
+    output_paths = []
+    for layer in sorted({row["layer"] for row in rows}):
+        layer_rows = sorted(
+            (row for row in rows if row["layer"] == layer),
+            key=lambda row: row["basin_id"],
+        )
+        basin_ids = hnp.asarray(
+            [row["basin_id"] for row in layer_rows], dtype=float
+        )
+        colors = [_HESSIAN_CLASS_COLORS[row["label"]] for row in layer_rows]
+        sizes = hnp.asarray(
+            [16.0 + 8.0 * math.sqrt(row["member_count"]) for row in layer_rows]
+        )
+        epsilon = max(row["epsilon"] for row in layer_rows)
+        fig, axes = hplt.subplots(2, 2, figsize=(8.5, 5.8), sharex=True)
+
+        axes[0, 0].scatter(
+            basin_ids,
+            [row["negative_count"] for row in layer_rows],
+            c=colors,
+            s=sizes,
+            edgecolors="black",
+            linewidths=0.3,
+            alpha=0.8,
+        )
+        axes[0, 0].set_ylabel(r"Negative count $n_{-}$")
+
+        axes[0, 1].scatter(
+            basin_ids,
+            [row["zero_count"] for row in layer_rows],
+            c=colors,
+            s=sizes,
+            edgecolors="black",
+            linewidths=0.3,
+            alpha=0.8,
+        )
+        axes[0, 1].scatter(
+            basin_ids,
+            [row["excess_zero_count"] for row in layer_rows],
+            c=colors,
+            s=16,
+            marker="x",
+            linewidths=0.8,
+        )
+        axes[0, 1].axhline(2, color="black", linestyle=":", linewidth=0.8)
+        axes[0, 1].set_ylabel(r"Near-zero count $n_0$")
+
+        axes[1, 0].scatter(
+            basin_ids,
+            [row["minimum_eigenvalue"] for row in layer_rows],
+            c=colors,
+            s=sizes,
+            edgecolors="black",
+            linewidths=0.3,
+            alpha=0.8,
+        )
+        axes[1, 0].axhline(0.0, color="black", linewidth=0.7)
+        axes[1, 0].axhline(
+            -epsilon,
+            color="#d62728",
+            linestyle="--",
+            linewidth=0.7,
+        )
+        axes[1, 0].set_yscale("symlog", linthresh=epsilon)
+        axes[1, 0].set_ylabel(r"Minimum eigenvalue $\mu_{\min}$")
+
+        condition = hnp.asarray(
+            [row["condition_number"] for row in layer_rows], dtype=float
+        )
+        condition[~hnp.isfinite(condition) | (condition <= 0.0)] = hnp.nan
+        axes[1, 1].scatter(
+            basin_ids,
+            condition,
+            c=colors,
+            s=sizes,
+            edgecolors="black",
+            linewidths=0.3,
+            alpha=0.8,
+        )
+        axes[1, 1].set_yscale("log")
+        axes[1, 1].set_ylabel(r"Positive-spectrum condition $\kappa_{+}$")
+
+        if basin_ids.size <= 14:
+            ticks = basin_ids.astype(int)
+        else:
+            ticks = hnp.unique(
+                hnp.linspace(
+                    int(hnp.min(basin_ids)),
+                    int(hnp.max(basin_ids)),
+                    10,
+                ).round().astype(int)
+            )
+        for axis in axes.flat:
+            axis.set_xticks(ticks)
+            axis.grid(True, axis="y", alpha=0.25)
+        for axis in axes[0, :]:
+            axis.tick_params(labelbottom=False)
+        for axis in axes[1, :]:
+            axis.set_xlabel("Empirical basin ID")
+
+        present_labels = [
+            label
+            for label in _HESSIAN_CLASS_COLORS
+            if any(row["label"] == label for row in layer_rows)
+        ]
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="none",
+                markerfacecolor=_HESSIAN_CLASS_COLORS[label],
+                markeredgecolor="black",
+                markeredgewidth=0.3,
+                label=_HESSIAN_CLASS_LABELS[label],
+            )
+            for label in present_labels
+        ]
+        handles.extend(
+            (
+                Line2D(
+                    [0], [0], marker="o", linestyle="none", color="#555555",
+                    label=r"Full $n_0$",
+                ),
+                Line2D(
+                    [0], [0], marker="x", linestyle="none", color="#555555",
+                    label=r"Excess $n_0$",
+                ),
+            )
+        )
+        fig.legend(
+            handles=handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.995),
+            ncol=min(3, len(handles)),
+            fontsize=8,
+        )
+        outpath = output_dir / f"hessian_metrics_L{layer:04d}.pdf"
+        _style_and_save_hessian_figure(
+            fig,
+            outpath,
+            legend=True,
+            tight_rect=(0.0, 0.0, 1.0, 0.87),
+            tight_w_pad=3.5,
+            tight_h_pad=1.0,
+        )
+        output_paths.append(outpath)
+    return output_paths
+
+
+def _plot_single_hessian_metric(rows, figures_dir: Path, metric: str):
+    import matplotlib.pyplot as hplt
+    import numpy as hnp
+
+    specifications = {
+        "negative_count": (r"Negative eigenvalue count $n_{-}$", False),
+        "zero_count": (r"Near-zero eigenvalue count $n_0$", False),
+        "minimum_eigenvalue": (r"Minimum eigenvalue $\mu_{\min}$", False),
+        "condition_number": (r"Positive-spectrum condition $\kappa_{+}$", True),
+    }
+    filenames = {
+        "negative_count": "negative_eigenvalue_count_by_basin.pdf",
+        "zero_count": "zero_eigenvalue_count_by_basin.pdf",
+        "minimum_eigenvalue": "minimum_eigenvalue_by_basin.pdf",
+        "condition_number": "condition_number_by_basin.pdf",
+    }
+    ylabel, logarithmic = specifications[metric]
+    x = _hessian_scatter_coordinates(rows)
+    values = hnp.asarray([row[metric] for row in rows], dtype=float)
+    if metric == "condition_number":
+        values[~hnp.isfinite(values) | (values <= 0.0)] = hnp.nan
+    sizes = [16.0 + 8.0 * math.sqrt(row["member_count"]) for row in rows]
+    colors = [_HESSIAN_CLASS_COLORS[row["label"]] for row in rows]
+    fig, ax = hplt.subplots(figsize=(6.7, 3.2))
+    ax.scatter(
+        x,
+        values,
+        c=colors,
+        s=sizes,
+        edgecolors="black",
+        linewidths=0.3,
+        alpha=0.8,
+    )
+    if metric == "zero_count":
+        ax.axhline(2, color="black", linestyle=":", linewidth=0.8)
+    if metric == "minimum_eigenvalue":
+        epsilon = max(row["epsilon"] for row in rows)
+        ax.axhline(0.0, color="black", linewidth=0.7)
+        ax.axhline(-epsilon, color="#d62728", linestyle="--", linewidth=0.7)
+        ax.set_yscale("symlog", linthresh=epsilon)
+    elif logarithmic:
+        ax.set_yscale("log")
+    layers = sorted({row["layer"] for row in rows})
+    ax.set_xticks(layers)
+    ax.set_xticklabels([str(layer) for layer in layers], rotation=45, ha="right")
+    ax.set_xlabel("Number of layers")
+    ax.set_ylabel(ylabel)
+    ax.grid(True, axis="y", alpha=0.25)
+    outpath = figures_dir / filenames[metric]
+    _style_and_save_hessian_figure(fig, outpath)
+    return outpath
+
+
+def _plot_all_hessian_endpoints(layer_results, figures_dir: Path):
+    """Render within-basin endpoint variation for --hessian-all-endpoints."""
+    import matplotlib.pyplot as hplt
+    import numpy as hnp
+    from matplotlib.lines import Line2D
+
+    output_paths = []
+    output_dir = figures_dir / "endpoints"
+    for result in layer_results:
+        if str(hnp.asarray(result["analysis_mode"])) != "all_selected_endpoints":
+            continue
+        basin_ids = hnp.asarray(result["analyzed_basin_ids"], dtype=int)
+        representative = hnp.asarray(
+            result["analyzed_is_representative"], dtype=bool
+        )
+        stationary = hnp.asarray(result["stationary"], dtype=bool)
+        negative = hnp.asarray(
+            result["negative_eigenvalue_counts"], dtype=int
+        )
+        zero = hnp.asarray(result["zero_eigenvalue_counts"], dtype=int)
+        labels = [
+            _hessian_point_label(
+                bool(is_stationary),
+                int(nneg),
+                int(nzero),
+                int(result["structural_null_count"]),
+            )
+            for is_stationary, nneg, nzero in zip(stationary, negative, zero)
+        ]
+        colors = [_HESSIAN_CLASS_COLORS[label] for label in labels]
+        x = basin_ids.astype(float)
+        for basin_id in hnp.unique(basin_ids):
+            positions = hnp.flatnonzero(basin_ids == basin_id)
+            if positions.size > 1:
+                x[positions] += hnp.linspace(-0.22, 0.22, positions.size)
+
+        fig, axes = hplt.subplots(2, 2, figsize=(8.5, 5.8), sharex=True)
+        metrics = (
+            (axes[0, 0], negative, r"Negative count $n_{-}$"),
+            (axes[0, 1], zero, r"Near-zero count $n_0$"),
+            (
+                axes[1, 0],
+                hnp.asarray(result["minimum_eigenvalues"], dtype=float),
+                r"Minimum eigenvalue $\mu_{\min}$",
+            ),
+            (
+                axes[1, 1],
+                hnp.asarray(
+                    result["positive_spectrum_condition_numbers"], dtype=float
+                ),
+                r"Positive-spectrum condition $\kappa_{+}$",
+            ),
+        )
+        for axis, values, ylabel in metrics:
+            nonrepresentative = ~representative
+            axis.scatter(
+                x[nonrepresentative],
+                values[nonrepresentative],
+                c=hnp.asarray(colors, dtype=object)[nonrepresentative],
+                s=12,
+                edgecolors="none",
+                alpha=0.35,
+            )
+            axis.scatter(
+                x[representative],
+                values[representative],
+                c=hnp.asarray(colors, dtype=object)[representative],
+                s=48,
+                marker="*",
+                edgecolors="black",
+                linewidths=0.4,
+                alpha=0.95,
+            )
+            axis.set_ylabel(ylabel)
+            axis.grid(True, axis="y", alpha=0.25)
+        epsilon = float(result["epsilon_value"])
+        structural_null_count = int(result["structural_null_count"])
+        axes[0, 1].axhline(
+            structural_null_count,
+            color="black",
+            linestyle=":",
+            linewidth=0.8,
+        )
+        axes[1, 0].axhline(0.0, color="black", linewidth=0.7)
+        axes[1, 0].axhline(
+            -epsilon,
+            color="#d62728",
+            linestyle="--",
+            linewidth=0.7,
+        )
+        axes[1, 0].set_yscale("symlog", linthresh=epsilon)
+        axes[1, 1].set_yscale("log")
+        unique_basins = hnp.unique(basin_ids)
+        if unique_basins.size <= 14:
+            ticks = unique_basins
+        else:
+            ticks = hnp.unique(
+                hnp.linspace(
+                    int(unique_basins.min()),
+                    int(unique_basins.max()),
+                    10,
+                ).round().astype(int)
+            )
+        for axis in axes.flat:
+            axis.set_xticks(ticks)
+        for axis in axes[0, :]:
+            axis.tick_params(labelbottom=False)
+        for axis in axes[1, :]:
+            axis.set_xlabel("Empirical basin ID")
+        fig.legend(
+            handles=(
+                Line2D(
+                    [0], [0], marker="*", linestyle="none", color="#555555",
+                    label="Basin representative",
+                ),
+                Line2D(
+                    [0], [0], marker="o", linestyle="none", color="#888888",
+                    label="Other analyzed endpoint",
+                ),
+            ),
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.995),
+            ncol=2,
+            fontsize=8,
+        )
+        layer = int(result["layer_value"])
+        outpath = output_dir / f"hessian_all_endpoints_L{layer:04d}.pdf"
+        _style_and_save_hessian_figure(
+            fig,
+            outpath,
+            legend=True,
+            tight_rect=(0.0, 0.0, 1.0, 0.90),
+            tight_w_pad=3.5,
+            tight_h_pad=1.0,
+        )
+        output_paths.append(outpath)
+    return output_paths
+
+
+def _plot_hessian_layer_spectra(layer_results, figures_dir: Path):
+    import matplotlib.colors as hcolors
+    import matplotlib.pyplot as hplt
+    import numpy as hnp
+
+    output_dir = figures_dir / "spectra"
+    output_paths = []
+    for result in layer_results:
+        representative = hnp.asarray(
+            result["analyzed_is_representative"], dtype=bool
+        )
+        basin_ids = hnp.asarray(result["analyzed_basin_ids"], dtype=int)[
+            representative
+        ]
+        spectra = hnp.asarray(result["hessian_eigenvalues"], dtype=float)[
+            representative
+        ]
+        order = hnp.argsort(basin_ids)
+        basin_ids = basin_ids[order]
+        spectra = spectra[order]
+        epsilon = float(result["epsilon_value"])
+        magnitude = max(float(hnp.max(hnp.abs(spectra))), epsilon * 10.0)
+        height = min(8.0, max(3.0, 1.8 + 0.20 * spectra.shape[0]))
+        fig, ax = hplt.subplots(figsize=(7.0, height))
+        image = ax.imshow(
+            spectra,
+            aspect="auto",
+            interpolation="nearest",
+            origin="lower",
+            cmap="coolwarm",
+            norm=hcolors.SymLogNorm(
+                linthresh=epsilon,
+                vmin=-magnitude,
+                vmax=magnitude,
+            ),
+        )
+        if basin_ids.size <= 24:
+            ticks = hnp.arange(basin_ids.size)
+        else:
+            ticks = hnp.unique(
+                hnp.linspace(0, basin_ids.size - 1, 16).round().astype(int)
+            )
+        ax.set_yticks(ticks)
+        ax.set_yticklabels([str(int(basin_ids[index])) for index in ticks])
+        ax.set_xlabel("Eigenvalue index (ascending)")
+        ax.set_ylabel("Empirical basin ID")
+        colorbar = fig.colorbar(image, ax=ax, pad=0.02)
+        minimum_exponent = int(math.floor(math.log10(epsilon)))
+        maximum_exponent = int(math.floor(math.log10(magnitude)))
+        exponent_ticks = hnp.unique(
+            hnp.linspace(
+                minimum_exponent,
+                maximum_exponent,
+                min(5, maximum_exponent - minimum_exponent + 1),
+            ).round().astype(int)
+        )
+        positive_ticks = 10.0 ** exponent_ticks
+        colorbar.set_ticks(
+            hnp.concatenate((-positive_ticks[::-1], hnp.asarray([0.0]), positive_ticks))
+        )
+        colorbar.set_label("Hessian eigenvalue")
+        layer = int(result["layer_value"])
+        outpath = output_dir / f"hessian_spectrum_L{layer:04d}.pdf"
+        _style_and_save_hessian_figure(fig, outpath)
+        output_paths.append(outpath)
+    return output_paths
+
+
+def _plot_hessian_energy_curvature(rows, figures_dir: Path):
+    import matplotlib.pyplot as hplt
+
+    fig, ax = hplt.subplots(figsize=(6.2, 3.8))
+    scatter = ax.scatter(
+        [row["energy"] for row in rows],
+        [row["minimum_eigenvalue"] for row in rows],
+        c=[row["zero_fraction"] for row in rows],
+        s=[16.0 + 8.0 * math.sqrt(row["member_count"]) for row in rows],
+        cmap="viridis",
+        edgecolors="black",
+        linewidths=0.3,
+        alpha=0.8,
+    )
+    epsilon = max(row["epsilon"] for row in rows)
+    ax.axhline(0.0, color="black", linewidth=0.7)
+    ax.axhline(-epsilon, color="#d62728", linestyle="--", linewidth=0.7)
+    ax.set_yscale("symlog", linthresh=epsilon)
+    ax.set_xlabel("Final energy")
+    ax.set_ylabel(r"Minimum eigenvalue $\mu_{\min}$")
+    colorbar = fig.colorbar(scatter, ax=ax, pad=0.02)
+    colorbar.set_label(r"Near-zero fraction $n_0/P$")
+    outpath = figures_dir / "final_energy_vs_minimum_eigenvalue.pdf"
+    _style_and_save_hessian_figure(fig, outpath)
+    return outpath
+
+
+def _plot_hessian_classifications(rows, figures_dir: Path):
+    import matplotlib.pyplot as hplt
+    import numpy as hnp
+
+    layers = sorted({row["layer"] for row in rows})
+    labels = [
+        label
+        for label in _HESSIAN_CLASS_COLORS
+        if any(row["label"] == label for row in rows)
+    ]
+    fig, ax = hplt.subplots(figsize=(7.0, 3.5))
+    bottom = hnp.zeros(len(layers), dtype=float)
+    for label in labels:
+        counts = hnp.asarray(
+            [
+                sum(row["layer"] == layer and row["label"] == label for row in rows)
+                for layer in layers
+            ],
+            dtype=float,
+        )
+        ax.bar(
+            layers,
+            counts,
+            bottom=bottom,
+            color=_HESSIAN_CLASS_COLORS[label],
+            edgecolor="black",
+            linewidth=0.3,
+            label=_HESSIAN_CLASS_LABELS[label],
+        )
+        bottom += counts
+    ax.set_xticks(layers)
+    ax.set_xticklabels([str(layer) for layer in layers], rotation=45, ha="right")
+    ax.set_xlabel("Number of layers")
+    ax.set_ylabel("Number of empirical basins")
+    ax.legend(bbox_to_anchor=(1.02, 1.0), loc="upper left")
+    outpath = figures_dir / "hessian_classification_counts.pdf"
+    _style_and_save_hessian_figure(fig, outpath, legend=True)
+    return outpath
+
+
+def visualize_hessian_results(
+    results_dir: Path,
+    figures_dir: Path,
+    *,
+    expected_h_param: float,
+    layers=None,
+):
+    """Validate saved Hessian outputs and render basin/layer comparisons."""
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    paths = _hessian_result_paths(results_dir, layers)
+    layer_results = [
+        _load_validated_hessian_layer(path, expected_h_param) for path in paths
+    ]
+    _validate_hessian_result_collection(layer_results, results_dir)
+    rows = _hessian_representative_table(layer_results)
+    figures_dir = Path(figures_dir).expanduser().resolve()
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    figure_paths = [_plot_hessian_metric_overview(rows, figures_dir)]
+    figure_paths.extend(_plot_hessian_metrics_for_each_layer(rows, figures_dir))
+    figure_paths.extend(_plot_all_hessian_endpoints(layer_results, figures_dir))
+    for metric in (
+        "negative_count",
+        "zero_count",
+        "minimum_eigenvalue",
+        "condition_number",
+    ):
+        figure_paths.append(_plot_single_hessian_metric(rows, figures_dir, metric))
+    figure_paths.extend(_plot_hessian_layer_spectra(layer_results, figures_dir))
+    figure_paths.append(_plot_hessian_energy_curvature(rows, figures_dir))
+    figure_paths.append(_plot_hessian_classifications(rows, figures_dir))
+
+    classification_counts = {
+        label: sum(row["label"] == label for row in rows)
+        for label in _HESSIAN_CLASS_COLORS
+    }
+    report = {
+        "h_param": float(expected_h_param),
+        "layers": sorted({row["layer"] for row in rows}),
+        "analysis_mode": str(layer_results[0]["analysis_mode"]),
+        "analyzed_endpoint_count": sum(
+            int(result["analyzed_run_indices"].size) for result in layer_results
+        ),
+        "basin_representative_count": len(rows),
+        "stationary_representative_count": sum(row["stationary"] for row in rows),
+        "negative_curvature_representative_count": sum(
+            row["negative_count"] > 0 for row in rows
+        ),
+        "classification_counts": classification_counts,
+        "minimum_eigenvalue": min(row["minimum_eigenvalue"] for row in rows),
+        "maximum_zero_fraction": max(row["zero_fraction"] for row in rows),
+        "figure_files": [str(path) for path in figure_paths],
+    }
+    manifest_path = figures_dir / "hessian_visualization_manifest.json"
+    temporary_path = manifest_path.with_name(f".{manifest_path.name}.tmp")
+    with temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(report, handle, ensure_ascii=False, indent=2, allow_nan=False)
+        handle.write("\n")
+    os.replace(temporary_path, manifest_path)
+    print(
+        "Hessian visualization: "
+        f"{len(rows)} basin representatives across {len(report['layers'])} layers; "
+        f"{report['negative_curvature_representative_count']} have negative curvature, "
+        f"{report['stationary_representative_count']} satisfy stationarity tolerance."
+    )
+    print(f"Saved Hessian figures to: {figures_dir}")
+    return {"report": report, "manifest": manifest_path}
+
+
+def run_hessian_workflow(args):
+    """Compute Hessian summaries when requested, then render their figures."""
+    input_path, results_dir, figures_dir = _resolve_hessian_paths(args)
+    if not args.reuse_hessian_results:
+        from DPQC_overparam_hessian import run_hessian_analysis
+
+        run_hessian_analysis(
+            input_path=input_path,
+            output_dir=results_dir,
+            h_param=float(args.h_param),
+            layers=args.hessian_layers,
+            runs=args.hessian_runs,
+            epsilon=float(args.hessian_epsilon),
+            stationarity_tolerance=float(
+                args.hessian_stationarity_tolerance
+            ),
+            basin_energy_tolerance=float(
+                args.hessian_basin_energy_tolerance
+            ),
+            basin_state_tolerance=(
+                None
+                if args.hessian_energy_only_basins
+                else float(args.hessian_basin_state_tolerance)
+            ),
+            all_endpoints=bool(args.hessian_all_endpoints),
+            save_hessians=bool(args.hessian_save_matrices),
+            hvp_chunk_size=int(args.hessian_hvp_chunk_size),
+        )
+    else:
+        metadata_path = results_dir / "hessian_analysis_metadata.json"
+        if metadata_path.is_file():
+            with metadata_path.open("r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            requested_settings = {
+                "epsilon": float(args.hessian_epsilon),
+                "stationarity_tolerance": float(
+                    args.hessian_stationarity_tolerance
+                ),
+                "basin_energy_tolerance": float(
+                    args.hessian_basin_energy_tolerance
+                ),
+                "basin_state_tolerance": (
+                    None
+                    if args.hessian_energy_only_basins
+                    else float(args.hessian_basin_state_tolerance)
+                ),
+            }
+            mismatches = [
+                key
+                for key, requested in requested_settings.items()
+                if metadata.get(key) != requested
+            ]
+            if (
+                args.hessian_runs is not None
+                and list(args.hessian_runs) != metadata.get("requested_runs")
+            ):
+                mismatches.append("runs")
+            requested_mode = (
+                "all_selected_endpoints"
+                if args.hessian_all_endpoints
+                else "one_representative_per_empirical_basin"
+            )
+            if metadata.get("analysis_mode") != requested_mode:
+                mismatches.append("analysis_mode")
+            if args.hessian_save_matrices and not metadata.get(
+                "save_hessians", False
+            ):
+                mismatches.append("save_hessians")
+            if mismatches:
+                warnings.warn(
+                    "--reuse-hessian-results uses saved settings; ignored "
+                    "command-line calculation settings: "
+                    + ", ".join(dict.fromkeys(mismatches)),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+    return visualize_hessian_results(
+        results_dir,
+        figures_dir,
+        expected_h_param=float(args.h_param),
+        layers=args.hessian_layers,
+    )
+
+
+if __name__ == "__main__" and _CLI_ARGS.hessian_only:
+    run_hessian_workflow(_CLI_ARGS)
+    raise SystemExit(0)
+
 
 # ------------------------------------------------------------
 # IMPORTANT: env vars should be set BEFORE importing jax
@@ -90,8 +1681,6 @@ import tensorcircuit as tc
 from matplotlib.patches import Patch
 from plot import (
     new_fig_ax,
-    plot_qfim_grad_alignment_layer_overlay,
-    plot_qfim_grad_alignment_table,
     save_fig,
     style_axes_for_prx,
 )
@@ -102,7 +1691,6 @@ jax.config.update("jax_enable_x64", True)
 tc.set_backend("jax")
 tc.set_dtype("complex128")
 
-REAL_DTYPE = jnp.float64
 COMPLEX_DTYPE = jnp.complex128
 NP_REAL_DTYPE = np.float64
 NP_COMPLEX_DTYPE = np.complex128
@@ -115,7 +1703,6 @@ from dpqc_overparam_common import (
     hamiltonian_terms,
     load_npz_result as _load_npz_result_unchecked,
     rho_zero_state,
-    threshold_psd_eigvals_for_rank,
 )
 
 
@@ -175,8 +1762,7 @@ if num_runs <= 0:
     raise ValueError("cfg.NUM_RUNS must be a positive integer.")
 lr = cfg.LEARNING_RATE
 
-# Optimization-history sampling points used for history plots and
-# QFIM-gradient sector diagnostics.
+# Optimization-history sampling cadence used by history plots.
 eps = 1e-12
 sample_every = cfg.SAMPLE_EVERY
 
@@ -185,12 +1771,8 @@ sample_every = cfg.SAMPLE_EVERY
 # regenerates the detailed figure with a different cutoff.
 FINAL_ENERGY_ERROR_DETAIL_THRESHOLD = 6e-1
 
-# Optimization-history sampling points used for history plots and
-# QFIM-gradient sector diagnostics.
-#
-# qfim_grad_weight_scatter is generated at each of these iterations.
-# We intentionally use iteration 1 instead of iteration 0 because the
-# user request is for optimized-path parameters at
+# Optimization-history sampling points used for history plots.  Iteration 1
+# is used instead of iteration 0 so the optimized-path parameters are sampled at
 #   1, 1000, 2000, ..., 10000.
 sample_iters = np.asarray(
     [1] + list(range(sample_every, steps + 1, sample_every)),
@@ -1151,9 +2733,9 @@ vqe_layer_list = build_layer_list(
     vqe_sparse_step,
 )
 
-qfim_dense_until_layer = cfg.QFIM_DENSE_UNTIL_LAYER
-qfim_max_layer = cfg.QFIM_MAX_LAYER
-qfim_sparse_step = cfg.QFIM_SPARSE_STEP
+qfim_dense_until_layer = cfg.DPQC_QFIM_DENSE_UNTIL_LAYER
+qfim_max_layer = cfg.DPQC_QFIM_MAX_LAYER
+qfim_sparse_step = cfg.DPQC_QFIM_SPARSE_STEP
 
 qfim_layer_list = build_layer_list(
     qfim_max_layer,
@@ -1169,11 +2751,54 @@ if not vqe_layer_list:
 
 if not qfim_layer_list:
     raise ValueError(
-        "qfim_layer_list is empty. Check qfim_max_layer, "
-        "qfim_dense_until_layer, and qfim_sparse_step."
+        "qfim_layer_list is empty. Check DPQC_QFIM_MAX_LAYER, "
+        "DPQC_QFIM_DENSE_UNTIL_LAYER, and DPQC_QFIM_SPARSE_STEP."
     )
 
-save_dir = f"./figs/dpqc/h_{h_param}"
+save_dir = f"./figs/{output_family}/h_{h_param}"
+
+if output_family == "dpqc_reset":
+    reset_metadata_path = os.path.join(
+        save_dir,
+        "reset_model_metadata.json",
+    )
+    if not os.path.isfile(reset_metadata_path):
+        raise FileNotFoundError(
+            "Reset-DPQC metadata was not found: "
+            f"{reset_metadata_path}"
+        )
+    with open(reset_metadata_path, "r", encoding="utf-8") as metadata_file:
+        reset_metadata = json.load(metadata_file)
+    if reset_metadata.get("model_id") != (
+        "dpqc_reset_shared_rz_fixed_rx_pi"
+    ):
+        raise ValueError(
+            "Reset-DPQC metadata has an incompatible model_id: "
+            f"{reset_metadata.get('model_id')!r}."
+        )
+    metadata_h_param = float(reset_metadata.get("h_param", math.nan))
+    if not math.isclose(
+        metadata_h_param,
+        h_param,
+        rel_tol=0.0,
+        abs_tol=1e-15,
+    ):
+        raise ValueError(
+            "Reset-DPQC metadata h_param does not match --h-param: "
+            f"{metadata_h_param} != {h_param}."
+        )
+    fixed_rx_angle = float(
+        reset_metadata.get("fixed_feed_forward_rx_angle", math.nan)
+    )
+    if not math.isclose(
+        fixed_rx_angle,
+        math.pi,
+        rel_tol=0.0,
+        abs_tol=1e-15,
+    ):
+        raise ValueError(
+            "Reset-DPQC metadata does not specify fixed Rx(pi)."
+        )
 
 energy_fig_dir = os.path.join(save_dir, "energy_figures")
 qfim_fig_dir = os.path.join(save_dir, "qfim_figures")
@@ -1181,21 +2806,6 @@ qfim_trace_dir = os.path.join(qfim_fig_dir, "qfim_trace")
 qfim_eigs_dir = os.path.join(qfim_fig_dir, "qfim_eigs")
 qfim_eigs_dir_red4 = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
 qfim_eigs_dir_red5 = os.path.join(qfim_eigs_dir, "reduced_keep_01234")
-qfim_rank_dir = os.path.join(qfim_fig_dir, "qfim_rank")
-qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
-qfim_rank_optimization_path_dir = os.path.join(qfim_rank_dir, "optimization_path")
-qfim_rank_optimization_path_mean_dir = os.path.join(
-    qfim_rank_optimization_path_dir,
-    "mean",
-)
-qfim_rank_optimization_path_min_dir = os.path.join(
-    qfim_rank_optimization_path_dir,
-    "min",
-)
-qfim_rank_optimization_path_max_dir = os.path.join(
-    qfim_rank_optimization_path_dir,
-    "max",
-)
 qfim_eigcount_dir = os.path.join(qfim_fig_dir, "qfim_eigcount")
 qfim_eigcount_random_dir = os.path.join(qfim_eigcount_dir, "random_points")
 qfim_eigcount_optimization_path_dir = os.path.join(
@@ -1268,12 +2878,6 @@ for _output_dir in (
     qfim_eigs_dir,
     qfim_eigs_dir_red4,
     qfim_eigs_dir_red5,
-    qfim_rank_dir,
-    qfim_rank_random_dir,
-    qfim_rank_optimization_path_dir,
-    qfim_rank_optimization_path_mean_dir,
-    qfim_rank_optimization_path_min_dir,
-    qfim_rank_optimization_path_max_dir,
     qfim_eigcount_dir,
     qfim_eigcount_random_dir,
     qfim_eigcount_optimization_path_dir,
@@ -1314,18 +2918,6 @@ theta_history = _load_layer_arrays_from_npz(
     vqe_optimization_results,
     vqe_layer_list,
     "theta_final",
-    dtype=NP_REAL_DTYPE,
-)
-theta_sample_traces_by_layer = _load_layer_arrays_from_npz(
-    vqe_optimization_results,
-    vqe_layer_list,
-    "theta_samples",
-    dtype=NP_REAL_DTYPE,
-)
-grad_sample_traces_by_layer = _load_layer_arrays_from_npz(
-    vqe_optimization_results,
-    vqe_layer_list,
-    "grad_samples",
     dtype=NP_REAL_DTYPE,
 )
 success_rates_history = _load_layer_arrays_from_npz(
@@ -1610,43 +3202,14 @@ save_fig(
 # ============================================================
 # Load random-parameter QFIM results and generate QFIM figures
 # ============================================================
-# QFIM rank + eigenvalue plots for both retained subsystems.
+# QFIM eigenvalue, trace, and eigenvalue-count plots for both retained subsystems.
 # ============================================================
-KEEP_WIRES_4 = (0, 1, 2, 3)
-assert KEEP_WIRES_4 == tuple(range(num_system_qubits - 1))
-KEEP_WIRES_5 = tuple(range(num_system_qubits))
-
-QFIM_EFFECTIVE_RANK_THRESHOLD = cfg.QFIM_EFFECTIVE_RANK_THRESHOLD
-
-EIG_SUM_EPS = cfg.EIG_SUM_EPS
 QFIM_EIG_PLOT_EPS = cfg.QFIM_EIG_PLOT_EPS
 NUM_QFIM_SAMPLES = cfg.NUM_QFIM_SAMPLES
-QFIM_SAMPLE_SEED_BASE = cfg.QFIM_SAMPLE_SEED_BASE
-RED_JVP_CHUNK = cfg.RED_JVP_CHUNK
 
-# Thresholds used for large-sector gradient-weight diagnostics.
-# Keep this broad set unless you also want to reduce the gradient-sector plots.
-THRESHOLDS = tuple(float(t) for t in cfg.GRADIENT_SECTOR_THRESHOLDS)
 QFIM_PATH_EIGCOUNT_THRESHOLDS = tuple(
     float(t) for t in cfg.QFIM_PATH_EIGCOUNT_THRESHOLDS
 )
-
-
-def _rank_thresholds_for_eigs_sorted_desc(
-    eigs_sorted_desc: np.ndarray,
-) -> np.ndarray:
-    eigs_arr = np.asarray(eigs_sorted_desc, dtype=NP_REAL_DTYPE)
-
-    if eigs_arr.ndim == 1:
-        eigs_arr = eigs_arr[None, :]
-
-    eigs_jnp = jnp.asarray(eigs_arr, dtype=REAL_DTYPE)
-
-    thresholds = jax.vmap(
-        lambda evals_1d: threshold_psd_eigvals_for_rank(evals_1d)[1]
-    )(eigs_jnp)
-
-    return np.asarray(jax.device_get(thresholds), dtype=NP_REAL_DTYPE)
 
 
 def eigenvalue_index_ticks(n_params: int, *, max_ticks: int = 11) -> np.ndarray:
@@ -1697,9 +3260,6 @@ def save_qfim_eigs_by_index(
 
     n_params = int(eigs_plot.shape[1])
 
-    rank_thresholds = _rank_thresholds_for_eigs_sorted_desc(eigs_raw)
-    rank_thresholds_plot = np.maximum(rank_thresholds, eps)
-
     fig, ax = new_fig_ax(outside_legend=False)
 
     positions = np.arange(1, n_params + 1, dtype=NP_REAL_DTYPE)
@@ -1723,18 +3283,8 @@ def save_qfim_eigs_by_index(
     ax.set_xlim(0.5, n_params + 0.5)
     ax.set_yscale("log")
 
-    for thr in np.unique(rank_thresholds_plot):
-        ax.axhline(
-            thr,
-            linestyle="-",
-            linewidth=1.2,
-            color="red",
-            alpha=0.75,
-            zorder=4,
-        )
-
-    ymin = min(float(np.min(eigs_plot)), float(np.min(rank_thresholds_plot)))
-    ymax = max(float(np.max(eigs_plot)), float(np.max(rank_thresholds_plot)))
+    ymin = float(np.min(eigs_plot))
+    ymax = float(np.max(eigs_plot))
     ymin = max(eps, ymin)
 
     if ymax > ymin:
@@ -1839,6 +3389,111 @@ def save_qfim_eigs_by_index_colored_by_layer(
     save_fig(fig, ax, outpath, outside_legend=True)
 
 
+def plot_qfim_rank_vs_layers_random_points(
+    rank_by_layer: dict,
+    layers,
+    *,
+    title: str,
+    outpath: str,
+    rank_threshold: float,
+    upper_bound: Optional[int] = None,
+) -> None:
+    """Plot random-point QFIM rank mean, SEM, range, and samples."""
+    valid_layers = [
+        int(L)
+        for L in layers
+        if rank_by_layer.get(int(L)) is not None
+    ]
+    if not valid_layers:
+        return
+
+    samples_by_layer = []
+    for L in valid_layers:
+        values = np.asarray(
+            rank_by_layer[L],
+            dtype=NP_REAL_DTYPE,
+        ).reshape(-1)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            raise ValueError(f"QFIM rank samples are empty for L={L}.")
+        samples_by_layer.append(values)
+
+    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
+    means = np.asarray(
+        [np.mean(values) for values in samples_by_layer],
+        dtype=NP_REAL_DTYPE,
+    )
+    sems = np.asarray(
+        [
+            0.0
+            if values.size <= 1
+            else np.std(values, ddof=1) / np.sqrt(values.size)
+            for values in samples_by_layer
+        ],
+        dtype=NP_REAL_DTYPE,
+    )
+    minima = np.asarray(
+        [np.min(values) for values in samples_by_layer],
+        dtype=NP_REAL_DTYPE,
+    )
+    maxima = np.asarray(
+        [np.max(values) for values in samples_by_layer],
+        dtype=NP_REAL_DTYPE,
+    )
+
+    fig, ax = new_fig_ax()
+    for L, values in zip(valid_layers, samples_by_layer):
+        ax.scatter(
+            np.full(values.shape, L, dtype=NP_REAL_DTYPE),
+            values,
+            s=16.0,
+            facecolors="none",
+            edgecolors="C0",
+            linewidths=0.7,
+            alpha=0.35,
+            rasterized=True,
+        )
+    ax.fill_between(
+        x,
+        minima,
+        maxima,
+        color="C1",
+        alpha=0.15,
+        label="Min-max range",
+    )
+    ax.errorbar(
+        x,
+        means,
+        yerr=sems,
+        color="C0",
+        marker="o",
+        linestyle="-",
+        linewidth=1.5,
+        markersize=4.8,
+        capsize=3.0,
+        label=r"Mean $\pm$ SEM",
+    )
+    if upper_bound is not None:
+        ax.axhline(
+            int(upper_bound),
+            color="black",
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.70,
+            label=f"Upper bound ({int(upper_bound)})",
+        )
+
+    threshold_label = f"{float(rank_threshold):.0e}"
+    ax.set_xlabel("Number of Layers")
+    ax.set_ylabel(f"QFIM rank (eigenvalue >= {threshold_label})")
+    ax.set_title(title)
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(L) for L in valid_layers])
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(frameon=True, framealpha=0.85)
+    save_fig(fig, ax, outpath)
+
+
 qfim_random_points_result_path = os.path.join(
     qfim_results_dir,
     f"qfim_random_points_{keep_key}.npz",
@@ -1849,23 +3504,17 @@ qfim_layer_list = [
     int(L)
     for L in np.asarray(qfim_random_points_results["layers"], dtype=NP_INT_DTYPE)
 ]
-qfim_rank_reduced_0123_by_layer = _load_layer_arrays_from_npz(
-    qfim_random_points_results,
-    qfim_layer_list,
-    "rank",
-    dtype=NP_INT_DTYPE,
-)
 qfim_eigs_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     qfim_random_points_results,
     qfim_layer_list,
     "eigs_desc",
     dtype=NP_REAL_DTYPE,
 )
-qfim_rho_rank_reduced_0123_by_layer = _load_layer_arrays_from_npz(
+qfim_rank_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     qfim_random_points_results,
     qfim_layer_list,
-    "rho_rank",
-    dtype=NP_INT_DTYPE,
+    "rank",
+    dtype=NP_REAL_DTYPE,
 )
 qfim_eigsum_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     qfim_random_points_results,
@@ -1879,6 +3528,28 @@ qfim_abs_entry_sum_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     "abs_entry_sum",
     dtype=NP_REAL_DTYPE,
 )
+
+if output_family == "dpqc_reset":
+    plot_qfim_rank_vs_layers_random_points(
+        qfim_rank_reduced_0123_by_layer,
+        qfim_layer_list,
+        title=(
+            f"QFIM rank at {NUM_QFIM_SAMPLES} random points "
+            f"({keep_label})"
+        ),
+        outpath=os.path.join(
+            qfim_fig_dir,
+            "qfim_rank_vs_layers_random_points_keep0123.pdf",
+        ),
+        rank_threshold=float(
+            np.asarray(
+                qfim_random_points_results[
+                    "qfim_effective_rank_threshold"
+                ]
+            ).item()
+        ),
+        upper_bound=28,
+    )
 
 for L in qfim_layer_list:
     save_qfim_eigs_by_index(
@@ -1897,228 +3568,6 @@ save_qfim_eigs_by_index_colored_by_layer(
         "qfim_eigs_by_index_layers_reduced_keep_0123.pdf",
     ),
     cmap=cmap,
-)
-
-
-# ============================================================
-# Mean/minimum/maximum QFIM rank + density-rank upper bound by layer
-#   reduced keep=(0,1,2,3) only
-# ============================================================
-def _qfim_rank_mean_min_max_sem_upper_bound_xy(
-    rank_by_layer: dict,
-    rho_rank_by_layer: dict,
-    layers,
-    *,
-    d_keep: int = 2 ** len(KEEP_WIRES_4),
-):
-    valid_items = []
-
-    for L in layers:
-        ranks_L = rank_by_layer.get(L)
-
-        if ranks_L is None:
-            continue
-
-        ranks_arr = np.asarray(ranks_L, dtype=NP_REAL_DTYPE).reshape(-1)
-
-        if ranks_arr.size == 0:
-            continue
-
-        valid_items.append((int(L), ranks_arr))
-
-    if not valid_items:
-        return (
-            np.asarray([], dtype=NP_REAL_DTYPE),
-            np.asarray([], dtype=NP_REAL_DTYPE),
-            np.asarray([], dtype=NP_REAL_DTYPE),
-            np.asarray([], dtype=NP_REAL_DTYPE),
-            np.asarray([], dtype=NP_REAL_DTYPE),
-            np.asarray([], dtype=NP_REAL_DTYPE),
-            [],
-        )
-
-    valid_layers = [L for L, _ in valid_items]
-    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
-
-    min_ranks = np.asarray(
-        [np.min(ranks_arr) for _, ranks_arr in valid_items],
-        dtype=NP_REAL_DTYPE,
-    )
-
-    max_ranks = np.asarray(
-        [np.max(ranks_arr) for _, ranks_arr in valid_items],
-        dtype=NP_REAL_DTYPE,
-    )
-
-    mean_ranks = np.asarray(
-        [np.mean(ranks_arr) for _, ranks_arr in valid_items],
-        dtype=NP_REAL_DTYPE,
-    )
-
-    sem_ranks = np.asarray(
-        [
-            NP_REAL_DTYPE(0.0)
-            if ranks_arr.size <= 1
-            else NP_REAL_DTYPE(np.std(ranks_arr, ddof=1) / np.sqrt(ranks_arr.size))
-            for _, ranks_arr in valid_items
-        ],
-        dtype=NP_REAL_DTYPE,
-    )
-
-    upper_bounds = []
-
-    for L in valid_layers:
-        rho_ranks_L = rho_rank_by_layer.get(L)
-
-        if rho_ranks_L is None:
-            r_for_bound = d_keep
-        else:
-            rho_ranks_arr = np.asarray(rho_ranks_L, dtype=NP_REAL_DTYPE).reshape(-1)
-            rho_ranks_arr = rho_ranks_arr[np.isfinite(rho_ranks_arr)]
-
-            if rho_ranks_arr.size == 0:
-                r_for_bound = d_keep
-            else:
-                r_for_bound = int(np.max(rho_ranks_arr))
-
-        r_for_bound = int(np.clip(r_for_bound, 1, d_keep))
-        density_manifold_bound = 2 * d_keep * r_for_bound - r_for_bound**2 - 1
-        parameter_bound = n_param_per_layer * int(L)
-        upper_bounds.append(min(parameter_bound, density_manifold_bound))
-
-    upper_bounds = np.asarray(upper_bounds, dtype=NP_REAL_DTYPE)
-
-    return (
-        x,
-        min_ranks,
-        max_ranks,
-        mean_ranks,
-        sem_ranks,
-        upper_bounds,
-        valid_layers,
-    )
-
-
-def plot_single_qfim_rank_mean_min_max_sem_by_layer(
-    rank_by_layer: dict,
-    rho_rank_by_layer: dict,
-    layers,
-    *,
-    d_keep: int = 2 ** len(KEEP_WIRES_4),
-    color_min,
-    color_mean,
-    color_max="C2",
-    label=None,
-    title,
-    outpath,
-    marker_min: str = "o",
-    marker_mean: str = "s",
-    marker_max: str = "^",
-    lw: float = 1.4,
-):
-    (
-        x,
-        min_ranks,
-        max_ranks,
-        mean_ranks,
-        sem_ranks,
-        upper_bounds,
-        valid_layers,
-    ) = _qfim_rank_mean_min_max_sem_upper_bound_xy(
-        rank_by_layer,
-        rho_rank_by_layer,
-        layers,
-        d_keep=d_keep,
-    )
-
-    if x.size == 0:
-        return
-
-    label_suffix = "" if label in (None, "") else rf" ({label})"
-
-    fig, ax = new_fig_ax(outside_legend=False)
-
-    ax.plot(
-        x,
-        min_ranks,
-        marker=marker_min,
-        linestyle="-",
-        linewidth=lw,
-        markersize=6.0,
-        color=color_min,
-        label=rf"Minimum effective rank{label_suffix}",
-    )
-
-    ax.plot(
-        x,
-        max_ranks,
-        marker=marker_max,
-        linestyle="-",
-        linewidth=lw,
-        markersize=6.0,
-        color=color_max,
-        label=rf"Maximum effective rank{label_suffix}",
-    )
-
-    ax.errorbar(
-        x,
-        mean_ranks,
-        yerr=sem_ranks,
-        marker=marker_mean,
-        linestyle="-",
-        linewidth=lw,
-        markersize=5.0,
-        capsize=4.0,
-        elinewidth=1.0,
-        color=color_mean,
-        label=rf"Mean effective rank $\pm$ SEM{label_suffix}",
-    )
-
-    ax.plot(
-        x,
-        upper_bounds,
-        marker=None,
-        linestyle="--",
-        linewidth=lw,
-        color="black",
-        label=(
-            rf"Upper bound $\min({n_param_per_layer}L, "
-            rf"{2 * int(d_keep)}r_{{\max}}-r_{{\max}}^2-1)$"
-        ),
-    )
-
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel("QFIM rank")
-    ax.set_title(title)
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(L) for L in valid_layers])
-    ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(loc="best", frameon=True, framealpha=0.9)
-
-    save_fig(fig, ax, outpath, outside_legend=False)
-
-
-plot_single_qfim_rank_mean_min_max_sem_by_layer(
-    qfim_rank_reduced_0123_by_layer,
-    qfim_rho_rank_reduced_0123_by_layer,
-    qfim_layer_list,
-    color_min="C0",
-    color_mean="C1",
-    color_max="C2",
-    label=None,
-    title=(
-        rf"QFIM effective rank mean/minimum/maximum and upper bound at "
-        rf"{NUM_QFIM_SAMPLES} random points"
-    ),
-    outpath=os.path.join(
-        qfim_rank_random_dir,
-        "qfim_rank_mean_min_upper_bound_random_points_reduced_0123.pdf",
-    ),
-    marker_min="o",
-    marker_mean="s",
-    marker_max="^",
-    lw=1.4,
 )
 
 
@@ -2436,15 +3885,8 @@ plot_qfim_trace_max_mean_sem_by_layer(
 # ============================================================
 
 # ============================================================
-# Load large-sector gradient-weight results
+# Shared statistics for optimization-path traces
 # ============================================================
-# Large-sector gradient weight along the VQE optimization path
-#   color  = layer number
-#   marker = QFIM eigenvalue threshold
-# ============================================================
-GRADIENT_SECTOR_NORM_EPS = 1e-24
-
-
 def _finite_mean_sem_over_runs_by_time(values_2d: np.ndarray):
     values = np.asarray(values_2d, dtype=NP_REAL_DTYPE)
 
@@ -2484,270 +3926,11 @@ def _finite_mean_sem_over_runs_by_time(values_2d: np.ndarray):
     return means, sems, counts
 
 
-qfim_large_sector_gradient_weight_result_path = os.path.join(
-    qfim_results_dir,
-    f"qfim_large_sector_gradient_weight_{keep_key}.npz",
-)
-
-qfim_large_sector_gradient_weight_results = load_npz_result(
-    qfim_large_sector_gradient_weight_result_path
-)
-qfim_gradient_large_sector_weight_by_layer = {
-    int(L): {
-        float(thr): np.asarray(
-            qfim_large_sector_gradient_weight_results[
-                f"L{int(L)}_thr_{_thr_tag(float(thr))}"
-            ],
-            dtype=NP_REAL_DTYPE,
-        )
-        for thr in np.asarray(
-            qfim_large_sector_gradient_weight_results["thresholds"],
-            dtype=NP_REAL_DTYPE,
-        )
-    }
-    for L in np.asarray(
-        qfim_large_sector_gradient_weight_results["layers"],
-        dtype=NP_INT_DTYPE,
-    )
-}
-
-
 # ============================================================
 
 # ============================================================
 # Load optimization-path QFIM results and generate path figures
 # ============================================================
-# QFIM rank along the VQE optimization path
-#   x-axis: sampled optimization iteration
-#   y-axis: run-mean QFIM effective rank at theta(iteration)
-#   color: layer number
-# ============================================================
-def plot_qfim_rank_history_mean_by_layer(
-    rank_history_by_layer: dict,
-    layers,
-    sample_iters,
-    *,
-    title: str,
-    outpath: str,
-    cmap=None,
-):
-    valid_layers = [
-        int(L)
-        for L in layers
-        if rank_history_by_layer.get(int(L)) is not None
-    ]
-
-    if not valid_layers:
-        return
-
-    x = np.asarray(sample_iters, dtype=NP_REAL_DTYPE)
-    cmap = matplotlib.colormaps.get_cmap("viridis") if cmap is None else cmap
-
-    fig, ax = new_fig_ax(outside_legend=True, legend_space_frac=0.22)
-    n_layers = len(valid_layers)
-
-    for layer_idx, L in enumerate(valid_layers):
-        ranks = np.asarray(rank_history_by_layer[L], dtype=NP_REAL_DTYPE)
-
-        if ranks.ndim != 2:
-            raise ValueError(
-                "Each rank history array must be 2D: "
-                "(num_runs, num_sample_iters)."
-            )
-
-        if ranks.shape[1] != x.size and ranks.shape[0] == x.size:
-            ranks = ranks.T
-
-        if ranks.shape[1] != x.size:
-            raise ValueError(
-                f"Shape mismatch for L={L}: "
-                f"ranks.shape={ranks.shape}, len(sample_iters)={x.size}."
-            )
-
-        means, sems, counts = _finite_mean_sem_over_runs_by_time(ranks)
-        finite_mask = np.isfinite(means) & (counts > 0)
-
-        if not np.any(finite_mask):
-            continue
-
-        color = cmap(layer_idx / max(n_layers - 1, 1))
-
-        ax.errorbar(
-            x[finite_mask],
-            means[finite_mask],
-            yerr=sems[finite_mask],
-            marker="o",
-            linestyle="-",
-            linewidth=1.2,
-            markersize=4.5,
-            capsize=3.0,
-            elinewidth=0.8,
-            color=color,
-            label=f"L={L}",
-        )
-
-    ax.set_xlabel("Iterations")
-    ax.set_ylabel("Mean QFIM rank")
-    ax.set_title(title)
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(int(t)) for t in x], rotation=45, ha="right")
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.00),
-        borderaxespad=0.0,
-        frameon=True,
-        framealpha=0.9,
-    )
-
-    save_fig(
-        fig,
-        ax,
-        outpath,
-        outside_legend=True,
-        legend_space_frac=0.22,
-    )
-
-
-def _plot_qfim_rank_history_extreme_by_layer(
-    rank_history_by_layer: dict,
-    layers,
-    sample_iters,
-    *,
-    statistic: str,
-    title: str,
-    outpath: str,
-    cmap=None,
-):
-    if statistic == "minimum":
-        reduce_extreme = np.min
-        missing_fill = np.inf
-    elif statistic == "maximum":
-        reduce_extreme = np.max
-        missing_fill = -np.inf
-    else:
-        raise ValueError("statistic must be either 'minimum' or 'maximum'.")
-
-    valid_layers = [
-        int(L)
-        for L in layers
-        if rank_history_by_layer.get(int(L)) is not None
-    ]
-
-    if not valid_layers:
-        return
-
-    x = np.asarray(sample_iters, dtype=NP_REAL_DTYPE)
-    cmap = matplotlib.colormaps.get_cmap("viridis") if cmap is None else cmap
-
-    fig, ax = new_fig_ax(outside_legend=True, legend_space_frac=0.22)
-    n_layers = len(valid_layers)
-
-    for layer_idx, L in enumerate(valid_layers):
-        ranks = np.asarray(rank_history_by_layer[L], dtype=NP_REAL_DTYPE)
-
-        if ranks.ndim != 2:
-            raise ValueError(
-                "Each rank history array must be 2D: "
-                "(num_runs, num_sample_iters)."
-            )
-
-        if ranks.shape[1] != x.size and ranks.shape[0] == x.size:
-            ranks = ranks.T
-
-        if ranks.shape[1] != x.size:
-            raise ValueError(
-                f"Shape mismatch for L={L}: "
-                f"ranks.shape={ranks.shape}, len(sample_iters)={x.size}."
-            )
-
-        valid = np.isfinite(ranks)
-        counts = np.sum(valid, axis=0)
-        ranks_for_extreme = np.where(valid, ranks, missing_fill)
-        extreme_ranks = reduce_extreme(ranks_for_extreme, axis=0)
-        extreme_ranks = np.where(counts > 0, extreme_ranks, np.nan)
-        finite_mask = np.isfinite(extreme_ranks) & (counts > 0)
-
-        if not np.any(finite_mask):
-            continue
-
-        color = cmap(layer_idx / max(n_layers - 1, 1))
-
-        ax.plot(
-            x[finite_mask],
-            extreme_ranks[finite_mask],
-            marker="o",
-            linestyle="-",
-            linewidth=1.2,
-            markersize=4.5,
-            color=color,
-            label=f"L={L}",
-        )
-
-    ax.set_xlabel("Iterations")
-    ax.set_ylabel(f"{statistic.title()} QFIM rank")
-    ax.set_title(title)
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(int(t)) for t in x], rotation=45, ha="right")
-    ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.00),
-        borderaxespad=0.0,
-        frameon=True,
-        framealpha=0.9,
-    )
-
-    save_fig(
-        fig,
-        ax,
-        outpath,
-        outside_legend=True,
-        legend_space_frac=0.22,
-    )
-
-
-def plot_qfim_rank_history_min_by_layer(
-    rank_history_by_layer: dict,
-    layers,
-    sample_iters,
-    *,
-    title: str,
-    outpath: str,
-    cmap=None,
-):
-    _plot_qfim_rank_history_extreme_by_layer(
-        rank_history_by_layer,
-        layers,
-        sample_iters,
-        statistic="minimum",
-        title=title,
-        outpath=outpath,
-        cmap=cmap,
-    )
-
-
-def plot_qfim_rank_history_max_by_layer(
-    rank_history_by_layer: dict,
-    layers,
-    sample_iters,
-    *,
-    title: str,
-    outpath: str,
-    cmap=None,
-):
-    _plot_qfim_rank_history_extreme_by_layer(
-        rank_history_by_layer,
-        layers,
-        sample_iters,
-        statistic="maximum",
-        title=title,
-        outpath=outpath,
-        cmap=cmap,
-    )
-
-
 def plot_qfim_trace_history_mean_by_layer(
     trace_history_by_layer: dict,
     layers,
@@ -2840,61 +4023,6 @@ def plot_qfim_trace_history_mean_by_layer(
         outside_legend=True,
         legend_space_frac=0.22,
     )
-
-
-qfim_rank_history_result_path = os.path.join(
-    qfim_results_dir,
-    f"qfim_rank_history_optimization_path_{keep_key}.npz",
-)
-
-qfim_rank_history_results = load_npz_result(qfim_rank_history_result_path)
-vqe_layer_list = [
-    int(L)
-    for L in np.asarray(qfim_rank_history_results["layers"], dtype=NP_INT_DTYPE)
-]
-sample_iters = np.asarray(qfim_rank_history_results["sample_iters"], dtype=NP_INT_DTYPE)
-qfim_rank_history_by_layer = _load_layer_arrays_from_npz(
-    qfim_rank_history_results,
-    vqe_layer_list,
-    suffix=None,
-    dtype=NP_REAL_DTYPE,
-)
-
-plot_qfim_rank_history_mean_by_layer(
-    qfim_rank_history_by_layer,
-    vqe_layer_list,
-    sample_iters,
-    title=rf"Mean QFIM effective rank along optimization path ({keep_label})",
-    outpath=os.path.join(
-        qfim_rank_optimization_path_mean_dir,
-        f"qfim_rank_mean_history_optimization_path_{keep_key}.pdf",
-    ),
-    cmap=cmap,
-)
-
-plot_qfim_rank_history_min_by_layer(
-    qfim_rank_history_by_layer,
-    vqe_layer_list,
-    sample_iters,
-    title=rf"Minimum QFIM effective rank along optimization path ({keep_label})",
-    outpath=os.path.join(
-        qfim_rank_optimization_path_min_dir,
-        f"qfim_rank_min_history_optimization_path_{keep_key}.pdf",
-    ),
-    cmap=cmap,
-)
-
-plot_qfim_rank_history_max_by_layer(
-    qfim_rank_history_by_layer,
-    vqe_layer_list,
-    sample_iters,
-    title=rf"Maximum QFIM effective rank along optimization path ({keep_label})",
-    outpath=os.path.join(
-        qfim_rank_optimization_path_max_dir,
-        f"qfim_rank_max_history_optimization_path_{keep_key}.pdf",
-    ),
-    cmap=cmap,
-)
 
 
 qfim_eigs_history_result_path = os.path.join(
@@ -3547,47 +4675,11 @@ plot_metric_mean_sem_by_layer(
 )
 
 # ============================================================
-
+# Optional keep=(0,1,2,3,4) QFIM figures
 # ============================================================
-# QFIM spectral/effective-rank summary figures
-# ============================================================
-# These diagnostics are additive: older numerical-result directories do not
-# contain the two summary archives below.  Missing or incomplete archives must
-# therefore skip only the affected new figure, while all legacy plots continue
-# to be generated.
-qfim_effective_rank_fig_dir = os.path.join(qfim_fig_dir, "effective_rank")
-qfim_spectral_gradient_fig_dir = os.path.join(
-    qfim_fig_dir,
-    "qfim_grad_alignment",
-)
-qfim_cumulative_alignment_fig_dir = os.path.join(
-    qfim_fig_dir,
-    "cumulative_alignment",
-)
-
-for _diagnostic_fig_dir in (
-    qfim_effective_rank_fig_dir,
-    qfim_spectral_gradient_fig_dir,
-    qfim_cumulative_alignment_fig_dir,
-):
-    os.makedirs(_diagnostic_fig_dir, exist_ok=True)
-
-
-def qfim_grad_alignment_dirs_for_key(result_key: str):
-    result_root = os.path.join(qfim_results_dir, "qfim_grad_alignment")
-
-    if result_key == keep_key:
-        return qfim_spectral_gradient_fig_dir, result_root
-
-    figure_dir = os.path.join(qfim_spectral_gradient_fig_dir, result_key)
-    result_dir = os.path.join(result_root, result_key)
-    os.makedirs(figure_dir, exist_ok=True)
-    return figure_dir, result_dir
-
-
 def _warn_skip_new_figure(message: str) -> None:
     warnings.warn(
-        f"Skipping new QFIM diagnostic figure: {message}",
+        f"Skipping optional QFIM figure: {message}",
         RuntimeWarning,
         stacklevel=2,
     )
@@ -3660,8 +4752,6 @@ def render_qfim_keep01234_core_figures() -> None:
             "DPQC_overparam_qfim.py for complete keep01234 figures"
         ),
     )
-    random_rank_rendered = False
-
     if random_result is not None:
         random_layers = _summary_layers_or_none(
             random_result,
@@ -3675,22 +4765,10 @@ def render_qfim_keep01234_core_figures() -> None:
                     dtype=NP_INT_DTYPE,
                 ).reshape(-1)[0]
             )
-            rank_by_layer = _load_layer_arrays_from_npz(
-                random_result,
-                random_layers,
-                "rank",
-                dtype=NP_REAL_DTYPE,
-            )
             eigs_by_layer = _load_layer_arrays_from_npz(
                 random_result,
                 random_layers,
                 "eigs_desc",
-                dtype=NP_REAL_DTYPE,
-            )
-            rho_rank_by_layer = _load_layer_arrays_from_npz(
-                random_result,
-                random_layers,
-                "rho_rank",
                 dtype=NP_REAL_DTYPE,
             )
             trace_by_layer = _load_layer_arrays_from_npz(
@@ -3705,6 +4783,37 @@ def render_qfim_keep01234_core_figures() -> None:
                 "abs_entry_sum",
                 dtype=NP_REAL_DTYPE,
             )
+            rank_by_layer = _load_layer_arrays_from_npz(
+                random_result,
+                random_layers,
+                "rank",
+                dtype=NP_REAL_DTYPE,
+            )
+
+            if output_family == "dpqc_reset":
+                plot_qfim_rank_vs_layers_random_points(
+                    rank_by_layer,
+                    random_layers,
+                    title=(
+                        f"QFIM rank at {num_random_samples} random points "
+                        f"({keep_label_5})"
+                    ),
+                    outpath=os.path.join(
+                        qfim_fig_dir,
+                        (
+                            "qfim_rank_vs_layers_random_points_"
+                            "keep01234.pdf"
+                        ),
+                    ),
+                    rank_threshold=float(
+                        np.asarray(
+                            random_result[
+                                "qfim_effective_rank_threshold"
+                            ]
+                        ).item()
+                    ),
+                    upper_bound=28,
+                )
 
             for L in random_layers:
                 if int(L) not in eigs_by_layer:
@@ -3734,39 +4843,6 @@ def render_qfim_keep01234_core_figures() -> None:
                 ),
                 cmap=cmap,
             )
-
-            if any(
-                np.asarray(values).size > 0
-                for values in rank_by_layer.values()
-            ):
-                plot_single_qfim_rank_mean_min_max_sem_by_layer(
-                    rank_by_layer,
-                    rho_rank_by_layer,
-                    random_layers,
-                    d_keep=2 ** len(KEEP_WIRES_5),
-                    color_min="C0",
-                    color_mean="C1",
-                    color_max="C2",
-                    label=None,
-                    title=(
-                        rf"QFIM effective rank mean/minimum/maximum and "
-                        rf"upper bound "
-                        rf"at {num_random_samples} random points "
-                        rf"({keep_label_5})"
-                    ),
-                    outpath=os.path.join(
-                        qfim_rank_random_dir,
-                        (
-                            "qfim_rank_mean_min_upper_bound_random_points_"
-                            "reduced_01234.pdf"
-                        ),
-                    ),
-                    marker_min="o",
-                    marker_mean="s",
-                    marker_max="^",
-                    lw=1.4,
-                )
-                random_rank_rendered = True
 
             plot_qfim_random_eigcount_threshold_overlay(
                 eigs_by_layer,
@@ -3826,178 +4902,6 @@ def render_qfim_keep01234_core_figures() -> None:
                 marker="s",
                 log_scale=False,
             )
-    if not random_rank_rendered:
-        # Older result directories contain the active threshold rank in the
-        # sensitivity archive even though the full keep01234 spectrum was not
-        # persisted.  Use it so the requested rank figures remain available.
-        random_rank_fallback_path = os.path.join(
-            qfim_results_dir,
-            (
-                "hamiltonian_qfim_normalized_sensitivity_random_points_"
-                f"{keep_key_5}.npz"
-            ),
-        )
-        random_rank_fallback = _load_optional_npz_result(
-            random_rank_fallback_path,
-            description="keep01234 random-point QFIM-rank fallback",
-        )
-        if random_rank_fallback is not None:
-            fallback_layers = _summary_layers_or_none(
-                random_rank_fallback,
-                description="keep01234 random-point QFIM-rank fallback",
-            )
-            if fallback_layers is not None:
-                fallback_rank_by_layer = _load_layer_arrays_from_npz(
-                    random_rank_fallback,
-                    fallback_layers,
-                    "active_rank",
-                    dtype=NP_REAL_DTYPE,
-                )
-                plot_single_qfim_rank_mean_min_max_sem_by_layer(
-                    fallback_rank_by_layer,
-                    {},
-                    fallback_layers,
-                    d_keep=2 ** len(KEEP_WIRES_5),
-                    color_min="C0",
-                    color_mean="C1",
-                    color_max="C2",
-                    label=None,
-                    title=(
-                        "QFIM effective rank mean/minimum/maximum and "
-                        "upper bound "
-                        f"at random points ({keep_label_5})"
-                    ),
-                    outpath=os.path.join(
-                        qfim_rank_random_dir,
-                        (
-                            "qfim_rank_mean_min_upper_bound_random_points_"
-                            "reduced_01234.pdf"
-                        ),
-                    ),
-                )
-
-    rank_history_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_rank_history_optimization_path_{keep_key_5}.npz",
-    )
-    rank_history_result = _load_optional_npz_result(
-        rank_history_path,
-        description=(
-            "keep01234 optimization-path QFIM-rank result; rerun "
-            "DPQC_overparam_qfim.py for complete keep01234 figures"
-        ),
-    )
-
-    def render_rank_history_result(
-        result,
-        *,
-        suffix,
-        description: str,
-    ) -> bool:
-        if result is None:
-            return False
-
-        result_layers = _summary_layers_or_none(
-            result,
-            description=description,
-        )
-        result_sample_iters = _summary_sample_iters_or_none(
-            result,
-            description=description,
-        )
-
-        if result_layers is None or result_sample_iters is None:
-            return False
-
-        result_rank_by_layer = _load_layer_arrays_from_npz(
-            result,
-            result_layers,
-            suffix,
-            dtype=NP_REAL_DTYPE,
-        )
-        if not any(
-            np.asarray(values).size > 0
-            for values in result_rank_by_layer.values()
-        ):
-            return False
-
-        plot_qfim_rank_history_mean_by_layer(
-            result_rank_by_layer,
-            result_layers,
-            result_sample_iters,
-            title=(
-                "Mean QFIM effective rank along optimization path "
-                f"({keep_label_5})"
-            ),
-            outpath=os.path.join(
-                qfim_rank_optimization_path_mean_dir,
-                (
-                    "qfim_rank_mean_history_optimization_path_"
-                    f"{keep_key_5}.pdf"
-                ),
-            ),
-            cmap=cmap,
-        )
-        plot_qfim_rank_history_min_by_layer(
-            result_rank_by_layer,
-            result_layers,
-            result_sample_iters,
-            title=(
-                "Minimum QFIM effective rank along optimization path "
-                f"({keep_label_5})"
-            ),
-            outpath=os.path.join(
-                qfim_rank_optimization_path_min_dir,
-                (
-                    "qfim_rank_min_history_optimization_path_"
-                    f"{keep_key_5}.pdf"
-                ),
-            ),
-            cmap=cmap,
-        )
-        plot_qfim_rank_history_max_by_layer(
-            result_rank_by_layer,
-            result_layers,
-            result_sample_iters,
-            title=(
-                "Maximum QFIM effective rank along optimization path "
-                f"({keep_label_5})"
-            ),
-            outpath=os.path.join(
-                qfim_rank_optimization_path_max_dir,
-                (
-                    "qfim_rank_max_history_optimization_path_"
-                    f"{keep_key_5}.pdf"
-                ),
-            ),
-            cmap=cmap,
-        )
-        return True
-
-    rank_history_rendered = render_rank_history_result(
-        rank_history_result,
-        suffix=None,
-        description="keep01234 optimization-path QFIM-rank result",
-    )
-
-    if not rank_history_rendered:
-        rank_history_fallback_path = os.path.join(
-            qfim_results_dir,
-            (
-                "hamiltonian_qfim_normalized_sensitivity_optimization_path_"
-                f"{keep_key_5}.npz"
-            ),
-        )
-        rank_history_result = _load_optional_npz_result(
-            rank_history_fallback_path,
-            description="keep01234 optimization-path QFIM-rank fallback",
-        )
-        render_rank_history_result(
-            rank_history_result,
-            suffix="active_rank",
-            description="keep01234 optimization-path QFIM-rank fallback",
-        )
-
     eigs_history_path = os.path.join(
         qfim_results_dir,
         f"qfim_eigs_history_optimization_path_{keep_key_5}.npz",
@@ -4195,1514 +5099,8 @@ def render_qfim_keep01234_core_figures() -> None:
 render_qfim_keep01234_core_figures()
 
 
-def _finite_sample_mean_sem(samples):
-    samples = np.asarray(samples, dtype=NP_REAL_DTYPE).reshape(-1)
-    samples = samples[np.isfinite(samples)]
-    n = int(samples.size)
-
-    if n == 0:
-        return NP_REAL_DTYPE(np.nan), NP_REAL_DTYPE(np.nan), 0
-
-    mean = NP_REAL_DTYPE(np.mean(samples))
-    sem = (
-        NP_REAL_DTYPE(np.std(samples, ddof=1) / np.sqrt(n))
-        if n > 1
-        else NP_REAL_DTYPE(0.0)
-    )
-    return mean, sem, n
-
-
-def plot_qfim_threshold_vs_participation_random_points(
-    threshold_rank_by_layer: dict,
-    participation_rank_by_layer: dict,
-    layers,
-    *,
-    state_label: str = keep_label,
-    outpath: str,
-) -> bool:
-    valid_layers = [
-        int(L)
-        for L in layers
-        if int(L) in threshold_rank_by_layer
-        and int(L) in participation_rank_by_layer
-    ]
-
-    if not valid_layers:
-        _warn_skip_new_figure(
-            "random-point summary has no layer containing both "
-            "'threshold_rank' and 'participation_rank'"
-        )
-        return False
-
-    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
-    threshold_stats = [
-        _finite_sample_mean_sem(threshold_rank_by_layer[L])
-        for L in valid_layers
-    ]
-    participation_stats = [
-        _finite_sample_mean_sem(participation_rank_by_layer[L])
-        for L in valid_layers
-    ]
-
-    threshold_mean = np.asarray(
-        [item[0] for item in threshold_stats],
-        dtype=NP_REAL_DTYPE,
-    )
-    threshold_sem = np.asarray(
-        [item[1] for item in threshold_stats],
-        dtype=NP_REAL_DTYPE,
-    )
-    participation_mean = np.asarray(
-        [item[0] for item in participation_stats],
-        dtype=NP_REAL_DTYPE,
-    )
-    participation_sem = np.asarray(
-        [item[1] for item in participation_stats],
-        dtype=NP_REAL_DTYPE,
-    )
-
-    fig, ax = new_fig_ax(outside_legend=False)
-
-    for means, sems, color, marker, label in (
-        (
-            threshold_mean,
-            threshold_sem,
-            "C0",
-            "o",
-            "Threshold rank",
-        ),
-        (
-            participation_mean,
-            participation_sem,
-            "C1",
-            "s",
-            "Participation rank",
-        ),
-    ):
-        finite = np.isfinite(means) & np.isfinite(sems)
-        if not np.any(finite):
-            continue
-
-        ax.errorbar(
-            x[finite],
-            means[finite],
-            yerr=sems[finite],
-            marker=marker,
-            linestyle="-",
-            linewidth=1.2,
-            markersize=5.5,
-            capsize=3.0,
-            elinewidth=0.8,
-            color=color,
-            label=label,
-        )
-
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel("QFIM effective dimension")
-    ax.set_title(
-        rf"Threshold and participation QFIM ranks at random points "
-        rf"({state_label})"
-    )
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(L) for L in valid_layers])
-    ax.set_ylim(bottom=0.0)
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(loc="best", frameon=True, framealpha=0.9)
-
-    save_fig(fig, ax, outpath, outside_legend=False)
-    return True
-
-
-def _normalize_history_array_for_plot(
-    values,
-    *,
-    layer: int,
-    metric_name: str,
-    num_sample_iters: int,
-):
-    array = np.asarray(values, dtype=NP_REAL_DTYPE)
-
-    if array.ndim == 1:
-        array = array[None, :]
-
-    if array.ndim != 2:
-        _warn_skip_new_figure(
-            f"{metric_name} for L={layer} must have shape "
-            "(num_runs, num_sample_iters); "
-            f"received {array.shape}"
-        )
-        return None
-
-    if array.shape[1] != num_sample_iters and array.shape[0] == num_sample_iters:
-        array = array.T
-
-    if array.shape[1] != num_sample_iters:
-        _warn_skip_new_figure(
-            f"{metric_name} for L={layer} has shape {array.shape}, but "
-            f"sample_iters has length {num_sample_iters}"
-        )
-        return None
-
-    return array
-
-
-def _history_values_span_orders_of_magnitude(
-    history_arrays,
-    *,
-    minimum_ratio: float = 100.0,
-) -> bool:
-    positive_parts = []
-
-    for values in history_arrays:
-        values = np.asarray(values, dtype=NP_REAL_DTYPE)
-        positive = values[np.isfinite(values) & (values > 0.0)]
-        if positive.size:
-            positive_parts.append(positive)
-
-    if not positive_parts:
-        return False
-
-    positive_values = np.concatenate(positive_parts)
-    return bool(
-        np.max(positive_values)
-        / max(float(np.min(positive_values)), np.finfo(NP_REAL_DTYPE).tiny)
-        >= float(minimum_ratio)
-    )
-
-
-def plot_qfim_summary_history_mean_sem(
-    metric_by_layer: dict,
-    layers,
-    sample_iters_for_labels,
-    *,
-    ylabel: str,
-    title: str,
-    outpath: str,
-    metric_name: str,
-    auto_log_scale: bool = False,
-    cmap=None,
-) -> bool:
-    x = np.asarray(
-        sample_iters_for_labels,
-        dtype=NP_REAL_DTYPE,
-    ).reshape(-1)
-    normalized_by_layer = {}
-
-    for L in layers:
-        L_int = int(L)
-        if L_int not in metric_by_layer:
-            continue
-
-        values = _normalize_history_array_for_plot(
-            metric_by_layer[L_int],
-            layer=L_int,
-            metric_name=metric_name,
-            num_sample_iters=int(x.size),
-        )
-        if values is not None:
-            normalized_by_layer[L_int] = values
-
-    valid_layers = [
-        int(L)
-        for L in layers
-        if int(L) in normalized_by_layer
-    ]
-
-    if x.size == 0 or not valid_layers:
-        _warn_skip_new_figure(
-            f"no valid optimization-path arrays for {metric_name}"
-        )
-        return False
-
-    curve_data = []
-    for L in valid_layers:
-        means, sems, counts = _finite_mean_sem_over_runs_by_time(
-            normalized_by_layer[L]
-        )
-        finite = np.isfinite(means) & np.isfinite(sems) & (counts > 0)
-        curve_data.append((L, means, sems, finite))
-
-    if not any(np.any(item[3]) for item in curve_data):
-        _warn_skip_new_figure(
-            f"all optimization-path values are non-finite for {metric_name}"
-        )
-        return False
-
-    log_scale = (
-        _history_values_span_orders_of_magnitude(
-            [normalized_by_layer[L] for L in valid_layers]
-        )
-        if auto_log_scale
-        else False
-    )
-
-    cmap = matplotlib.colormaps.get_cmap("viridis") if cmap is None else cmap
-    fig, ax = new_fig_ax(outside_legend=True, legend_space_frac=0.22)
-    n_layers = len(valid_layers)
-
-    for layer_idx, (L, means, sems, finite) in enumerate(curve_data):
-        if log_scale:
-            finite = finite & (means > 0.0)
-
-        if not np.any(finite):
-            continue
-
-        color = cmap(layer_idx / max(n_layers - 1, 1))
-
-        if log_scale:
-            lower = np.maximum(
-                means[finite] - sems[finite],
-                np.finfo(NP_REAL_DTYPE).tiny,
-            )
-            upper = means[finite] + sems[finite]
-
-            ax.plot(
-                x[finite],
-                means[finite],
-                marker="o",
-                linestyle="-",
-                linewidth=1.2,
-                markersize=4.5,
-                color=color,
-                label=f"L={L}",
-            )
-            ax.fill_between(
-                x[finite],
-                lower,
-                upper,
-                color=color,
-                alpha=0.18,
-                linewidth=0.0,
-            )
-        else:
-            ax.errorbar(
-                x[finite],
-                means[finite],
-                yerr=sems[finite],
-                marker="o",
-                linestyle="-",
-                linewidth=1.2,
-                markersize=4.5,
-                capsize=3.0,
-                elinewidth=0.8,
-                color=color,
-                label=f"L={L}",
-            )
-
-    ax.set_xlabel("Iterations")
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.set_xticks(x)
-    ax.set_xticklabels(
-        [str(int(iteration)) for iteration in x],
-        rotation=45,
-        ha="right",
-    )
-
-    if log_scale:
-        ax.set_yscale("log")
-        ax.grid(True, which="both", axis="y", alpha=0.3)
-    else:
-        ax.grid(True, axis="y", alpha=0.3)
-
-    ax.legend(
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.00),
-        borderaxespad=0.0,
-        frameon=True,
-        framealpha=0.9,
-    )
-    save_fig(
-        fig,
-        ax,
-        outpath,
-        outside_legend=True,
-        legend_space_frac=0.22,
-    )
-    return True
-
-
-def _alignment_table_mean_sem_by_eig_index(
-    eig_indices,
-    values,
-    row_mask,
-):
-    eig_indices = np.asarray(eig_indices, dtype=NP_INT_DTYPE)
-    values = np.asarray(values, dtype=NP_REAL_DTYPE)
-    row_mask = np.asarray(row_mask, dtype=bool)
-    indices = np.unique(eig_indices[row_mask])
-    indices = np.sort(indices)
-
-    means = np.full(indices.size, np.nan, dtype=NP_REAL_DTYPE)
-    sems = np.full(indices.size, np.nan, dtype=NP_REAL_DTYPE)
-    counts = np.zeros(indices.size, dtype=NP_INT_DTYPE)
-
-    for index_position, eig_index in enumerate(indices):
-        index_values = values[row_mask & (eig_indices == eig_index)]
-        mean, sem, count = _finite_sample_mean_sem(index_values)
-        means[index_position] = mean
-        sems[index_position] = sem
-        counts[index_position] = count
-
-    return indices, means, sems, counts
-
-
-def plot_qfim_vs_gradient_cumulative_table(
-    table: dict,
-    *,
-    layer: int,
-    iteration: int,
-    outpath: str,
-    source_path: str,
-    state_label: str = keep_label,
-) -> bool:
-    required_keys = (
-        "eig_index",
-        "cumulative_lambda_fraction",
-        "cumulative_gradient_weight",
-    )
-    missing_keys = [key for key in required_keys if key not in table]
-
-    if missing_keys:
-        _warn_skip_new_figure(
-            f"cumulative alignment table {source_path} is missing keys "
-            f"{missing_keys}"
-        )
-        return False
-
-    eig_indices = np.asarray(table["eig_index"], dtype=NP_INT_DTYPE).reshape(-1)
-    cumulative_lambda = np.asarray(
-        table["cumulative_lambda_fraction"],
-        dtype=NP_REAL_DTYPE,
-    ).reshape(-1)
-    cumulative_gradient = np.asarray(
-        table["cumulative_gradient_weight"],
-        dtype=NP_REAL_DTYPE,
-    ).reshape(-1)
-
-    if not (
-        eig_indices.size
-        == cumulative_lambda.size
-        == cumulative_gradient.size
-    ):
-        _warn_skip_new_figure(
-            f"cumulative alignment arrays in {source_path} have "
-            "inconsistent lengths"
-        )
-        return False
-
-    row_mask = np.ones(eig_indices.size, dtype=bool)
-
-    if "layer" in table:
-        table_layers = np.asarray(table["layer"], dtype=NP_INT_DTYPE).reshape(-1)
-        if table_layers.size != row_mask.size:
-            _warn_skip_new_figure(
-                f"'layer' has an inconsistent length in {source_path}"
-            )
-            return False
-        row_mask &= table_layers == int(layer)
-
-    if "iteration" in table:
-        table_iterations = np.asarray(
-            table["iteration"],
-            dtype=NP_INT_DTYPE,
-        ).reshape(-1)
-        if table_iterations.size != row_mask.size:
-            _warn_skip_new_figure(
-                f"'iteration' has an inconsistent length in {source_path}"
-            )
-            return False
-        row_mask &= table_iterations == int(iteration)
-
-    if not np.any(row_mask):
-        return False
-
-    (
-        indices_lambda,
-        lambda_means,
-        lambda_sems,
-        lambda_counts,
-    ) = _alignment_table_mean_sem_by_eig_index(
-        eig_indices,
-        cumulative_lambda,
-        row_mask,
-    )
-    (
-        indices_gradient,
-        gradient_means,
-        gradient_sems,
-        gradient_counts,
-    ) = _alignment_table_mean_sem_by_eig_index(
-        eig_indices,
-        cumulative_gradient,
-        row_mask,
-    )
-
-    lambda_finite = np.isfinite(lambda_means) & (lambda_counts > 0)
-    gradient_finite = np.isfinite(gradient_means) & (gradient_counts > 0)
-
-    if not np.any(lambda_finite) and not np.any(gradient_finite):
-        _warn_skip_new_figure(
-            f"cumulative alignment table {source_path} has no finite "
-            f"data for L={layer}, iteration={iteration}"
-        )
-        return False
-
-    fig, ax = new_fig_ax(outside_legend=False)
-
-    for indices, means, sems, finite, color, label in (
-        (
-            indices_lambda,
-            lambda_means,
-            lambda_sems,
-            lambda_finite,
-            "C0",
-            "Cumulative QFIM eigenvalue fraction",
-        ),
-        (
-            indices_gradient,
-            gradient_means,
-            gradient_sems,
-            gradient_finite,
-            "C1",
-            "Cumulative gradient weight",
-        ),
-    ):
-        if not np.any(finite):
-            continue
-
-        lower = np.clip(means[finite] - sems[finite], 0.0, 1.0)
-        upper = np.clip(means[finite] + sems[finite], 0.0, 1.0)
-
-        ax.plot(
-            indices[finite],
-            means[finite],
-            marker="o",
-            linestyle="-",
-            linewidth=1.2,
-            markersize=3.5,
-            color=color,
-            label=label,
-        )
-        ax.fill_between(
-            indices[finite],
-            lower,
-            upper,
-            color=color,
-            alpha=0.18,
-            linewidth=0.0,
-        )
-
-    ax.set_xlabel("Eigenvalue index")
-    ax.set_ylabel("Cumulative fraction")
-    ax.set_title(
-        rf"Cumulative QFIM and gradient concentration, "
-        rf"L={int(layer)}, iteration {int(iteration)} ({state_label})"
-    )
-    ax.set_ylim(-0.02, 1.02)
-    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax.grid(True, axis="both", alpha=0.3)
-    ax.legend(loc="best", frameon=True, framealpha=0.9)
-
-    save_fig(fig, ax, outpath, outside_legend=False)
-    return True
-
-
-def _load_alignment_table_for_cumulative_figure(
-    *,
-    layer: int,
-    iteration: int,
-    final_iteration: int,
-    cache: dict,
-    result_key: str = keep_key,
-):
-    alignment_figure_dir, alignment_result_dir = (
-        qfim_grad_alignment_dirs_for_key(result_key)
-    )
-    alignment_roots = (alignment_result_dir, alignment_figure_dir)
-    iter_tag = f"iter{int(iteration):06d}"
-    exact_candidates = [
-        os.path.join(
-            root,
-            f"L{int(layer)}",
-            (
-                f"qfim_grad_alignment_scatter_data_L{int(layer)}_"
-                f"{iter_tag}.npz"
-            ),
-        )
-        for root in alignment_roots
-    ]
-
-    aggregate_candidates = []
-    for root in alignment_roots:
-        aggregate_candidates.append(
-            os.path.join(
-                root,
-                f"qfim_grad_alignment_scatter_data_L{int(layer)}_all_times.npz",
-            )
-        )
-        if int(iteration) == int(final_iteration):
-            aggregate_candidates.append(
-                os.path.join(
-                    root,
-                    (
-                        f"qfim_grad_alignment_scatter_data_L{int(layer)}_"
-                        "final_iter.npz"
-                    ),
-                )
-            )
-
-    for candidate in exact_candidates + aggregate_candidates:
-        if not os.path.exists(candidate):
-            continue
-
-        if candidate not in cache:
-            try:
-                cache[candidate] = load_npz_result(candidate)
-            except (OSError, ValueError, KeyError) as exc:
-                _warn_skip_new_figure(
-                    f"could not load alignment table {candidate}: {exc}"
-                )
-                cache[candidate] = None
-
-        table = cache[candidate]
-        if table is None:
-            continue
-
-        is_exact_iteration_file = candidate in exact_candidates
-        if is_exact_iteration_file:
-            return table, candidate
-
-        if "iteration" not in table:
-            continue
-
-        table_iterations = np.asarray(
-            table["iteration"],
-            dtype=NP_INT_DTYPE,
-        ).reshape(-1)
-        if np.any(table_iterations == int(iteration)):
-            return table, candidate
-
-    return None, None
-
-
-def render_qfim_spectral_effective_rank_figures(
-    result_key: str = keep_key,
-    state_label: str = keep_label,
-    *,
-    include_cumulative_alignment: bool = True,
-) -> None:
-    random_summary_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_effective_rank_random_points_{result_key}.npz",
-    )
-    random_summary = _load_optional_npz_result(
-        random_summary_path,
-        description="random-point effective-rank summary",
-    )
-
-    if random_summary is not None:
-        random_layers = _summary_layers_or_none(
-            random_summary,
-            description="random-point effective-rank summary",
-        )
-        if random_layers is not None:
-            threshold_rank_by_layer = _load_layer_arrays_from_npz(
-                random_summary,
-                random_layers,
-                "threshold_rank",
-                dtype=NP_REAL_DTYPE,
-            )
-            participation_rank_by_layer = _load_layer_arrays_from_npz(
-                random_summary,
-                random_layers,
-                "participation_rank",
-                dtype=NP_REAL_DTYPE,
-            )
-            plot_qfim_threshold_vs_participation_random_points(
-                threshold_rank_by_layer,
-                participation_rank_by_layer,
-                random_layers,
-                state_label=state_label,
-                outpath=os.path.join(
-                    qfim_effective_rank_fig_dir,
-                    (
-                        "qfim_threshold_vs_participation_rank_"
-                        f"random_points_{result_key}.pdf"
-                    ),
-                ),
-            )
-
-    path_summary_path = os.path.join(
-        qfim_results_dir,
-        (
-            "qfim_spectral_gradient_summary_optimization_path_"
-            f"{result_key}.npz"
-        ),
-    )
-    path_summary = _load_optional_npz_result(
-        path_summary_path,
-        description="optimization-path spectral-gradient summary",
-    )
-
-    cumulative_layers = [int(L) for L in vqe_layer_list]
-    cumulative_sample_iters = np.asarray(sample_iters, dtype=NP_INT_DTYPE)
-
-    if path_summary is not None:
-        path_layers = _summary_layers_or_none(
-            path_summary,
-            description="optimization-path spectral-gradient summary",
-        )
-
-        if "sample_iters" not in path_summary:
-            _warn_skip_new_figure(
-                "optimization-path spectral-gradient summary has no "
-                "'sample_iters' key"
-            )
-            path_sample_iters = None
-        else:
-            path_sample_iters = np.asarray(
-                path_summary["sample_iters"],
-                dtype=NP_INT_DTYPE,
-            ).reshape(-1)
-            if path_sample_iters.size == 0:
-                _warn_skip_new_figure(
-                    "optimization-path spectral-gradient summary has an "
-                    "empty 'sample_iters' array"
-                )
-                path_sample_iters = None
-
-        if path_layers is not None:
-            cumulative_layers = path_layers
-        if path_sample_iters is not None:
-            cumulative_sample_iters = path_sample_iters
-
-        if path_layers is not None and path_sample_iters is not None:
-            history_figure_specs = (
-                (
-                    "participation_rank",
-                    r"QFIM participation rank $r_{\mathrm{part}}(F)$",
-                    rf"QFIM participation rank along optimization path "
-                    rf"({state_label})",
-                    os.path.join(
-                        qfim_effective_rank_fig_dir,
-                        f"qfim_participation_rank_history_{result_key}.pdf",
-                    ),
-                    "QFIM participation rank",
-                    False,
-                ),
-                (
-                    "gradient_participation_rank",
-                    r"Gradient participation rank $r_{\mathrm{grad}}$",
-                    rf"Gradient participation rank in the QFIM eigenbasis "
-                    rf"({state_label})",
-                    os.path.join(
-                        qfim_spectral_gradient_fig_dir,
-                        f"gradient_participation_rank_history_{result_key}.pdf",
-                    ),
-                    "gradient participation rank",
-                    False,
-                ),
-                (
-                    "gradient_weighted_qfim_eigenvalue",
-                    r"Gradient-weighted QFIM eigenvalue $\overline{\lambda}_g$",
-                    rf"Gradient-weighted QFIM eigenvalue along optimization "
-                    rf"path ({state_label})",
-                    os.path.join(
-                        qfim_spectral_gradient_fig_dir,
-                        (
-                            "gradient_weighted_qfim_eigenvalue_history_"
-                            f"{result_key}.pdf"
-                        ),
-                    ),
-                    "gradient-weighted QFIM eigenvalue",
-                    True,
-                ),
-            )
-
-            for (
-                suffix,
-                ylabel,
-                title,
-                outpath,
-                metric_name,
-                auto_log_scale,
-            ) in history_figure_specs:
-                metric_by_layer = _load_layer_arrays_from_npz(
-                    path_summary,
-                    path_layers,
-                    suffix,
-                    dtype=NP_REAL_DTYPE,
-                )
-                plot_qfim_summary_history_mean_sem(
-                    metric_by_layer,
-                    path_layers,
-                    path_sample_iters,
-                    ylabel=ylabel,
-                    title=title,
-                    outpath=outpath,
-                    metric_name=metric_name,
-                    auto_log_scale=auto_log_scale,
-                    cmap=cmap,
-                )
-
-    if not include_cumulative_alignment:
-        return
-
-    if cumulative_sample_iters.size == 0 or not cumulative_layers:
-        _warn_skip_new_figure(
-            "no layers or sampled iterations are available for cumulative "
-            "QFIM-gradient figures"
-        )
-        return
-
-    alignment_cache = {}
-    missing_alignment_tables = 0
-    rendered_cumulative_figures = 0
-    final_iteration = int(cumulative_sample_iters[-1])
-    cumulative_output_dir = (
-        qfim_cumulative_alignment_fig_dir
-        if result_key == keep_key
-        else os.path.join(qfim_cumulative_alignment_fig_dir, result_key)
-    )
-    os.makedirs(cumulative_output_dir, exist_ok=True)
-
-    for L in cumulative_layers:
-        for iteration in cumulative_sample_iters:
-            table, source_path = _load_alignment_table_for_cumulative_figure(
-                layer=int(L),
-                iteration=int(iteration),
-                final_iteration=final_iteration,
-                cache=alignment_cache,
-                result_key=result_key,
-            )
-            if table is None:
-                missing_alignment_tables += 1
-                continue
-
-            rendered = plot_qfim_vs_gradient_cumulative_table(
-                table,
-                layer=int(L),
-                iteration=int(iteration),
-                source_path=source_path,
-                state_label=state_label,
-                outpath=os.path.join(
-                    cumulative_output_dir,
-                    (
-                        f"qfim_vs_gradient_cumulative_L{int(L)}_"
-                        f"iter{int(iteration)}.pdf"
-                    ),
-                ),
-            )
-            rendered_cumulative_figures += int(rendered)
-
-    if missing_alignment_tables:
-        _warn_skip_new_figure(
-            f"{missing_alignment_tables} cumulative alignment table(s) "
-            "were not found; those figures were skipped"
-        )
-    elif rendered_cumulative_figures == 0:
-        _warn_skip_new_figure(
-            "alignment tables were found, but none contained usable "
-            "cumulative QFIM-gradient data"
-        )
-
-
-render_qfim_spectral_effective_rank_figures()
-render_qfim_spectral_effective_rank_figures(
-    keep_key_5,
-    keep_label_5,
-    include_cumulative_alignment=True,
-)
-
-# ============================================================
-
-# ============================================================
-# Hamiltonian-direction QFIM-normalized sensitivity
-# ============================================================
-# The compute entry point stores the threshold-regularized
-# chi_H^(tau)(theta) = g(theta)^T F_tau(theta)^+ g(theta) for random points
-# and for every run/sampled optimization time.  Individual finite values are
-# shown faintly so the aggregation represented by each error bar is visible.
-hamiltonian_qfim_sensitivity_fig_dir = os.path.join(
-    qfim_fig_dir,
-    "hamiltonian_qfim_normalized_sensitivity",
-)
-os.makedirs(hamiltonian_qfim_sensitivity_fig_dir, exist_ok=True)
-
-
-def plot_hamiltonian_qfim_sensitivity_final_by_layer(
-    chi_by_layer: dict,
-    layers,
-    *,
-    final_iteration: int,
-    qfim_threshold: float,
-    state_label: str,
-    outpath: str,
-) -> bool:
-    valid_layers = []
-    samples_by_layer = {}
-
-    for L in layers:
-        L = int(L)
-        if L not in chi_by_layer:
-            continue
-
-        chi_history = np.asarray(
-            chi_by_layer[L],
-            dtype=NP_REAL_DTYPE,
-        )
-        if chi_history.ndim != 2 or chi_history.shape[1] == 0:
-            _warn_skip_new_figure(
-                f"Hamiltonian-QFIM sensitivity for L={L} must have shape "
-                f"(runs, sampled times), got {chi_history.shape}"
-            )
-            continue
-
-        final_samples = chi_history[:, -1].reshape(-1)
-        final_samples = final_samples[np.isfinite(final_samples)]
-        if final_samples.size == 0:
-            _warn_skip_new_figure(
-                f"Hamiltonian-QFIM sensitivity for L={L} has no finite "
-                "run values at the final sampled iteration"
-            )
-            continue
-
-        valid_layers.append(L)
-        samples_by_layer[L] = final_samples
-
-    if not valid_layers:
-        _warn_skip_new_figure(
-            "Hamiltonian-QFIM sensitivity archive has no usable layer data"
-        )
-        return False
-
-    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
-    stats = [
-        _finite_sample_mean_sem(samples_by_layer[L])
-        for L in valid_layers
-    ]
-    means = np.asarray([item[0] for item in stats], dtype=NP_REAL_DTYPE)
-    sems = np.asarray([item[1] for item in stats], dtype=NP_REAL_DTYPE)
-
-    fig, ax = new_fig_ax(outside_legend=False)
-
-    for L in valid_layers:
-        samples = samples_by_layer[L]
-        ax.scatter(
-            np.full(samples.shape, float(L), dtype=NP_REAL_DTYPE),
-            samples,
-            color="C0",
-            s=18.0,
-            alpha=0.25,
-            edgecolors="none",
-            zorder=2,
-        )
-
-    ax.errorbar(
-        x,
-        means,
-        yerr=sems,
-        color="C0",
-        marker="o",
-        linestyle="-",
-        linewidth=1.5,
-        markersize=5.0,
-        capsize=3.0,
-        label=(
-            rf"Run mean $\pm$ SEM; {state_label}; "
-            rf"$\tau_F={_threshold_tex(qfim_threshold)}$"
-        ),
-        zorder=3,
-    )
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(
-        r"$\chi_H^{(\tau_F)}="
-        r"\boldsymbol{g}^{\mathsf{T}}F_{\tau_F}^{+}\boldsymbol{g}$"
-    )
-    ax.set_title(
-        "Hamiltonian-direction QFIM-normalized sensitivity\n"
-        f"final sampled iteration {int(final_iteration)}, "
-        rf"$\tau_F={_threshold_tex(qfim_threshold)}$ ({state_label})"
-    )
-    ax.set_xticks(x)
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.set_ylim(bottom=0.0)
-    ax.legend(loc="best")
-
-    save_fig(fig, ax, outpath, outside_legend=False)
-    return True
-
-
-def plot_hamiltonian_qfim_sensitivity_random_by_layer(
-    chi_by_layer: dict,
-    layers,
-    *,
-    qfim_threshold: float,
-    state_label: str,
-    outpath: str,
-) -> bool:
-    valid_layers = []
-    samples_by_layer = {}
-
-    for L in layers:
-        L = int(L)
-        if L not in chi_by_layer:
-            continue
-
-        samples = np.asarray(
-            chi_by_layer[L],
-            dtype=NP_REAL_DTYPE,
-        )
-        if samples.ndim != 1:
-            _warn_skip_new_figure(
-                f"random-point Hamiltonian-QFIM sensitivity for L={L} "
-                f"must have shape (samples,), got {samples.shape}"
-            )
-            continue
-
-        samples = samples[np.isfinite(samples)]
-        if samples.size == 0:
-            _warn_skip_new_figure(
-                f"random-point Hamiltonian-QFIM sensitivity for L={L} "
-                "has no finite sample values"
-            )
-            continue
-
-        valid_layers.append(L)
-        samples_by_layer[L] = samples
-
-    if not valid_layers:
-        _warn_skip_new_figure(
-            "random-point Hamiltonian-QFIM sensitivity archive has no "
-            "usable layer data"
-        )
-        return False
-
-    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
-    stats = [
-        _finite_sample_mean_sem(samples_by_layer[L])
-        for L in valid_layers
-    ]
-    means = np.asarray([item[0] for item in stats], dtype=NP_REAL_DTYPE)
-    sems = np.asarray([item[1] for item in stats], dtype=NP_REAL_DTYPE)
-
-    fig, ax = new_fig_ax(outside_legend=False)
-
-    for L in valid_layers:
-        samples = samples_by_layer[L]
-        ax.scatter(
-            np.full(samples.shape, float(L), dtype=NP_REAL_DTYPE),
-            samples,
-            color="C0",
-            s=18.0,
-            alpha=0.25,
-            edgecolors="none",
-            zorder=2,
-        )
-
-    ax.errorbar(
-        x,
-        means,
-        yerr=sems,
-        color="C0",
-        marker="o",
-        linestyle="-",
-        linewidth=1.5,
-        markersize=5.0,
-        capsize=3.0,
-        label=(
-            rf"Sample mean $\pm$ SEM; {state_label}; "
-            rf"$\tau_F={_threshold_tex(qfim_threshold)}$"
-        ),
-        zorder=3,
-    )
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(
-        r"$\chi_H^{(\tau_F)}="
-        r"\boldsymbol{g}^{\mathsf{T}}F_{\tau_F}^{+}\boldsymbol{g}$"
-    )
-    ax.set_title(
-        "Hamiltonian-direction QFIM-normalized sensitivity\n"
-        "random parameter points, "
-        rf"$\tau_F={_threshold_tex(qfim_threshold)}$ ({state_label})"
-    )
-    ax.set_xticks(x)
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.set_ylim(bottom=0.0)
-    ax.legend(loc="best")
-
-    save_fig(fig, ax, outpath, outside_legend=False)
-    return True
-
-
-def render_hamiltonian_qfim_sensitivity_figure(
-    *,
-    keep_key: str,
-    state_label: str,
-) -> None:
-    description = (
-        "Hamiltonian-direction QFIM-normalized sensitivity "
-        f"for {state_label} [{keep_key}]"
-    )
-    result_path = os.path.join(
-        qfim_results_dir,
-        (
-            "hamiltonian_qfim_normalized_sensitivity_optimization_path_"
-            f"{keep_key}.npz"
-        ),
-    )
-    result = _load_optional_npz_result(
-        result_path,
-        description=description,
-    )
-    if result is None:
-        return
-
-    layers = _summary_layers_or_none(
-        result,
-        description=description,
-    )
-    if layers is None:
-        return
-
-    if "sample_iters" not in result:
-        _warn_skip_new_figure(
-            "Hamiltonian-QFIM sensitivity archive has no 'sample_iters' key"
-        )
-        return
-
-    result_sample_iters = np.asarray(
-        result["sample_iters"],
-        dtype=NP_INT_DTYPE,
-    ).reshape(-1)
-    if result_sample_iters.size == 0:
-        _warn_skip_new_figure(
-            "Hamiltonian-QFIM sensitivity archive has an empty "
-            "'sample_iters' array"
-        )
-        return
-
-    if "qfim_eigenvalue_threshold" not in result:
-        _warn_skip_new_figure(
-            "Hamiltonian-QFIM sensitivity archive has no "
-            "'qfim_eigenvalue_threshold' key"
-        )
-        return
-
-    threshold_values = np.asarray(
-        result["qfim_eigenvalue_threshold"],
-        dtype=NP_REAL_DTYPE,
-    ).reshape(-1)
-    if (
-        threshold_values.size != 1
-        or not np.isfinite(threshold_values[0])
-        or threshold_values[0] <= 0.0
-    ):
-        _warn_skip_new_figure(
-            "Hamiltonian-QFIM sensitivity archive has an invalid "
-            "'qfim_eigenvalue_threshold' value"
-        )
-        return
-    qfim_threshold = float(threshold_values[0])
-
-    chi_by_layer = _load_layer_arrays_from_npz(
-        result,
-        layers,
-        "chi_hamiltonian",
-        dtype=NP_REAL_DTYPE,
-    )
-    if not chi_by_layer:
-        _warn_skip_new_figure(
-            "Hamiltonian-QFIM sensitivity archive has no "
-            "'L{layer}_chi_hamiltonian' arrays"
-        )
-        return
-
-    expected_times = int(result_sample_iters.size)
-    shape_valid_chi_by_layer = {}
-    for L, values in chi_by_layer.items():
-        values = np.asarray(values, dtype=NP_REAL_DTYPE)
-        if values.ndim != 2 or values.shape[1] != expected_times:
-            _warn_skip_new_figure(
-                f"Hamiltonian-QFIM sensitivity for L={int(L)} has shape "
-                f"{values.shape}; expected (runs, {expected_times})"
-            )
-            continue
-        shape_valid_chi_by_layer[int(L)] = values
-
-    plot_hamiltonian_qfim_sensitivity_final_by_layer(
-        shape_valid_chi_by_layer,
-        layers,
-        final_iteration=int(result_sample_iters[-1]),
-        qfim_threshold=qfim_threshold,
-        state_label=state_label,
-        outpath=os.path.join(
-            hamiltonian_qfim_sensitivity_fig_dir,
-            (
-                "hamiltonian_qfim_normalized_sensitivity_"
-                "final_sampled_iteration_"
-                f"{keep_key}.pdf"
-            ),
-        ),
-    )
-
-
-def render_hamiltonian_qfim_sensitivity_random_figure(
-    *,
-    keep_key: str,
-    state_label: str,
-) -> None:
-    description = (
-        "random-point Hamiltonian-direction QFIM-normalized sensitivity "
-        f"for {state_label} [{keep_key}]"
-    )
-    result_path = os.path.join(
-        qfim_results_dir,
-        (
-            "hamiltonian_qfim_normalized_sensitivity_random_points_"
-            f"{keep_key}.npz"
-        ),
-    )
-    result = _load_optional_npz_result(
-        result_path,
-        description=description,
-    )
-    if result is None:
-        return
-
-    layers = _summary_layers_or_none(
-        result,
-        description=description,
-    )
-    if layers is None:
-        return
-
-    if "qfim_eigenvalue_threshold" not in result:
-        _warn_skip_new_figure(
-            "random-point Hamiltonian-QFIM sensitivity archive has no "
-            "'qfim_eigenvalue_threshold' key"
-        )
-        return
-
-    if "num_qfim_samples" not in result:
-        _warn_skip_new_figure(
-            "random-point Hamiltonian-QFIM sensitivity archive has no "
-            "'num_qfim_samples' key"
-        )
-        return
-
-    sample_count_values = np.asarray(
-        result["num_qfim_samples"],
-        dtype=NP_REAL_DTYPE,
-    ).reshape(-1)
-    if (
-        sample_count_values.size != 1
-        or not np.isfinite(sample_count_values[0])
-        or sample_count_values[0] <= 0
-        or float(sample_count_values[0]) != int(sample_count_values[0])
-    ):
-        _warn_skip_new_figure(
-            "random-point Hamiltonian-QFIM sensitivity archive has an "
-            "invalid 'num_qfim_samples' value"
-        )
-        return
-    expected_samples = int(sample_count_values[0])
-
-    threshold_values = np.asarray(
-        result["qfim_eigenvalue_threshold"],
-        dtype=NP_REAL_DTYPE,
-    ).reshape(-1)
-    if (
-        threshold_values.size != 1
-        or not np.isfinite(threshold_values[0])
-        or threshold_values[0] <= 0.0
-    ):
-        _warn_skip_new_figure(
-            "random-point Hamiltonian-QFIM sensitivity archive has an "
-            "invalid 'qfim_eigenvalue_threshold' value"
-        )
-        return
-    qfim_threshold = float(threshold_values[0])
-
-    chi_by_layer = _load_layer_arrays_from_npz(
-        result,
-        layers,
-        "chi_hamiltonian",
-        dtype=NP_REAL_DTYPE,
-    )
-    if not chi_by_layer:
-        _warn_skip_new_figure(
-            "random-point Hamiltonian-QFIM sensitivity archive has no "
-            "'L{layer}_chi_hamiltonian' arrays"
-        )
-        return
-
-    shape_valid_chi_by_layer = {}
-    for L, values in chi_by_layer.items():
-        values = np.asarray(values, dtype=NP_REAL_DTYPE)
-        if values.shape != (expected_samples,):
-            _warn_skip_new_figure(
-                f"random-point Hamiltonian-QFIM sensitivity for L={int(L)} "
-                f"has shape {values.shape}; expected ({expected_samples},)"
-            )
-            continue
-        shape_valid_chi_by_layer[int(L)] = values
-
-    plot_hamiltonian_qfim_sensitivity_random_by_layer(
-        shape_valid_chi_by_layer,
-        layers,
-        qfim_threshold=qfim_threshold,
-        state_label=state_label,
-        outpath=os.path.join(
-            hamiltonian_qfim_sensitivity_fig_dir,
-            (
-                "hamiltonian_qfim_normalized_sensitivity_random_points_"
-                f"{keep_key}.pdf"
-            ),
-        ),
-    )
-
-
-HAMILTONIAN_QFIM_SENSITIVITY_STATES = (
-    ("keep0123", "Reduced (0,1,2,3)"),
-    ("keep01234", "Reduced (0,1,2,3,4)"),
-)
-
-for _sensitivity_keep_key, _sensitivity_state_label in (
-    HAMILTONIAN_QFIM_SENSITIVITY_STATES
-):
-    render_hamiltonian_qfim_sensitivity_figure(
-        keep_key=_sensitivity_keep_key,
-        state_label=_sensitivity_state_label,
-    )
-    render_hamiltonian_qfim_sensitivity_random_figure(
-        keep_key=_sensitivity_keep_key,
-        state_label=_sensitivity_state_label,
-    )
-
-# ============================================================
-
-# ============================================================
-# QFIM-gradient alignment figures from saved scatter data
-# ============================================================
-# QFIM eigenvalue vs gradient-direction weight scatter plots
-#   x-axis: QFIM eigenvalue lambda_i
-#   y-axis: w_i^grad = |v_i^T g|^2 / sum_j |v_j^T g|^2
-#
-# This section uses optimization-path samples already stored in
-#   theta_sample_traces_by_layer[L]
-#   grad_sample_traces_by_layer[L]
-# and constructs one scatter plot per available VQE layer.
-#
-# Mathematical meaning of the diagnostic
-# --------------------------------------
-# Fix one optimization point theta and let
-#
-#     L(theta) : loss / energy objective,
-#     g(theta) = grad_theta L(theta),
-#     F(theta) : QFIM at theta.
-#
-# Since the QFIM is Hermitian positive semidefinite, we diagonalize it as
-#
-#     F(theta) v_i = lambda_i v_i,
-#     v_i^dagger v_j = delta_ij,
-#     lambda_i >= 0.
-#
-# The eigenvectors v_i give orthonormal directions in parameter space, while
-# lambda_i measures how strongly an infinitesimal parameter displacement in
-# that direction changes the quantum state. Large lambda_i are geometrically
-# sensitive directions; very small lambda_i are nearly redundant / flat
-# directions of the variational state manifold.
-#
-# The ordinary loss gradient is expanded in this QFIM eigenbasis:
-#
-#     g(theta) = sum_i c_i v_i,
-#     c_i = v_i^dagger g(theta).
-#
-# We then plot the normalized squared component
-#
-#     w_i^grad = |c_i|^2 / sum_j |c_j|^2.
-#
-# Thus w_i^grad is the fraction of the Euclidean gradient norm carried by
-# the i-th QFIM eigen-direction. The weights satisfy sum_i w_i^grad = 1
-# whenever the gradient norm is nonzero.
-#
-# Each scatter point is one eigen-direction at one sampled optimization
-# state: x = lambda_i, y = w_i^grad. If many high-weight points lie at large
-# lambda_i, the loss gradient mainly points along directions that strongly
-# change the quantum state. If high-weight points lie at tiny lambda_i, the
-# gradient is dominated by directions that barely move the represented state,
-# which can indicate overparameterization or geometric redundancy.
-#
-# This is a diagnostic projection of the ordinary gradient onto the QFIM
-# eigenbasis. It is not the natural-gradient update F^{-1} g; no inverse QFIM
-# is applied here. The small positive floors below are only for numerical
-# safety in log-scale visualization.
-# ============================================================
-
-QFIM_GRAD_ALIGN_EIG_FLOOR = 1e-16
-QFIM_GRAD_ALIGN_WEIGHT_FLOOR = 1e-16
-QFIM_GRAD_ALIGN_NORM_EPS = 1e-24
-
-qfim_grad_align_dir = os.path.join(qfim_fig_dir, "qfim_grad_alignment")
-qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "qfim_grad_alignment")
-os.makedirs(qfim_grad_align_dir, exist_ok=True)
-os.makedirs(qfim_grad_align_results_dir, exist_ok=True)
-
-
-# ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# Execution settings for visualization from saved alignment data
-# ------------------------------------------------------------
-RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER = cfg.RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER
-RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES = cfg.RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES
-RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION = cfg.RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION
-
-LOG_X_QFIM_GRAD_ALIGNMENT = cfg.LOG_X_QFIM_GRAD_ALIGNMENT
-LOG_Y_QFIM_GRAD_ALIGNMENT = cfg.LOG_Y_QFIM_GRAD_ALIGNMENT
-if cfg.QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS is None:
-    QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS = tuple(int(t) for t in sample_iters)
-else:
-    QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS = tuple(
-        int(t) for t in cfg.QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS
-    )
-
-def _load_alignment_table_or_none(path: str):
-    if not os.path.exists(path):
-        return None
-    return load_npz_result(path)
-
-def render_saved_qfim_grad_alignment_figures(
-    result_key: str,
-    state_label: str,
-) -> None:
-    alignment_figure_dir, alignment_result_dir = (
-        qfim_grad_alignment_dirs_for_key(result_key)
-    )
-
-    if RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER or RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES:
-        for use_all_times in (False, True):
-            if use_all_times and not RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES:
-                continue
-            if (not use_all_times) and not RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER:
-                continue
-
-            time_tag = "all_times" if use_all_times else "final_iter"
-            title_time = (
-                "all sampled iterations"
-                if use_all_times
-                else f"final iteration {int(sample_iters[-1])}"
-            )
-            color_by = "iteration" if use_all_times else None
-            point_size = 12.0 if use_all_times else 14.0
-            scatter_alpha = 0.40 if use_all_times else 0.45
-
-            table_by_layer = {}
-            for L in vqe_layer_list:
-                path = os.path.join(
-                    alignment_result_dir,
-                    (
-                        "qfim_grad_alignment_scatter_data_"
-                        f"L{int(L)}_{time_tag}.npz"
-                    ),
-                )
-                table = _load_alignment_table_or_none(path)
-                if table is None:
-                    continue
-                table_by_layer[int(L)] = table
-                plot_qfim_grad_alignment_table(
-                    table,
-                    title=(
-                        "QFIM eigenvalue vs gradient weight, "
-                        f"L={int(L)}, {title_time} ({state_label})"
-                    ),
-                    outpath=os.path.join(
-                        alignment_figure_dir,
-                        (
-                            "qfim_grad_weight_scatter_"
-                            f"L{int(L)}_{time_tag}.pdf"
-                        ),
-                    ),
-                    log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-                    log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-                    color_by=color_by,
-                    point_size=point_size,
-                    alpha=scatter_alpha,
-                )
-
-            if table_by_layer:
-                plot_qfim_grad_alignment_layer_overlay(
-                    table_by_layer,
-                    sorted(table_by_layer),
-                    title=(
-                        "QFIM eigenvalue vs gradient weight across layers, "
-                        f"{time_tag.replace('_', ' ')} ({state_label})"
-                    ),
-                    outpath=os.path.join(
-                        alignment_figure_dir,
-                        (
-                            "qfim_grad_weight_scatter_overlay_layers_"
-                            f"{time_tag}.pdf"
-                        ),
-                    ),
-                    log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-                    log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-                    point_size=12.0,
-                    alpha=0.40,
-                )
-
-    if RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION:
-        for L in vqe_layer_list:
-            layer_dir = os.path.join(
-                alignment_figure_dir,
-                f"L{int(L)}",
-            )
-            os.makedirs(layer_dir, exist_ok=True)
-            for iteration in QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS:
-                iteration = int(iteration)
-                iter_tag = f"iter{iteration:06d}"
-                path = os.path.join(
-                    alignment_result_dir,
-                    f"L{int(L)}",
-                    (
-                        "qfim_grad_alignment_scatter_data_"
-                        f"L{int(L)}_{iter_tag}.npz"
-                    ),
-                )
-                table = _load_alignment_table_or_none(path)
-                if table is None:
-                    continue
-                plot_qfim_grad_alignment_table(
-                    table,
-                    title=(
-                        "QFIM eigenvalue vs gradient weight, "
-                        f"L={int(L)}, iteration {iteration} ({state_label})"
-                    ),
-                    outpath=os.path.join(
-                        layer_dir,
-                        (
-                            "qfim_grad_weight_scatter_"
-                            f"L{int(L)}_{iter_tag}.pdf"
-                        ),
-                    ),
-                    log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-                    log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-                    color_by=None,
-                    point_size=14.0,
-                    alpha=0.45,
-                )
-
-
-for _alignment_result_key, _alignment_state_label in (
-    (keep_key, keep_label),
-    (keep_key_5, keep_label_5),
-):
-    render_saved_qfim_grad_alignment_figures(
-        _alignment_result_key,
-        _alignment_state_label,
-    )
+if __name__ == "__main__" and _CLI_ARGS.with_hessian:
+    run_hessian_workflow(_CLI_ARGS)
 
 print(f"Visualized Hamiltonian parameter h: {h_param}")
 print(f"Saved figures to: {save_dir}")

@@ -483,9 +483,9 @@ vqe_layer_list = build_layer_list(
     vqe_sparse_step,
 )
 
-qfim_dense_until_layer = cfg.QFIM_DENSE_UNTIL_LAYER
-qfim_max_layer = cfg.QFIM_MAX_LAYER
-qfim_sparse_step = cfg.QFIM_SPARSE_STEP
+qfim_dense_until_layer = cfg.DPQC_QFIM_DENSE_UNTIL_LAYER
+qfim_max_layer = cfg.DPQC_QFIM_MAX_LAYER
+qfim_sparse_step = cfg.DPQC_QFIM_SPARSE_STEP
 
 qfim_layer_list = build_layer_list(
     qfim_max_layer,
@@ -501,8 +501,8 @@ if RUN_VQE_STAGE and not vqe_layer_list:
 
 if RUN_QFIM_STAGE and not qfim_layer_list:
     raise ValueError(
-        "qfim_layer_list is empty. Check qfim_max_layer, "
-        "qfim_dense_until_layer, and qfim_sparse_step."
+        "qfim_layer_list is empty. Check DPQC_QFIM_MAX_LAYER, "
+        "DPQC_QFIM_DENSE_UNTIL_LAYER, and DPQC_QFIM_SPARSE_STEP."
     )
 
 save_dir = f"./figs/dpqc/h_{h_param}"
