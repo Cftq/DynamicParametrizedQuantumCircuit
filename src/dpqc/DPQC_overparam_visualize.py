@@ -111,9 +111,30 @@ def _parse_cli_args(argv=None):
         default="dpqc",
         help=(
             "Result family below ./figs to load and visualize "
-            "(default: dpqc). Use dpqc_reset for the shared-Rz, "
-            "fixed-Rx(pi) reset model."
+            "(default: dpqc). Use dpqc_reset for the fixed-Rx(pi) "
+            "reset model."
         ),
+    )
+    parser.add_argument(
+        "--skip-optimization-path-qfim",
+        action="store_true",
+        help=(
+            "Do not load or render QFIM diagnostics evaluated along the VQE "
+            "optimization path. Random-point QFIM figures are still rendered."
+        ),
+    )
+    parser.add_argument(
+        "--skip-qfim-eigs-by-index-layers",
+        action="store_true",
+        help=(
+            "Do not render the QFIM eigenvalue-by-index figures that overlay "
+            "all layer counts. Per-layer eigenvalue figures are still rendered."
+        ),
+    )
+    parser.add_argument(
+        "--skip-qfim-trace-figures",
+        action="store_true",
+        help="Do not render any QFIM trace figures.",
     )
     hessian_mode = parser.add_mutually_exclusive_group()
     hessian_mode.add_argument(
@@ -222,6 +243,9 @@ else:
     _CLI_ARGS = argparse.Namespace(
         h_param=float(cfg.H_PARAM),
         output_family="dpqc",
+        skip_optimization_path_qfim=False,
+        skip_qfim_eigs_by_index_layers=False,
+        skip_qfim_trace_figures=False,
     )
 
 h_param = float(_CLI_ARGS.h_param)
@@ -231,6 +255,15 @@ if not math.isfinite(h_param):
 output_family = str(_CLI_ARGS.output_family)
 if output_family not in ("dpqc", "dpqc_reset"):
     raise ValueError(f"Unsupported output family: {output_family!r}.")
+INCLUDE_OPTIMIZATION_PATH_QFIM = not bool(
+    getattr(_CLI_ARGS, "skip_optimization_path_qfim", False)
+)
+INCLUDE_QFIM_EIGS_BY_INDEX_LAYERS = not bool(
+    getattr(_CLI_ARGS, "skip_qfim_eigs_by_index_layers", False)
+)
+INCLUDE_QFIM_TRACE_FIGURES = not bool(
+    getattr(_CLI_ARGS, "skip_qfim_trace_figures", False)
+)
 if output_family == "dpqc_reset" and (
     getattr(_CLI_ARGS, "hessian_only", False)
     or getattr(_CLI_ARGS, "with_hessian", False)
@@ -2509,6 +2542,9 @@ def _validated_success_probability_data(result: dict):
 def _success_probability_threshold_label(threshold: float) -> str:
     """Format the requested decade-spanning tolerances exactly."""
     threshold = float(threshold)
+    if np.isclose(threshold, 1.0, rtol=1e-12, atol=0.0):
+        return r"$\delta=1.0$"
+
     hundredths = int(np.rint(100.0 * threshold))
     if 1 <= hundredths <= 10 and np.isclose(
         threshold,
@@ -2536,6 +2572,7 @@ def plot_success_probability_multiple_tolerances(
     *,
     num_trials: int,
     outpath: str,
+    only_threshold: Optional[float] = None,
 ) -> None:
     """Plot one empirical VQE success-probability curve per tolerance."""
     layers = np.asarray(layers, dtype=NP_INT_DTYPE)
@@ -2544,6 +2581,30 @@ def plot_success_probability_multiple_tolerances(
         success_probabilities,
         dtype=NP_REAL_DTYPE,
     )
+    expected_shape = (layers.size, thresholds.size)
+    if success_probabilities.shape != expected_shape:
+        raise ValueError(
+            "Success-probability array has shape "
+            f"{success_probabilities.shape}; expected {expected_shape}."
+        )
+
+    if only_threshold is not None:
+        requested_threshold = float(only_threshold)
+        matching = np.flatnonzero(
+            np.isclose(
+                thresholds,
+                requested_threshold,
+                rtol=1e-12,
+                atol=0.0,
+            )
+        )
+        if matching.size != 1:
+            raise ValueError(
+                "Expected exactly one success-probability threshold matching "
+                f"{requested_threshold:g}; found {matching.size}."
+            )
+        thresholds = thresholds[matching]
+        success_probabilities = success_probabilities[:, matching]
 
     colors = matplotlib.colormaps.get_cmap("viridis")(
         np.linspace(0.08, 0.92, thresholds.size)
@@ -2572,10 +2633,18 @@ def plot_success_probability_multiple_tolerances(
     ax.set_ylabel(
         r"Empirical success probability $\widehat{S}_L(\delta)$"
     )
-    ax.set_title(
-        "Success probability at multiple accuracy levels "
-        f"({num_trials} independent trials)"
-    )
+    if thresholds.size == 1:
+        title = (
+            "Success probability at "
+            f"{_success_probability_threshold_label(thresholds[0])} "
+            f"({num_trials} independent trials)"
+        )
+    else:
+        title = (
+            "Success probability at multiple accuracy levels "
+            f"({num_trials} independent trials)"
+        )
+    ax.set_title(title)
     ax.set_xticks(layers)
     ax.set_xticklabels([str(int(layer)) for layer in layers])
     ax.set_ylim(0.0, 1.0)
@@ -2595,8 +2664,9 @@ def render_success_probability_multiple_tolerances_figure(
     *,
     result_path: str,
     outpath: str,
+    delta_one_outpath: Optional[str] = None,
 ) -> bool:
-    """Load, validate, and render the optional multiple-accuracy result."""
+    """Load, validate, and render the optional success-probability figures."""
     if not os.path.exists(result_path):
         _warn_skip_success_probability_figure(
             f"result file was not found: {result_path}"
@@ -2646,6 +2716,15 @@ def render_success_probability_multiple_tolerances_figure(
         num_trials=num_trials,
         outpath=outpath,
     )
+    if delta_one_outpath is not None:
+        plot_success_probability_multiple_tolerances(
+            layers,
+            thresholds,
+            success_probabilities,
+            num_trials=num_trials,
+            outpath=delta_one_outpath,
+            only_threshold=1.0,
+        )
     return True
 
 
@@ -2769,9 +2848,7 @@ if output_family == "dpqc_reset":
         )
     with open(reset_metadata_path, "r", encoding="utf-8") as metadata_file:
         reset_metadata = json.load(metadata_file)
-    if reset_metadata.get("model_id") != (
-        "dpqc_reset_shared_rz_fixed_rx_pi"
-    ):
+    if reset_metadata.get("model_id") != "dpqc_reset_fixed_rx_pi":
         raise ValueError(
             "Reset-DPQC metadata has an incompatible model_id: "
             f"{reset_metadata.get('model_id')!r}."
@@ -2820,6 +2897,7 @@ qfim_eigcount_optimization_path_min_dir = os.path.join(
     qfim_eigcount_optimization_path_dir,
     "min",
 )
+qfim_effective_rank_dir = os.path.join(qfim_fig_dir, "effective_rank")
 circuit_dir = os.path.join(save_dir, "optimized_circuits")
 numerical_results_dir = os.path.join(save_dir, "numerical_results")
 energy_results_dir = os.path.join(numerical_results_dir, "energy")
@@ -2870,21 +2948,27 @@ _validate_result_h_param(
 # Create output directories only after confirming that the selected h has a
 # valid VQE archive.  Numerical-result directories are inputs and are never
 # created by the visualization stage.
-for _output_dir in (
+_output_dirs = (
     save_dir,
     energy_fig_dir,
     qfim_fig_dir,
-    qfim_trace_dir,
     qfim_eigs_dir,
     qfim_eigs_dir_red4,
     qfim_eigs_dir_red5,
     qfim_eigcount_dir,
     qfim_eigcount_random_dir,
-    qfim_eigcount_optimization_path_dir,
-    qfim_eigcount_optimization_path_mean_dir,
-    qfim_eigcount_optimization_path_min_dir,
+    qfim_effective_rank_dir,
     circuit_dir,
-):
+)
+if INCLUDE_QFIM_TRACE_FIGURES:
+    _output_dirs += (qfim_trace_dir,)
+if INCLUDE_OPTIMIZATION_PATH_QFIM:
+    _output_dirs += (
+        qfim_eigcount_optimization_path_dir,
+        qfim_eigcount_optimization_path_mean_dir,
+        qfim_eigcount_optimization_path_min_dir,
+    )
+for _output_dir in _output_dirs:
     os.makedirs(_output_dir, exist_ok=True)
 
 vqe_layer_list = [
@@ -3144,6 +3228,10 @@ render_success_probability_multiple_tolerances_figure(
         energy_fig_dir,
         "success_probability_multiple_tolerances.pdf",
     ),
+    delta_one_outpath=os.path.join(
+        energy_fig_dir,
+        "success_probability_delta_1.pdf",
+    ),
 )
 
 fig, ax = new_fig_ax(outside_legend=True)
@@ -3395,10 +3483,11 @@ def plot_qfim_rank_vs_layers_random_points(
     *,
     title: str,
     outpath: str,
-    rank_threshold: float,
+    rank_threshold: Optional[float] = None,
+    ylabel: Optional[str] = None,
     upper_bound: Optional[int] = None,
 ) -> None:
-    """Plot random-point QFIM rank mean, SEM, range, and samples."""
+    """Plot random-point QFIM rank-like samples and their summary."""
     valid_layers = [
         int(L)
         for L in layers
@@ -3483,9 +3572,16 @@ def plot_qfim_rank_vs_layers_random_points(
             label=f"Upper bound ({int(upper_bound)})",
         )
 
-    threshold_label = f"{float(rank_threshold):.0e}"
+    if ylabel is None:
+        if rank_threshold is None:
+            raise ValueError(
+                "rank_threshold is required when ylabel is not supplied."
+            )
+        threshold_label = f"{float(rank_threshold):.0e}"
+        ylabel = f"QFIM rank (eigenvalue >= {threshold_label})"
+
     ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(f"QFIM rank (eigenvalue >= {threshold_label})")
+    ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.set_xticks(x)
     ax.set_xticklabels([str(L) for L in valid_layers])
@@ -3559,16 +3655,17 @@ for L in qfim_layer_list:
     )
 
 
-save_qfim_eigs_by_index_colored_by_layer(
-    qfim_eigs_reduced_0123_by_layer,
-    qfim_layer_list,
-    title=rf"QFIM eigenvalues at {NUM_QFIM_SAMPLES} random points",
-    outpath=os.path.join(
-        qfim_eigs_dir,
-        "qfim_eigs_by_index_layers_reduced_keep_0123.pdf",
-    ),
-    cmap=cmap,
-)
+if INCLUDE_QFIM_EIGS_BY_INDEX_LAYERS:
+    save_qfim_eigs_by_index_colored_by_layer(
+        qfim_eigs_reduced_0123_by_layer,
+        qfim_layer_list,
+        title=rf"QFIM eigenvalues at {NUM_QFIM_SAMPLES} random points",
+        outpath=os.path.join(
+            qfim_eigs_dir,
+            "qfim_eigs_by_index_layers_reduced_keep_0123.pdf",
+        ),
+        cmap=cmap,
+    )
 
 
 def _qfim_threshold_tex_for_label(threshold: float) -> str:
@@ -3865,21 +3962,25 @@ def plot_qfim_trace_max_mean_sem_by_layer(
     save_fig(fig, ax, outpath, outside_legend=False)
 
 
-plot_qfim_trace_max_mean_sem_by_layer(
-    qfim_eigsum_reduced_0123_by_layer,
-    qfim_layer_list,
-    title=rf"QFIM trace maximum and mean $\pm$ SEM at {NUM_QFIM_SAMPLES} random points",
-    outpath=os.path.join(
-        qfim_trace_dir,
-        "qfim_trace_max_mean_sem_random_points_reduced_0123.pdf",
-    ),
-    color_max="C0",
-    color_mean="C1",
-    marker_max="o",
-    marker_mean="s",
-    lw=1.4,
-    log_scale=False,
-)
+if INCLUDE_QFIM_TRACE_FIGURES:
+    plot_qfim_trace_max_mean_sem_by_layer(
+        qfim_eigsum_reduced_0123_by_layer,
+        qfim_layer_list,
+        title=(
+            rf"QFIM trace maximum and mean $\pm$ SEM at "
+            rf"{NUM_QFIM_SAMPLES} random points"
+        ),
+        outpath=os.path.join(
+            qfim_trace_dir,
+            "qfim_trace_max_mean_sem_random_points_reduced_0123.pdf",
+        ),
+        color_max="C0",
+        color_mean="C1",
+        marker_max="o",
+        marker_mean="s",
+        lw=1.4,
+        log_scale=False,
+    )
 
 
 # ============================================================
@@ -3938,6 +4039,8 @@ def plot_qfim_trace_history_mean_by_layer(
     *,
     title: str,
     outpath: str,
+    ylabel: str = "Mean QFIM trace",
+    metric_name: str = "QFIM trace",
     cmap=None,
     log_scale: bool = False,
 ):
@@ -3961,7 +4064,7 @@ def plot_qfim_trace_history_mean_by_layer(
 
         if traces.ndim != 2:
             raise ValueError(
-                "Each QFIM trace history array must be 2D: "
+                f"Each {metric_name} history array must be 2D: "
                 "(num_runs, num_sample_iters)."
             )
 
@@ -3997,7 +4100,7 @@ def plot_qfim_trace_history_mean_by_layer(
         )
 
     ax.set_xlabel("Iterations")
-    ax.set_ylabel("Mean QFIM trace")
+    ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.set_xticks(x)
     ax.set_xticklabels([str(int(t)) for t in x], rotation=45, ha="right")
@@ -4025,55 +4128,67 @@ def plot_qfim_trace_history_mean_by_layer(
     )
 
 
-qfim_eigs_history_result_path = os.path.join(
-    qfim_results_dir,
-    f"qfim_eigs_history_optimization_path_{keep_key}.npz",
-)
+qfim_eigs_history_optimization_path_by_layer = {}
+qfim_trace_history_optimization_path_by_layer = {}
+qfim_trace_history_layer_list = []
 
-qfim_eigs_history_results = load_npz_result(qfim_eigs_history_result_path)
-qfim_eigs_history_optimization_path_by_layer = _load_layer_arrays_from_npz(
-    qfim_eigs_history_results,
-    vqe_layer_list,
-    suffix=None,
-    dtype=NP_REAL_DTYPE,
-)
-
-qfim_trace_history_result_path = os.path.join(
-    qfim_results_dir,
-    f"qfim_trace_history_optimization_path_{keep_key}.npz",
-)
-
-if os.path.exists(qfim_trace_history_result_path):
-    qfim_trace_history_results = load_npz_result(qfim_trace_history_result_path)
-    qfim_trace_history_layer_list = [
-        int(L)
-        for L in np.asarray(qfim_trace_history_results["layers"], dtype=NP_INT_DTYPE)
-    ]
-    qfim_trace_history_optimization_path_by_layer = _load_layer_arrays_from_npz(
-        qfim_trace_history_results,
-        qfim_trace_history_layer_list,
+if INCLUDE_OPTIMIZATION_PATH_QFIM:
+    qfim_eigs_history_result_path = os.path.join(
+        qfim_results_dir,
+        f"qfim_eigs_history_optimization_path_{keep_key}.npz",
+    )
+    qfim_eigs_history_results = load_npz_result(qfim_eigs_history_result_path)
+    qfim_eigs_history_optimization_path_by_layer = _load_layer_arrays_from_npz(
+        qfim_eigs_history_results,
+        vqe_layer_list,
         suffix=None,
         dtype=NP_REAL_DTYPE,
     )
-else:
-    qfim_trace_history_layer_list = list(vqe_layer_list)
-    qfim_trace_history_optimization_path_by_layer = {
-        int(L): np.sum(np.asarray(eigs, dtype=NP_REAL_DTYPE), axis=2)
-        for L, eigs in qfim_eigs_history_optimization_path_by_layer.items()
-    }
 
-plot_qfim_trace_history_mean_by_layer(
-    qfim_trace_history_optimization_path_by_layer,
-    qfim_trace_history_layer_list,
-    sample_iters,
-    title=rf"Mean QFIM trace along optimization path ({keep_label})",
-    outpath=os.path.join(
-        qfim_trace_dir,
-        f"qfim_trace_mean_history_optimization_path_{keep_key}.pdf",
-    ),
-    cmap=cmap,
-    log_scale=False,
-)
+    qfim_trace_history_result_path = os.path.join(
+        qfim_results_dir,
+        f"qfim_trace_history_optimization_path_{keep_key}.npz",
+    )
+    if os.path.exists(qfim_trace_history_result_path):
+        qfim_trace_history_results = load_npz_result(
+            qfim_trace_history_result_path
+        )
+        qfim_trace_history_layer_list = [
+            int(L)
+            for L in np.asarray(
+                qfim_trace_history_results["layers"],
+                dtype=NP_INT_DTYPE,
+            )
+        ]
+        qfim_trace_history_optimization_path_by_layer = (
+            _load_layer_arrays_from_npz(
+                qfim_trace_history_results,
+                qfim_trace_history_layer_list,
+                suffix=None,
+                dtype=NP_REAL_DTYPE,
+            )
+        )
+    else:
+        qfim_trace_history_layer_list = list(vqe_layer_list)
+        qfim_trace_history_optimization_path_by_layer = {
+            int(L): np.sum(np.asarray(eigs, dtype=NP_REAL_DTYPE), axis=2)
+            for L, eigs
+            in qfim_eigs_history_optimization_path_by_layer.items()
+        }
+
+    if INCLUDE_QFIM_TRACE_FIGURES:
+        plot_qfim_trace_history_mean_by_layer(
+            qfim_trace_history_optimization_path_by_layer,
+            qfim_trace_history_layer_list,
+            sample_iters,
+            title=rf"Mean QFIM trace along optimization path ({keep_label})",
+            outpath=os.path.join(
+                qfim_trace_dir,
+                f"qfim_trace_mean_history_optimization_path_{keep_key}.pdf",
+            ),
+            cmap=cmap,
+            log_scale=False,
+        )
 
 
 def qfim_path_eig_target_iterations(
@@ -4186,24 +4301,27 @@ def save_qfim_eigs_optimization_path_by_iteration(
     return saved_paths
 
 
-qfim_eigs_optimization_path_target_iterations = qfim_path_eig_target_iterations(
-    sample_iters,
-    every=sample_every,
-)
-
-qfim_eigs_optimization_path_dir = os.path.join(
-    qfim_eigs_dir,
-    f"optimization_path_{keep_key}",
-)
-
-qfim_eigs_optimization_path_files = save_qfim_eigs_optimization_path_by_iteration(
-    qfim_eigs_history_optimization_path_by_layer,
-    vqe_layer_list,
-    sample_iters,
-    outdir=qfim_eigs_optimization_path_dir,
-    target_iterations=qfim_eigs_optimization_path_target_iterations,
-    eps=QFIM_EIG_PLOT_EPS,
-)
+if INCLUDE_OPTIMIZATION_PATH_QFIM:
+    qfim_eigs_optimization_path_target_iterations = (
+        qfim_path_eig_target_iterations(
+            sample_iters,
+            every=sample_every,
+        )
+    )
+    qfim_eigs_optimization_path_dir = os.path.join(
+        qfim_eigs_dir,
+        f"optimization_path_{keep_key}",
+    )
+    qfim_eigs_optimization_path_files = (
+        save_qfim_eigs_optimization_path_by_iteration(
+            qfim_eigs_history_optimization_path_by_layer,
+            vqe_layer_list,
+            sample_iters,
+            outdir=qfim_eigs_optimization_path_dir,
+            target_iterations=qfim_eigs_optimization_path_target_iterations,
+            eps=QFIM_EIG_PLOT_EPS,
+        )
+    )
 
 
 def _sample_mean_sem(samples: np.ndarray) -> Tuple[NP_REAL_DTYPE, NP_REAL_DTYPE]:
@@ -4515,7 +4633,11 @@ qfim_eigcount_time_indices = np.arange(
     dtype=NP_INT_DTYPE,
 )
 
-for threshold in QFIM_PATH_EIGCOUNT_THRESHOLDS:
+for threshold in (
+    QFIM_PATH_EIGCOUNT_THRESHOLDS
+    if INCLUDE_OPTIMIZATION_PATH_QFIM
+    else ()
+):
     eigcount_history_all_by_layer = qfim_eigcount_history_by_layer(
         qfim_eigs_history_optimization_path_by_layer,
         vqe_layer_list,
@@ -4644,20 +4766,24 @@ def plot_metric_mean_sem_by_layer(
     save_fig(fig, ax, outpath, outside_legend=False)
 
 
-plot_metric_mean_sem_by_layer(
-    qfim_trace_history_optimization_path_by_layer,
-    qfim_trace_history_layer_list,
-    ylabel="Mean QFIM trace",
-    title=rf"QFIM trace mean $\pm$ SEM vs Layers along optimization path ({keep_label})",
-    outpath=os.path.join(
-        qfim_trace_dir,
-        f"qfim_trace_mean_errorbar_optimization_path_{keep_key}.pdf",
-    ),
-    label=r"$\sum_k \lambda_k(F)$",
-    color="C0",
-    marker="o",
-    log_scale=False,
-)
+if INCLUDE_OPTIMIZATION_PATH_QFIM and INCLUDE_QFIM_TRACE_FIGURES:
+    plot_metric_mean_sem_by_layer(
+        qfim_trace_history_optimization_path_by_layer,
+        qfim_trace_history_layer_list,
+        ylabel="Mean QFIM trace",
+        title=(
+            rf"QFIM trace mean $\pm$ SEM vs Layers along optimization path "
+            rf"({keep_label})"
+        ),
+        outpath=os.path.join(
+            qfim_trace_dir,
+            f"qfim_trace_mean_errorbar_optimization_path_{keep_key}.pdf",
+        ),
+        label=r"$\sum_k \lambda_k(F)$",
+        color="C0",
+        marker="o",
+        log_scale=False,
+    )
 
 plot_metric_mean_sem_by_layer(
     qfim_abs_entry_sum_reduced_0123_by_layer,
@@ -4737,6 +4863,277 @@ def _summary_sample_iters_or_none(result: dict, *, description: str):
         return None
 
     return sample_iters_result
+
+
+_QFIM_PARTICIPATION_RANK_LABEL = (
+    r"Participation effective rank "
+    r"$r_{\mathrm{eff}}=(\sum_i\lambda_i)^2/\sum_i\lambda_i^2$"
+)
+
+
+def _finite_sample_mean_sem(samples):
+    samples = np.asarray(samples, dtype=NP_REAL_DTYPE).reshape(-1)
+    samples = samples[np.isfinite(samples)]
+    sample_count = int(samples.size)
+
+    if sample_count == 0:
+        return NP_REAL_DTYPE(np.nan), NP_REAL_DTYPE(np.nan)
+
+    mean = NP_REAL_DTYPE(np.mean(samples))
+    sem = (
+        NP_REAL_DTYPE(np.std(samples, ddof=1) / np.sqrt(sample_count))
+        if sample_count > 1
+        else NP_REAL_DTYPE(0.0)
+    )
+    return mean, sem
+
+
+def plot_qfim_threshold_vs_participation_random_points(
+    threshold_rank_by_layer: dict,
+    participation_rank_by_layer: dict,
+    layers,
+    *,
+    state_label: str,
+    outpath: str,
+) -> bool:
+    """Compare threshold rank with participation effective rank by layer."""
+    valid_layers = [
+        int(L)
+        for L in layers
+        if int(L) in threshold_rank_by_layer
+        and int(L) in participation_rank_by_layer
+    ]
+
+    if not valid_layers:
+        _warn_skip_new_figure(
+            "random-point effective-rank summary has no layer containing "
+            "both 'threshold_rank' and 'participation_rank'"
+        )
+        return False
+
+    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
+    threshold_stats = [
+        _finite_sample_mean_sem(threshold_rank_by_layer[L])
+        for L in valid_layers
+    ]
+    participation_stats = [
+        _finite_sample_mean_sem(participation_rank_by_layer[L])
+        for L in valid_layers
+    ]
+
+    fig, ax = new_fig_ax(outside_legend=False)
+    for stats, color, marker, label in (
+        (threshold_stats, "C0", "o", "Threshold rank"),
+        (
+            participation_stats,
+            "C1",
+            "s",
+            _QFIM_PARTICIPATION_RANK_LABEL,
+        ),
+    ):
+        means = np.asarray([item[0] for item in stats], dtype=NP_REAL_DTYPE)
+        sems = np.asarray([item[1] for item in stats], dtype=NP_REAL_DTYPE)
+        finite = np.isfinite(means) & np.isfinite(sems)
+
+        if not np.any(finite):
+            continue
+
+        ax.errorbar(
+            x[finite],
+            means[finite],
+            yerr=sems[finite],
+            marker=marker,
+            linestyle="-",
+            linewidth=1.2,
+            markersize=5.5,
+            capsize=3.0,
+            elinewidth=0.8,
+            color=color,
+            label=label,
+        )
+
+    ax.set_xlabel("Number of Layers")
+    ax.set_ylabel("QFIM rank / effective rank")
+    ax.set_title(
+        f"Threshold and participation QFIM ranks at random points "
+        f"({state_label})"
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(L) for L in valid_layers])
+    ax.set_ylim(bottom=0.0)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="best", frameon=True, framealpha=0.9)
+
+    save_fig(fig, ax, outpath, outside_legend=False)
+    return True
+
+
+def _valid_participation_rank_arrays(
+    result: dict,
+    layers,
+    *,
+    expected_ndim: int,
+    description: str,
+) -> dict:
+    """Load finite, nonnegative participation-rank arrays by layer."""
+    loaded = _load_layer_arrays_from_npz(
+        result,
+        layers,
+        "participation_rank",
+        dtype=NP_REAL_DTYPE,
+    )
+    valid = {}
+
+    for L in layers:
+        L_int = int(L)
+        values = loaded.get(L_int)
+        if values is None:
+            _warn_skip_new_figure(
+                f"{description} archive has no L{L_int}_participation_rank key"
+            )
+            continue
+
+        values = np.asarray(values, dtype=NP_REAL_DTYPE)
+        if values.ndim != int(expected_ndim):
+            _warn_skip_new_figure(
+                f"{description} participation rank for L={L_int} must be "
+                f"{expected_ndim}D; received shape {values.shape}"
+            )
+            continue
+
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size == 0:
+            _warn_skip_new_figure(
+                f"{description} participation rank for L={L_int} has no "
+                "finite value"
+            )
+            continue
+        if np.any(finite_values < 0.0):
+            _warn_skip_new_figure(
+                f"{description} participation rank for L={L_int} contains "
+                "a negative value"
+            )
+            continue
+
+        valid[L_int] = values
+
+    return valid
+
+
+def render_qfim_participation_effective_rank_figures(
+    result_key: str,
+    state_label: str,
+) -> None:
+    """Load saved participation ranks and render random/path PDF figures."""
+    random_description = (
+        f"{result_key} random-point participation-effective-rank summary"
+    )
+    random_summary_path = os.path.join(
+        qfim_results_dir,
+        f"qfim_effective_rank_random_points_{result_key}.npz",
+    )
+    random_summary = _load_optional_npz_result(
+        random_summary_path,
+        description=random_description,
+    )
+
+    if random_summary is not None:
+        random_layers = _summary_layers_or_none(
+            random_summary,
+            description=random_description,
+        )
+        if random_layers is not None:
+            threshold_rank_by_layer = _load_layer_arrays_from_npz(
+                random_summary,
+                random_layers,
+                "threshold_rank",
+                dtype=NP_REAL_DTYPE,
+            )
+            participation_rank_by_layer = _valid_participation_rank_arrays(
+                random_summary,
+                random_layers,
+                expected_ndim=1,
+                description=random_description,
+            )
+            plot_qfim_threshold_vs_participation_random_points(
+                threshold_rank_by_layer,
+                participation_rank_by_layer,
+                random_layers,
+                state_label=state_label,
+                outpath=os.path.join(
+                    qfim_effective_rank_dir,
+                    (
+                        "qfim_threshold_vs_participation_rank_"
+                        f"random_points_{result_key}.pdf"
+                    ),
+                ),
+            )
+            plot_qfim_rank_vs_layers_random_points(
+                participation_rank_by_layer,
+                random_layers,
+                title=(
+                    "QFIM participation effective rank at random points "
+                    f"({state_label})"
+                ),
+                outpath=os.path.join(
+                    qfim_effective_rank_dir,
+                    f"qfim_participation_rank_random_points_{result_key}.pdf",
+                ),
+                ylabel=_QFIM_PARTICIPATION_RANK_LABEL,
+            )
+
+    if not INCLUDE_OPTIMIZATION_PATH_QFIM:
+        return
+
+    path_description = (
+        f"{result_key} optimization-path participation-effective-rank summary"
+    )
+    path_summary_path = os.path.join(
+        qfim_results_dir,
+        f"qfim_effective_rank_optimization_path_{result_key}.npz",
+    )
+    path_summary = _load_optional_npz_result(
+        path_summary_path,
+        description=path_description,
+    )
+    if path_summary is None:
+        return
+
+    path_layers = _summary_layers_or_none(
+        path_summary,
+        description=path_description,
+    )
+    path_sample_iters = _summary_sample_iters_or_none(
+        path_summary,
+        description=path_description,
+    )
+    if path_layers is None or path_sample_iters is None:
+        return
+
+    participation_rank_history_by_layer = _valid_participation_rank_arrays(
+        path_summary,
+        path_layers,
+        expected_ndim=2,
+        description=path_description,
+    )
+    plot_qfim_trace_history_mean_by_layer(
+        participation_rank_history_by_layer,
+        path_layers,
+        path_sample_iters,
+        title=(
+            "QFIM participation effective rank along optimization path "
+            f"({state_label})"
+        ),
+        outpath=os.path.join(
+            qfim_effective_rank_dir,
+            f"qfim_participation_rank_history_{result_key}.pdf",
+        ),
+        ylabel=r"Mean QFIM effective rank "
+        r"$r_{\mathrm{eff}}=(\sum_i\lambda_i)^2/\sum_i\lambda_i^2$",
+        metric_name="QFIM participation effective rank",
+        cmap=cmap,
+        log_scale=False,
+    )
 
 
 def render_qfim_keep01234_core_figures() -> None:
@@ -4830,19 +5227,20 @@ def render_qfim_keep01234_core_figures() -> None:
                     ),
                 )
 
-            save_qfim_eigs_by_index_colored_by_layer(
-                eigs_by_layer,
-                random_layers,
-                title=(
-                    rf"QFIM eigenvalues at {num_random_samples} random "
-                    rf"points ({keep_label_5})"
-                ),
-                outpath=os.path.join(
-                    qfim_eigs_dir,
-                    "qfim_eigs_by_index_layers_reduced_keep_01234.pdf",
-                ),
-                cmap=cmap,
-            )
+            if INCLUDE_QFIM_EIGS_BY_INDEX_LAYERS:
+                save_qfim_eigs_by_index_colored_by_layer(
+                    eigs_by_layer,
+                    random_layers,
+                    title=(
+                        rf"QFIM eigenvalues at {num_random_samples} random "
+                        rf"points ({keep_label_5})"
+                    ),
+                    outpath=os.path.join(
+                        qfim_eigs_dir,
+                        "qfim_eigs_by_index_layers_reduced_keep_01234.pdf",
+                    ),
+                    cmap=cmap,
+                )
 
             plot_qfim_random_eigcount_threshold_overlay(
                 eigs_by_layer,
@@ -4862,27 +5260,28 @@ def render_qfim_keep01234_core_figures() -> None:
                 cmap=cmap,
             )
 
-            plot_qfim_trace_max_mean_sem_by_layer(
-                trace_by_layer,
-                random_layers,
-                title=(
-                    rf"QFIM trace maximum and mean $\pm$ SEM at "
-                    rf"{num_random_samples} random points ({keep_label_5})"
-                ),
-                outpath=os.path.join(
-                    qfim_trace_dir,
-                    (
-                        "qfim_trace_max_mean_sem_random_points_"
-                        "reduced_01234.pdf"
+            if INCLUDE_QFIM_TRACE_FIGURES:
+                plot_qfim_trace_max_mean_sem_by_layer(
+                    trace_by_layer,
+                    random_layers,
+                    title=(
+                        rf"QFIM trace maximum and mean $\pm$ SEM at "
+                        rf"{num_random_samples} random points ({keep_label_5})"
                     ),
-                ),
-                color_max="C0",
-                color_mean="C1",
-                marker_max="o",
-                marker_mean="s",
-                lw=1.4,
-                log_scale=False,
-            )
+                    outpath=os.path.join(
+                        qfim_trace_dir,
+                        (
+                            "qfim_trace_max_mean_sem_random_points_"
+                            "reduced_01234.pdf"
+                        ),
+                    ),
+                    color_max="C0",
+                    color_mean="C1",
+                    marker_max="o",
+                    marker_mean="s",
+                    lw=1.4,
+                    log_scale=False,
+                )
 
             plot_metric_mean_sem_by_layer(
                 abs_entry_sum_by_layer,
@@ -4902,6 +5301,9 @@ def render_qfim_keep01234_core_figures() -> None:
                 marker="s",
                 log_scale=False,
             )
+    if not INCLUDE_OPTIMIZATION_PATH_QFIM:
+        return
+
     eigs_history_path = os.path.join(
         qfim_results_dir,
         f"qfim_eigs_history_optimization_path_{keep_key_5}.npz",
@@ -5056,7 +5458,8 @@ def render_qfim_keep01234_core_figures() -> None:
         }
 
     if (
-        trace_history_layers is not None
+        INCLUDE_QFIM_TRACE_FIGURES
+        and trace_history_layers is not None
         and trace_history_sample_iters is not None
     ):
         plot_qfim_trace_history_mean_by_layer(
@@ -5096,6 +5499,8 @@ def render_qfim_keep01234_core_figures() -> None:
         )
 
 
+render_qfim_participation_effective_rank_figures(keep_key, keep_label)
+render_qfim_participation_effective_rank_figures(keep_key_5, keep_label_5)
 render_qfim_keep01234_core_figures()
 
 

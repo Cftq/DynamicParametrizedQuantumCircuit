@@ -1,27 +1,20 @@
 #!/usr/bin/env python
 # coding: utf-8
-"""Run the shared-Rz, fixed-Rx(pi) reset-DPQC numerical pipeline.
+"""Run the fixed-Rx(pi) reset-DPQC numerical pipeline.
 
-This entry point reuses the established VQE and QFIM workflows from
+This entry point reuses the established VQE and random-point QFIM workflows from
 ``DPQC_overparam_vqe.py`` and ``DPQC_overparam_qfim.py``, while replacing
 their circuit model with
 
     CX(center -> fresh),
-    CRZ(fresh -> center, phi_shared),
-    CRX(fresh -> center, pi),
-    CRZ(fresh -> center, phi_shared).
+    CRX(fresh -> center, pi).
 
-The same trainable ``phi_shared`` is used in every layer.  Each layer keeps
-its own 12 unitary parameters, so a depth-L circuit has ``12 * L + 1``
-nominal trainable parameters.  Under the Qiskit rotation convention,
-
-    Rz(phi) Rx(pi) Rz(phi) = Rx(pi),
-
-therefore the shared parameter is an exact null direction.  The numerical
-state update uses the equivalent reset channel directly, avoiding a tiny
-floating-point residual in that null direction.  A Qiskit builder is exposed
-by :func:`build_reset_circuit` so the unsimplified requested gate sequence can
-also be inspected explicitly.
+Each layer keeps its own 12 unitary parameters.  The feed-forward ``Rx(pi)``
+angle is fixed and is not trainable, so a depth-L circuit has ``12 * L``
+trainable parameters.  The numerical state update uses the equivalent reset
+channel directly.  A Qiskit builder is exposed by
+:func:`build_reset_circuit` so the requested gate sequence can also be
+inspected explicitly.
 
 Results are isolated below ``figs/dpqc_reset`` and never share archives with
 the original 14-parameters-per-layer DPQC model.
@@ -56,15 +49,14 @@ for _path in (_MODULE_DIR, _COMMON_DIR):
         sys.path.insert(0, _path_string)
 
 
-MODEL_ID = "dpqc_reset_shared_rz_fixed_rx_pi"
+MODEL_ID = "dpqc_reset_fixed_rx_pi"
 OUTPUT_FAMILY = "dpqc_reset"
 NUM_SYSTEM_QUBITS = 5
 NUM_BLOCKS = 4
 PARAMS_PER_BLOCK = 3
 UNITARY_PARAMS_PER_LAYER = NUM_BLOCKS * PARAMS_PER_BLOCK
-NUM_SHARED_FEED_FORWARD_PARAMS = 1
+NUM_TRAINABLE_FEED_FORWARD_PARAMS = 0
 FIXED_FEED_FORWARD_RX_ANGLE = math.pi
-SHARED_RZ_PARAMETER_NAME = "FF_shared_Rz"
 
 TOP, LEFT, RIGHT, BOTTOM, ANC_CENTER = 0, 1, 2, 3, 4
 LAYER_PAIRS = (
@@ -76,15 +68,15 @@ LAYER_PAIRS = (
 
 
 def num_trainable_parameters(n_layer: int) -> int:
-    """Return the nominal parameter count ``12 * n_layer + 1``."""
+    """Return the parameter count ``12 * n_layer``."""
     n_layer = int(n_layer)
     if n_layer < 1:
         raise ValueError("n_layer must be >= 1.")
-    return UNITARY_PARAMS_PER_LAYER * n_layer + NUM_SHARED_FEED_FORWARD_PARAMS
+    return UNITARY_PARAMS_PER_LAYER * n_layer
 
 
 def parameter_names(n_layer: int) -> tuple[str, ...]:
-    """Return layer-major unitary names followed by the shared Rz name."""
+    """Return the layer-major unitary parameter names."""
     n_layer = int(n_layer)
     num_trainable_parameters(n_layer)
     names: list[str] = []
@@ -97,32 +89,7 @@ def parameter_names(n_layer: int) -> tuple[str, ...]:
                     f"L{layer_index}_B{block_index}_Rxx",
                 )
             )
-    names.append(SHARED_RZ_PARAMETER_NAME)
     return tuple(names)
-
-
-class _SharedFeedForwardParameterLayout:
-    """Adapt legacy ``params_per_layer * L`` sites to ``12L + 1``.
-
-    The split DPQC workflows use ``n_param_per_layer * L`` only when they
-    need the total vector length.  Reset-DPQC has one global parameter rather
-    than a rectangular per-layer layout, so this small adapter provides the
-    correct affine total while the state-layout functions are replaced below.
-    It intentionally has no ``__index__`` method: an unpatched reshape that
-    incorrectly treats this as a rectangular dimension fails loudly.
-    """
-
-    def __mul__(self, n_layer: int) -> int:
-        return num_trainable_parameters(n_layer)
-
-    def __rmul__(self, n_layer: int) -> int:
-        return num_trainable_parameters(n_layer)
-
-    def __repr__(self) -> str:
-        return "SharedFeedForwardParameterLayout(12L+1)"
-
-
-_PARAMETER_LAYOUT = _SharedFeedForwardParameterLayout()
 
 
 def _positive_int(value: str) -> int:
@@ -149,8 +116,7 @@ def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     default_h_param, default_vqe_batch_size = _default_config_values()
     parser = argparse.ArgumentParser(
         description=(
-            "Run reset-DPQC with one trainable Rz shared by every layer and "
-            "a fixed Rx(pi) feed-forward rotation."
+            "Run reset-DPQC with a fixed Rx(pi) feed-forward rotation."
         )
     )
     parser.add_argument(
@@ -164,8 +130,9 @@ def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=("all", "vqe", "qfim"),
         default="all",
         help=(
-            "all: run VQE and then QFIM in separate processes; "
-            "vqe/qfim: run only the selected stage"
+            "all: run VQE and then random-point QFIM in separate processes; "
+            "vqe/qfim: run only the selected stage (the QFIM stage excludes "
+            "optimization-path diagnostics)"
         ),
     )
     parser.add_argument(
@@ -186,9 +153,9 @@ def build_reset_circuit(n_layer: int, theta: Iterable[float] | None = None):
         Positive circuit depth.
     theta:
         Optional numerical vector in the order returned by
-        :func:`parameter_names`.  If omitted, all 12L unitary angles and the
-        single shared Rz angle are symbolic Qiskit parameters.  Rx(pi) is
-        always numeric and is never included in ``circuit.parameters``.
+        :func:`parameter_names`.  If omitted, all 12L unitary angles are
+        symbolic Qiskit parameters.  Rx(pi) is always numeric and is never
+        included in ``circuit.parameters``.
     """
     from qiskit import QuantumCircuit
     from qiskit.circuit import Parameter
@@ -197,9 +164,9 @@ def build_reset_circuit(n_layer: int, theta: Iterable[float] | None = None):
     expected = num_trainable_parameters(n_layer)
 
     if theta is None:
-        symbolic = [Parameter(name) for name in parameter_names(n_layer)]
-        unitary_values = symbolic[:-1]
-        shared_rz = symbolic[-1]
+        unitary_values = [
+            Parameter(name) for name in parameter_names(n_layer)
+        ]
     else:
         import numpy as np
 
@@ -210,8 +177,7 @@ def build_reset_circuit(n_layer: int, theta: Iterable[float] | None = None):
             )
         if not np.all(np.isfinite(values)):
             raise ValueError("theta must contain only finite values.")
-        unitary_values = values[:-1].tolist()
-        shared_rz = float(values[-1])
+        unitary_values = values.tolist()
 
     circuit = QuantumCircuit(NUM_SYSTEM_QUBITS + n_layer, name=MODEL_ID)
     value_index = 0
@@ -224,9 +190,7 @@ def build_reset_circuit(n_layer: int, theta: Iterable[float] | None = None):
 
         fresh_wire = NUM_SYSTEM_QUBITS + layer_index
         circuit.cx(ANC_CENTER, fresh_wire)
-        circuit.crz(shared_rz, fresh_wire, ANC_CENTER)
         circuit.crx(FIXED_FEED_FORWARD_RX_ANGLE, fresh_wire, ANC_CENTER)
-        circuit.crz(shared_rz, fresh_wire, ANC_CENTER)
 
     if value_index != UNITARY_PARAMS_PER_LAYER * n_layer:
         raise AssertionError("Internal unitary-parameter routing mismatch.")
@@ -256,18 +220,19 @@ def _load_base_stage_module(
     return importlib.import_module(module_name)
 
 
-def _install_shared_reset_model(module: ModuleType) -> None:
-    """Install the shared-Rz/fixed-Rx(pi) state model into one stage module."""
+def _install_reset_model(module: ModuleType) -> None:
+    """Install the fixed-Rx(pi) reset state model into one stage module."""
     jnp = module.jnp
 
     module.NUM_BLOCKS = NUM_BLOCKS
     module.PARAMS_PER_BLOCK = PARAMS_PER_BLOCK
     module.UNITARY_PARAMS_PER_LAYER = UNITARY_PARAMS_PER_LAYER
-    module.NUM_SHARED_FEED_FORWARD_PARAMS = NUM_SHARED_FEED_FORWARD_PARAMS
+    module.NUM_TRAINABLE_FEED_FORWARD_PARAMS = (
+        NUM_TRAINABLE_FEED_FORWARD_PARAMS
+    )
     module.EXTRA_PARAMS_PER_LAYER = 0
-    module.n_param_per_layer = _PARAMETER_LAYOUT
+    module.n_param_per_layer = UNITARY_PARAMS_PER_LAYER
     module.FIXED_FEED_FORWARD_RX_ANGLE = FIXED_FEED_FORWARD_RX_ANGLE
-    module.SHARED_RZ_PARAMETER_NAME = SHARED_RZ_PARAMETER_NAME
     module.num_trainable_parameters = num_trainable_parameters
 
     def _validate_theta_shape(theta, n_layer: int) -> int:
@@ -292,14 +257,12 @@ def _install_shared_reset_model(module: ModuleType) -> None:
         return module.wrap_to_pi(theta_a - theta_b)
 
     def rms_theta_distance_periodic_only(theta_a, theta_b, n_layer: int):
-        # The final coordinate is an exact gauge/null direction.  Excluding it
-        # keeps the reported basin distance a property of the physical state.
         difference = theta_difference_periodic_only(
             theta_a,
             theta_b,
             n_layer=n_layer,
         )
-        return jnp.sqrt(jnp.mean(difference[:-1] ** 2))
+        return jnp.sqrt(jnp.mean(difference**2))
 
     def _apply_kept_blocks(
         rho,
@@ -338,15 +301,8 @@ def _install_shared_reset_model(module: ModuleType) -> None:
             )
         return rho
 
-    def _apply_dynamic_delay_kraus(rho, shared_rz):
-        """Apply the exact channel of CRz(s)-CRx(pi)-CRz(s).
-
-        The symbolic ``shared_rz`` coordinate is intentionally unused:
-        CRz(s) CRx(pi) CRz(s) equals CRx(pi) exactly.  Keeping it in theta
-        makes the expected QFIM zero direction explicit while this algebraic
-        channel avoids finite-precision leakage into that direction.
-        """
-        _ = shared_rz
+    def _apply_dynamic_delay_kraus(rho):
+        """Apply the exact reset channel induced by fixed CRx(pi)."""
         expected_shape = (2**NUM_SYSTEM_QUBITS, 2**NUM_SYSTEM_QUBITS)
         if rho.shape != expected_shape:
             raise ValueError(
@@ -371,21 +327,20 @@ def _install_shared_reset_model(module: ModuleType) -> None:
     def _split_theta(theta, n_layer: int):
         theta = jnp.asarray(theta, dtype=module.REAL_DTYPE)
         _validate_theta_shape(theta, n_layer)
-        unitary_layers = jnp.reshape(
-            theta[:-1],
+        return jnp.reshape(
+            theta,
             (int(n_layer), UNITARY_PARAMS_PER_LAYER),
         )
-        return unitary_layers, theta[-1]
 
-    def _rho5_after_layer(rho, layer_theta, shared_rz):
+    def _rho5_after_layer(rho, layer_theta):
         rho = _apply_kept_blocks(rho, layer_theta)
-        return _apply_dynamic_delay_kraus(rho, shared_rz)
+        return _apply_dynamic_delay_kraus(rho)
 
     def rho_keep_sequential_dpqc(theta, n_layer: int):
-        unitary_layers, shared_rz = _split_theta(theta, n_layer)
+        unitary_layers = _split_theta(theta, n_layer)
 
         def one_layer(rho, layer_theta):
-            rho_next, _ = _rho5_after_layer(rho, layer_theta, shared_rz)
+            rho_next, _ = _rho5_after_layer(rho, layer_theta)
             return rho_next, None
 
         rho_final, _ = module.jax.lax.scan(
@@ -396,10 +351,10 @@ def _install_shared_reset_model(module: ModuleType) -> None:
         return module._hermitian(rho_final)
 
     def ancilla_p1_sequential_dpqc(theta, n_layer: int):
-        unitary_layers, shared_rz = _split_theta(theta, n_layer)
+        unitary_layers = _split_theta(theta, n_layer)
 
         def one_layer(rho, layer_theta):
-            rho_next, p1 = _rho5_after_layer(rho, layer_theta, shared_rz)
+            rho_next, p1 = _rho5_after_layer(rho, layer_theta)
             return rho_next, p1
 
         _, p1_vector = module.jax.lax.scan(
@@ -452,23 +407,23 @@ def _configure_reset_output_paths(module: ModuleType) -> Path:
 
 def _model_metadata(h_param: float) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_id": MODEL_ID,
         "h_param": float(h_param),
         "unitary_parameters_per_layer": UNITARY_PARAMS_PER_LAYER,
-        "shared_feed_forward_parameters": NUM_SHARED_FEED_FORWARD_PARAMS,
-        "shared_rz_parameter_name": SHARED_RZ_PARAMETER_NAME,
-        "total_parameter_formula": "12 * L + 1",
+        "trainable_feed_forward_parameters": (
+            NUM_TRAINABLE_FEED_FORWARD_PARAMS
+        ),
+        "total_parameter_formula": "12 * L",
         "fixed_feed_forward_rx_angle": FIXED_FEED_FORWARD_RX_ANGLE,
         "feed_forward_gate_sequence": (
-            "CX(center->fresh); CRZ(fresh->center,phi_shared); "
-            "CRX(fresh->center,pi); CRZ(fresh->center,phi_shared)"
+            "CX(center->fresh); CRX(fresh->center,pi)"
         ),
-        "shared_rz_exactly_redundant": True,
+        "feed_forward_rz_removed": True,
         "numerical_channel": (
             "trace_center(rho) tensor |0><0|_center"
         ),
-        "physical_rms_distance_excludes_shared_null_parameter": True,
+        "physical_rms_distance_uses_all_parameters": True,
     }
 
 
@@ -512,10 +467,10 @@ def _validate_model_metadata(save_dir: Path, h_param: float) -> None:
         "schema_version",
         "model_id",
         "unitary_parameters_per_layer",
-        "shared_feed_forward_parameters",
+        "trainable_feed_forward_parameters",
         "total_parameter_formula",
         "feed_forward_gate_sequence",
-        "shared_rz_exactly_redundant",
+        "feed_forward_rz_removed",
     ):
         if metadata.get(key) != expected[key]:
             raise ValueError(
@@ -544,7 +499,7 @@ def _run_numerical_stage(stage: str, args: argparse.Namespace) -> int:
         h_param=args.h_param,
         vqe_batch_size=args.vqe_batch_size,
     )
-    _install_shared_reset_model(module)
+    _install_reset_model(module)
     save_dir = _configure_reset_output_paths(module)
 
     if stage == "vqe":
@@ -556,8 +511,11 @@ def _run_numerical_stage(stage: str, args: argparse.Namespace) -> int:
 
     if stage == "qfim":
         _validate_model_metadata(save_dir, args.h_param)
-        module.run_qfim()
-        print(f"Saved reset-DPQC QFIM results to: {module.qfim_results_dir}")
+        module.run_qfim(include_optimization_path=False)
+        print(
+            "Saved reset-DPQC random-point QFIM results to: "
+            f"{module.qfim_results_dir}"
+        )
         return 0
 
     raise ValueError(f"Unsupported numerical stage: {stage!r}")
@@ -582,7 +540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_cli_args(argv)
     if args.stage == "all":
         print(
-            "Running reset-DPQC with P(L)=12L+1 and fixed Rx(pi).",
+            "Running reset-DPQC with P(L)=12L and fixed Rx(pi).",
             flush=True,
         )
         return_code = _launch_stage_subprocess("vqe", args)

@@ -695,20 +695,26 @@ def _load_saved_vqe_samples(inpath: str):
     )
 
 
-def run_qfim():
-    """Load saved VQE histories, compute QFIM diagnostics, and save results."""
-    (
-        theta_sample_traces_by_layer,
-        grad_sample_traces_by_layer,
-        vqe_layer_list,
-        sample_iters,
-        num_runs,
-    ) = _load_saved_vqe_samples(vqe_optimization_result_path)
-    sample_iter_set = set(int(value) for value in sample_iters.tolist())
-    print(
-        "Loaded saved float64 VQE samples for the QFIM calculation: "
-        f"{vqe_optimization_result_path}"
-    )
+def run_qfim(*, include_optimization_path: bool = True):
+    """Compute and save QFIM diagnostics.
+
+    Random-point diagnostics are always computed.  Optimization-path
+    diagnostics additionally require the saved VQE parameter and gradient
+    histories and can be disabled by callers that do not need them.
+    """
+    if include_optimization_path:
+        (
+            theta_sample_traces_by_layer,
+            grad_sample_traces_by_layer,
+            vqe_layer_list,
+            sample_iters,
+            num_runs,
+        ) = _load_saved_vqe_samples(vqe_optimization_result_path)
+        sample_iter_set = set(int(value) for value in sample_iters.tolist())
+        print(
+            "Loaded saved float64 VQE samples for the QFIM calculation: "
+            f"{vqe_optimization_result_path}"
+        )
 
     # ============================================================
     # Random-parameter QFIM: compute and save numerical results
@@ -2099,6 +2105,13 @@ def run_qfim():
             ),
         )
 
+
+    if not include_optimization_path:
+        print(
+            "Saved random-point QFIM numerical results to: "
+            f"{qfim_results_dir}"
+        )
+        return
 
     # ============================================================
     # Large-sector gradient weights: compute and save numerical results

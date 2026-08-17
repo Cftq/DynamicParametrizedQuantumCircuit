@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 # coding: utf-8
-"""Visualize saved shared-Rz, fixed-Rx(pi) reset-DPQC results.
+"""Visualize saved fixed-Rx(pi) reset-DPQC results.
 
 Run ``DPQC_overparam_reset_compute.py`` first from the project directory that
 should contain the ``figs`` output tree.  This entry point then renders the
-saved VQE and QFIM results below
+saved VQE and random-point QFIM results below
 ``figs/dpqc_reset/h_<h_param>`` without recomputing either quantity.
+The shared QFIM figures include the participation effective rank
+``(sum(lambda))**2 / sum(lambda**2)`` saved by the compute stage.
 
 The plotting implementation is shared with ``DPQC_overparam_visualize.py``.
 It is launched in a separate Python process with the result family fixed to
@@ -70,7 +72,7 @@ def _parse_cli_args(
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Visualize saved shared-Rz, fixed-Rx(pi) reset-DPQC VQE and "
+            "Visualize saved fixed-Rx(pi) reset-DPQC VQE and random-point "
             "QFIM results without recomputation."
         )
     )
@@ -102,6 +104,9 @@ def _build_visualizer_command(h_param: float) -> tuple[str, ...]:
         repr(h_param),
         "--output-family",
         _OUTPUT_FAMILY,
+        "--skip-optimization-path-qfim",
+        "--skip-qfim-eigs-by-index-layers",
+        "--skip-qfim-trace-figures",
     )
 
 

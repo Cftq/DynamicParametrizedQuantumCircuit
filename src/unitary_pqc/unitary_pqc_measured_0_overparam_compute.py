@@ -1,6 +1,6 @@
 ﻿#!/usr/bin/env python
 # coding: utf-8
-"""Unitary-PQC overparameterization numerical pipeline.
+"""Measurement-outcome-0 Unitary-PQC overparameterization pipeline.
 
 This module was extracted from unitary_pqc_overparam.ipynb so the notebook can
 call a Python function instead of carrying the full optimization/QFIM program
@@ -11,12 +11,13 @@ the VQE JAX/XLA runtime is released before QFIM compilation begins.
 Because the full circuit is closed and unitary, its numerical evolution uses a
 32-amplitude statevector; reduced density matrices are formed only at subsystem
 analysis boundaries.
-Numerical plots are handled by unitary_pqc_overparam_visualize.py, and circuit
-drawings by unitary_pqc_overparam_draw_circuits.py.
+Numerical plots are handled by
+``unitary_pqc_measured_0_overparam_visualize.py``, and circuit drawings by
+``unitary_pqc_measured_0_overparam_draw_circuits.py``.
 
 Example::
 
-    python unitary_pqc_overparam_compute.py --h-param 0.1 --vqe-batch-size 20 --analysis-batch-size 1
+    python unitary_pqc_measured_0_overparam_compute.py --h-param 0.1 --vqe-batch-size 20 --analysis-batch-size 1
 """
 from __future__ import annotations
 
@@ -77,7 +78,8 @@ def _resolve_h_param(cli_value: Optional[float]) -> float:
 def _parse_cli_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
-            "Run the Unitary-PQC numerical pipeline. By default VQE and the "
+            "Run the measurement-outcome-0 Unitary-PQC numerical pipeline. "
+            "By default VQE and the "
             "post-VQE QFIM/HS/Hessian analyses run in separate subprocesses."
         )
     )
@@ -154,7 +156,7 @@ def _run_split_cli_pipeline(args: argparse.Namespace) -> int:
 if __name__ == "__main__":
     _CLI_ARGS = _parse_cli_args()
     if _CLI_ARGS.stage == "all":
-        # Exit before importing JAX/TensorCircuit below.  Only the two child
+        # Exit before importing the numerical dependencies below. Only the two child
         # processes own numerical runtimes, and the VQE child is gone before
         # the QFIM child starts.
         raise SystemExit(_run_split_cli_pipeline(_CLI_ARGS))
@@ -186,24 +188,15 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 import optax
-import tensorcircuit as tc
 from matplotlib.patches import Patch
 from tqdm.auto import tqdm as _tqdm
 
 import jax
 import plot as plot_style
-from dpqc_overparam_common import (
-    _normalize_index_list,
-    _time_index_from_iteration,
-    build_layer_list,
-    qg_layer,
-    U_rz,
-)
 from hamiltonian import (
     PAULI,
     build_H_matrix_jax,
     hamiltonian_terms,
-    local_term_to_matrix,
 )
 from qfim import (
     effective_rank_from_eigvals,
@@ -216,7 +209,6 @@ from qfim import (
     mask_psd_eigvals_for_rank,
     matrix_rank_psd,
     psd_eigvals_desc,
-    participation_effective_rank_from_eigvals,
     rank_threshold_from_eigvals,
 )
 
@@ -244,14 +236,24 @@ COMPLEX_DTYPE = jnp.complex128
 NP_REAL_DTYPE = np.float64
 NP_COMPLEX_DTYPE = np.complex128
 NP_INT_DTYPE = np.int64
+MEASUREMENT_OUTCOME = 0
+ANSATZ_NAME = "unitary_pqc_measured_0"
+
+
+def build_layer_list(max_layer: int, dense_until_layer: int, sparse_step: int):
+    """Build the dense-then-sparse layer schedule without simulator imports."""
+    dense_end = min(int(dense_until_layer), int(max_layer))
+    return list(range(1, dense_end + 1)) + list(
+        range(dense_end + int(sparse_step), int(max_layer) + 1, int(sparse_step))
+    )
 
 
 def _unitary_pqc_save_dir(h_value: float) -> str:
-    """Return the Unitary-PQC output directory independently of process CWD."""
+    """Return this outcome branch's output directory independent of CWD."""
     return str(
         _PROJECT_ROOT
         / "figs"
-        / "unitary_pqc"
+        / ANSATZ_NAME
         / f"h_{h_value}"
     )
 
@@ -327,14 +329,12 @@ figures_dir = os.path.join(save_dir, "figures")
 energy_fig_dir = os.path.join(figures_dir, "energy")
 qfim_fig_dir = os.path.join(figures_dir, "qfim")
 hs_fig_dir = os.path.join(figures_dir, "hs")
-ortk_fig_dir = os.path.join(figures_dir, "ortk")
 hessian_fig_dir = os.path.join(figures_dir, "hessian")
 circuit_dir = os.path.join(save_dir, "optimized_circuits")
 numerical_results_dir = os.path.join(save_dir, "numerical_results")
 energy_results_dir = os.path.join(numerical_results_dir, "energy")
 qfim_results_dir = os.path.join(numerical_results_dir, "qfim")
 hs_results_dir = os.path.join(numerical_results_dir, "hs")
-ortk_results_dir = os.path.join(numerical_results_dir, "ortk")
 hessian_results_dir = os.path.join(numerical_results_dir, "hessian")
 
 sample_every = cfg.SAMPLE_EVERY
@@ -349,20 +349,11 @@ NUM_QFIM_SAMPLES = cfg.NUM_QFIM_SAMPLES
 QFIM_SAMPLE_SEED_BASE = cfg.UNITARY_PQC_QFIM_SAMPLE_SEED_BASE
 PURE_QFIM_LAYER_THRESHOLD = cfg.PURE_QFIM_LAYER_THRESHOLD
 RED_JVP_CHUNK = cfg.RED_JVP_CHUNK
-ORTK_RANK_THRESHOLD = cfg.ORTK_RANK_THRESHOLD
-ORTK_PARTICIPATION_EPS = cfg.ORTK_PARTICIPATION_EPS
-RUN_ORTK_ANALYSIS = bool(
-    getattr(cfg, "RUN_UNITARY_PQC_ORTK_ANALYSIS", False)
-)
-
-QFIM_GRAD_ALIGN_EIG_FLOOR = 1e-16
-QFIM_GRAD_ALIGN_WEIGHT_FLOOR = 1e-16
 
 key = None
 H_terms = ()
 PAULI = {}
 H_matrix = None
-H_OBSERVABLE_MATRICES = None
 smallest_eigval = None
 X2 = None
 _PSI_FULL_INIT = None
@@ -398,14 +389,6 @@ hs_thresh_reduced_by_layer = {}
 hs_rank_history_by_layer = {}
 hs_eigs_history_by_layer = {}
 hs_thresh_history_by_layer = {}
-ortk_rank_by_layer = {}
-ortk_effective_rank_by_layer = {}
-ortk_eigs_by_layer = {}
-ortk_trace_by_layer = {}
-ortk_rank_history_by_layer = {}
-ortk_effective_rank_history_by_layer = {}
-ortk_eigs_history_by_layer = {}
-ortk_trace_history_by_layer = {}
 hessian_rank_by_layer = {}
 hessian_eigs_by_layer = {}
 hessian_thresh_by_layer = {}
@@ -416,9 +399,10 @@ hessian_eigs_history_by_layer = {}
 hessian_thresh_history_by_layer = {}
 hessian_trace_history_by_layer = {}
 hessian_abs_eigsum_history_by_layer = {}
-qfim_grad_alignment_table_by_layer_iteration = {}
-qfim_grad_alignment_tables_by_keep = {}
 
+# Path attributes are retained for the separate visualizer's import API. This
+# compute module does not create these directories or write QFIM eigenspectrum
+# figures to them.
 qfim_eigs_dir = os.path.join(qfim_fig_dir, "eigs")
 qfim_eigs_pure_dir = os.path.join(qfim_eigs_dir, "pure_full")
 qfim_eigs_reduced_0123_dir = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
@@ -446,43 +430,6 @@ hs_rank_optimization_path_min_dir = os.path.join(
     hs_rank_optimization_path_dir,
     "min",
 )
-ortk_eigs_dir = os.path.join(ortk_fig_dir, "eigs")
-ortk_rank_dir = os.path.join(ortk_fig_dir, "rank")
-ortk_rank_random_dir = os.path.join(ortk_rank_dir, "random_points")
-ortk_rank_optimization_path_dir = os.path.join(
-    ortk_rank_dir,
-    "optimization_path",
-)
-ortk_rank_optimization_path_mean_dir = os.path.join(
-    ortk_rank_optimization_path_dir,
-    "mean",
-)
-ortk_rank_optimization_path_min_dir = os.path.join(
-    ortk_rank_optimization_path_dir,
-    "min",
-)
-ortk_effective_rank_dir = os.path.join(ortk_fig_dir, "effective_rank")
-ortk_effective_rank_random_dir = os.path.join(
-    ortk_effective_rank_dir,
-    "random_points",
-)
-ortk_effective_rank_optimization_path_dir = os.path.join(
-    ortk_effective_rank_dir,
-    "optimization_path",
-)
-ortk_effective_rank_optimization_path_mean_dir = os.path.join(
-    ortk_effective_rank_optimization_path_dir,
-    "mean",
-)
-ortk_effective_rank_optimization_path_min_dir = os.path.join(
-    ortk_effective_rank_optimization_path_dir,
-    "min",
-)
-ortk_trace_dir = os.path.join(ortk_fig_dir, "trace")
-ortk_trace_optimization_path_dir = os.path.join(
-    ortk_trace_dir,
-    "optimization_path",
-)
 hessian_eigs_dir = os.path.join(hessian_fig_dir, "eigs")
 hessian_rank_dir = os.path.join(hessian_fig_dir, "rank")
 hessian_rank_random_dir = os.path.join(hessian_rank_dir, "random_points")
@@ -498,10 +445,6 @@ hessian_rank_optimization_path_min_dir = os.path.join(
     hessian_rank_optimization_path_dir,
     "min",
 )
-qfim_grad_align_dir = os.path.join(qfim_fig_dir, "grad_alignment")
-qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "grad_alignment")
-
-
 _figsize_from_width = plot_style._figsize_from_width
 new_prx_figure = plot_style.new_prx_figure
 set_prx_title = plot_style.set_prx_title
@@ -516,11 +459,7 @@ def _ensure_unitary_result_dirs() -> None:
     os.makedirs(energy_fig_dir, exist_ok=True)
     os.makedirs(qfim_fig_dir, exist_ok=True)
     os.makedirs(hs_fig_dir, exist_ok=True)
-    os.makedirs(ortk_fig_dir, exist_ok=True)
     os.makedirs(hessian_fig_dir, exist_ok=True)
-    os.makedirs(qfim_eigs_dir, exist_ok=True)
-    os.makedirs(qfim_eigs_pure_dir, exist_ok=True)
-    os.makedirs(qfim_eigs_reduced_0123_dir, exist_ok=True)
     os.makedirs(qfim_rank_dir, exist_ok=True)
     os.makedirs(qfim_rank_random_dir, exist_ok=True)
     os.makedirs(qfim_rank_optimization_path_dir, exist_ok=True)
@@ -533,34 +472,18 @@ def _ensure_unitary_result_dirs() -> None:
     os.makedirs(hs_rank_optimization_path_dir, exist_ok=True)
     os.makedirs(hs_rank_optimization_path_mean_dir, exist_ok=True)
     os.makedirs(hs_rank_optimization_path_min_dir, exist_ok=True)
-    os.makedirs(ortk_eigs_dir, exist_ok=True)
-    os.makedirs(ortk_rank_dir, exist_ok=True)
-    os.makedirs(ortk_rank_random_dir, exist_ok=True)
-    os.makedirs(ortk_rank_optimization_path_dir, exist_ok=True)
-    os.makedirs(ortk_rank_optimization_path_mean_dir, exist_ok=True)
-    os.makedirs(ortk_rank_optimization_path_min_dir, exist_ok=True)
-    os.makedirs(ortk_effective_rank_dir, exist_ok=True)
-    os.makedirs(ortk_effective_rank_random_dir, exist_ok=True)
-    os.makedirs(ortk_effective_rank_optimization_path_dir, exist_ok=True)
-    os.makedirs(ortk_effective_rank_optimization_path_mean_dir, exist_ok=True)
-    os.makedirs(ortk_effective_rank_optimization_path_min_dir, exist_ok=True)
-    os.makedirs(ortk_trace_dir, exist_ok=True)
-    os.makedirs(ortk_trace_optimization_path_dir, exist_ok=True)
     os.makedirs(hessian_eigs_dir, exist_ok=True)
     os.makedirs(hessian_rank_dir, exist_ok=True)
     os.makedirs(hessian_rank_random_dir, exist_ok=True)
     os.makedirs(hessian_rank_optimization_path_dir, exist_ok=True)
     os.makedirs(hessian_rank_optimization_path_mean_dir, exist_ok=True)
     os.makedirs(hessian_rank_optimization_path_min_dir, exist_ok=True)
-    os.makedirs(qfim_grad_align_dir, exist_ok=True)
     os.makedirs(circuit_dir, exist_ok=True)
     os.makedirs(numerical_results_dir, exist_ok=True)
     os.makedirs(energy_results_dir, exist_ok=True)
     os.makedirs(qfim_results_dir, exist_ok=True)
     os.makedirs(hs_results_dir, exist_ok=True)
-    os.makedirs(ortk_results_dir, exist_ok=True)
     os.makedirs(hessian_results_dir, exist_ok=True)
-    os.makedirs(qfim_grad_align_results_dir, exist_ok=True)
 
 
 def save_npz_result(outpath: str, **arrays) -> None:
@@ -730,7 +653,11 @@ def save_qfim_random_point_results_by_keep(
         )
         arrays = {
             "schema_version": np.asarray(1, dtype=NP_INT_DTYPE),
-            "ansatz": np.asarray("unitary_pqc"),
+            "ansatz": np.asarray(ANSATZ_NAME),
+            "measurement_outcome": np.asarray(
+                MEASUREMENT_OUTCOME,
+                dtype=NP_INT_DTYPE,
+            ),
             "analysis_kind": np.asarray("random_points"),
             "h_param": np.asarray(h_param, dtype=NP_REAL_DTYPE),
             "num_total_qubits": np.asarray(
@@ -875,7 +802,11 @@ def save_qfim_optimization_path_results_by_keep(
                 )
         metadata = {
             "schema_version": np.asarray(1, dtype=NP_INT_DTYPE),
-            "ansatz": np.asarray("unitary_pqc"),
+            "ansatz": np.asarray(ANSATZ_NAME),
+            "measurement_outcome": np.asarray(
+                MEASUREMENT_OUTCOME,
+                dtype=NP_INT_DTYPE,
+            ),
             "analysis_kind": np.asarray("optimization_path"),
             "h_param": np.asarray(h_param, dtype=NP_REAL_DTYPE),
             "num_total_qubits": np.asarray(
@@ -980,7 +911,7 @@ def save_qfim_optimization_path_results_by_keep(
     return result_paths
 
 
-def create_unitary_pqc(theta: jnp.ndarray, num_layers: int, num_qubits: int) -> tc.Circuit:
+def create_unitary_pqc(theta: jnp.ndarray, num_layers: int, num_qubits: int):
     """
     5-qubit circuit with one central ancilla.
 
@@ -1006,7 +937,37 @@ def create_unitary_pqc(theta: jnp.ndarray, num_layers: int, num_qubits: int) -> 
             f"system={SYSTEM_WIRES}, ancilla={ANCILLA_QUBIT}."
         )
 
-    qc = tc.Circuit(num_qubits_int)
+    # Numerical VQE/QFIM execution uses the direct JAX statevector path below.
+    # Keep TensorCircuit optional so its unused PyTorch integrations are not
+    # imported (and their CUDA DLLs are not loaded) during normal execution.
+    try:
+        # TensorCircuit eagerly imports optional ML/Qiskit integrations. They
+        # are not used here and can load large CUDA DLLs before JAX starts.
+        blocked_modules = ("tensorflow", "torch", "qiskit")
+        missing = object()
+        previous_modules = {
+            name: sys.modules.get(name, missing) for name in blocked_modules
+        }
+        for name in blocked_modules:
+            sys.modules[name] = None
+        try:
+            import tensorcircuit as tc
+        finally:
+            for name, previous in previous_modules.items():
+                if previous is missing:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = previous
+        tc.set_backend("jax")
+        tc.set_dtype("complex128")
+        qc = tc.Circuit(num_qubits_int)
+    except (ImportError, OSError, MemoryError) as exc:
+        raise RuntimeError(
+            "Optional TensorCircuit circuit construction is unavailable. "
+            "Use unitary_pqc_measured_0_overparam_draw_circuits.py for "
+            "circuit drawings; numerical computation does not require "
+            "TensorCircuit."
+        ) from exc
 
     cursor = [0]
 
@@ -1018,7 +979,9 @@ def create_unitary_pqc(theta: jnp.ndarray, num_layers: int, num_qubits: int) -> 
     for _layer_idx in range(int(num_layers)):
         for q0, q1 in LAYER_PAIRS:
             p = grab(PARAMS_PER_BLOCK)
-            qg_layer(qc, q0, q1, p)
+            qc.rz(int(q0), theta=p[0])
+            qc.rz(int(q1), theta=p[1])
+            qc.rxx(int(q0), int(q1), theta=p[2])
 
     return qc
 
@@ -1026,6 +989,18 @@ def create_unitary_pqc(theta: jnp.ndarray, num_layers: int, num_qubits: int) -> 
 def wrap_to_pi(x: jnp.ndarray) -> jnp.ndarray:
     two_pi = jnp.array(2.0 * jnp.pi, dtype=x.dtype)
     return (x + jnp.pi) % two_pi - jnp.pi
+
+
+def U_rz(theta: jnp.ndarray) -> jnp.ndarray:
+    """Return the complex128 single-qubit Rz unitary."""
+    th = jnp.asarray(theta, dtype=REAL_DTYPE)
+    return jnp.asarray(
+        [
+            [jnp.exp(-0.5j * th), 0.0],
+            [0.0, jnp.exp(0.5j * th)],
+        ],
+        dtype=COMPLEX_DTYPE,
+    )
 
 def U_rxx(theta: jnp.ndarray) -> jnp.ndarray:
     th = jnp.asarray(theta, dtype=REAL_DTYPE)
@@ -1361,33 +1336,6 @@ def make_reduced_qfim_matrix_fn_for_layer_sequential(
     )
 
 
-def make_qfim_matrix_fn_for_keep(
-    num_layers: int,
-    *,
-    keep_wires,
-    jvp_chunk: int = RED_JVP_CHUNK,
-):
-    """Build the natural Unitary-PQC QFIM for keep0123 or keep01234."""
-    keep_wires = tuple(int(wire) for wire in keep_wires)
-    jvp_chunk = int(jvp_chunk)
-    if jvp_chunk <= 0:
-        raise ValueError(f"jvp_chunk must be positive, got {jvp_chunk}.")
-    if keep_wires == KEEP_WIRES_4:
-        return make_reduced_qfim_matrix_fn_for_layer_sequential(
-            num_layers=num_layers,
-            keep_wires=keep_wires,
-            jvp_chunk=jvp_chunk,
-        )
-    if keep_wires == KEEP_WIRES_5:
-        # No wire is traced for keep01234.  The closed Unitary-PQC state is
-        # pure, so the wavefunction QFIM is the efficient SLD-QFIM equivalent.
-        return make_pure_qfim_matrix_fn_for_layer(num_layers=num_layers)
-    raise ValueError(
-        "keep_wires must be keep0123=(0,1,2,3) or "
-        "keep01234=(0,1,2,3,4)."
-    )
-
-
 def make_reduced_hs_matrix_fn_for_layer_sequential(
     num_layers: int,
     *,
@@ -1676,62 +1624,6 @@ def plot_qfim_rank_max_by_layer(
     save_current_figure(outpath, outside_legend=False)
 
 
-def plot_scalar_violin_by_layer(
-    values_by_layer: dict,
-    layers,
-    *,
-    title: str,
-    ylabel: str,
-    outpath: str,
-    integer_y_axis: bool = False,
-):
-    valid_layers = [
-        int(L)
-        for L in layers
-        if values_by_layer.get(int(L)) is not None
-    ]
-    if not valid_layers:
-        return
-
-    new_prx_figure(width="double")
-    ax = plt.gca()
-    num_layers = len(valid_layers)
-
-    for index, L in enumerate(valid_layers):
-        color = cmap(index / max(1, num_layers))
-        dataset = _make_violin_ready(
-            values_by_layer[L],
-            ensure_positive=False,
-            tiny=1e-12,
-        )
-        violin = ax.violinplot(
-            [dataset],
-            positions=[float(L)],
-            widths=0.35,
-            showmeans=False,
-            showmedians=True,
-            showextrema=True,
-        )
-        _style_violin(
-            violin,
-            facecolor=color,
-            edgecolor=color,
-            alpha=0.18,
-            linewidth=1.0,
-            linecolor=color,
-            linealpha=0.7,
-        )
-
-    ax.set_xticks(valid_layers)
-    ax.set_xticklabels([str(L) for L in valid_layers])
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(ylabel)
-    set_prx_title(title, ax=ax)
-    if integer_y_axis:
-        ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax.grid(True, axis="y", alpha=0.3)
-    save_current_figure(outpath, outside_legend=False)
-
 def make_qfim_eigvals_fn_for_layer(
     num_layers: int,
     *,
@@ -1806,77 +1698,6 @@ def make_hs_rank_fn_for_layer(
 
     return hs_rank
 
-
-def make_observable_expectation_vector_fn_for_layer(num_layers: int):
-    """Return weighted term expectations directly from the statevector."""
-
-    @jax.jit
-    def observable_expectation_vector(theta: jnp.ndarray) -> jnp.ndarray:
-        statevector = statevector_sequential_unitary_pqc(
-            theta,
-            num_layers=num_layers,
-        )
-        # Qubits 0..3 are the system axes and qubit 4 is the ancilla axis.
-        # Contract the ancilla index in <psi|(O_a tensor I)|psi> directly;
-        # no 16x16 reduced density matrix is needed for ORTK observables.
-        state_matrix = jnp.reshape(
-            statevector,
-            (2**num_system_qubits, 2),
-        )
-        values = jnp.einsum(
-            "ia,kij,ja->k",
-            jnp.conjugate(state_matrix),
-            H_OBSERVABLE_MATRICES,
-            state_matrix,
-        )
-        return jnp.real(values)
-
-    return observable_expectation_vector
-
-
-def make_observable_tangent_kernel_matrix_fn_for_layer(num_layers: int):
-    """Return K_obs(theta) = J_obs(theta) J_obs(theta)^T."""
-    observable_fn = make_observable_expectation_vector_fn_for_layer(num_layers)
-    observable_jacobian_fn = jax.jacrev(observable_fn)
-
-    @jax.jit
-    def observable_tangent_kernel(theta: jnp.ndarray) -> jnp.ndarray:
-        jacobian = observable_jacobian_fn(theta)
-        kernel = jacobian @ jacobian.T
-        return 0.5 * (kernel + kernel.T)
-
-    return observable_tangent_kernel
-
-
-def make_observable_tangent_kernel_eigvals_fn_for_layer(num_layers: int):
-    ortk_fn = make_observable_tangent_kernel_matrix_fn_for_layer(num_layers)
-
-    @jax.jit
-    def observable_tangent_kernel_eigvals(theta: jnp.ndarray) -> jnp.ndarray:
-        return psd_eigvals_desc(ortk_fn(theta))
-
-    return observable_tangent_kernel_eigvals
-
-
-def make_ortk_rank_effective_eigvals_fn_for_layer(num_layers: int):
-    ortk_eigvals_fn = make_observable_tangent_kernel_eigvals_fn_for_layer(
-        num_layers,
-    )
-
-    @jax.jit
-    def ortk_rank_effective_eigvals(theta: jnp.ndarray):
-        eigs_desc = ortk_eigvals_fn(theta)
-        rank_value = effective_rank_from_eigvals(
-            eigs_desc,
-            threshold=ORTK_RANK_THRESHOLD,
-        )
-        effective_rank_value = participation_effective_rank_from_eigvals(
-            eigs_desc,
-            eps=ORTK_PARTICIPATION_EPS,
-        )
-        return rank_value, effective_rank_value, eigs_desc
-
-    return ortk_rank_effective_eigvals
 
 def make_energy_hessian_eigvals_fn_for_layer(num_layers: int):
     energy_fn = make_energy_fn_for_layer(num_layers)
@@ -2028,22 +1849,6 @@ def make_hs_analysis_batch_runner(
     return _make_psd_analysis_batch_runner(matrix_fn)
 
 
-def make_ortk_analysis_batch_runner(num_layers: int):
-    """Create a fixed-shape ORTK ``jit(vmap(...))`` metrics runner."""
-    metrics_fn = make_ortk_rank_effective_eigvals_fn_for_layer(int(num_layers))
-
-    def metrics_one(theta: jnp.ndarray):
-        rank_value, effective_rank_value, eigs_desc = metrics_fn(theta)
-        return (
-            rank_value,
-            effective_rank_value,
-            eigs_desc,
-            jnp.sum(eigs_desc),
-        )
-
-    return jax.jit(jax.vmap(metrics_one))
-
-
 def make_hessian_analysis_batch_runner(num_layers: int):
     """Create a fixed-shape energy-Hessian ``jit(vmap(...))`` runner."""
     eigvals_fn = make_energy_hessian_eigvals_fn_for_layer(int(num_layers))
@@ -2062,101 +1867,6 @@ def make_hessian_analysis_batch_runner(num_layers: int):
 
     return jax.jit(jax.vmap(metrics_one))
 
-
-def make_qfim_grad_alignment_batch_runner(
-    num_layers: int,
-    *,
-    keep_wires,
-    jvp_chunk: int = RED_JVP_CHUNK,
-    sort_desc: bool = True,
-    norm_eps: float = 1e-24,
-):
-    """Create a pure-JAX batched QFIM/gradient alignment runner."""
-    qfim_fn = make_qfim_matrix_fn_for_keep(
-        num_layers=int(num_layers),
-        keep_wires=keep_wires,
-        jvp_chunk=jvp_chunk,
-    )
-
-    def alignment_one(theta: jnp.ndarray, grad: jnp.ndarray):
-        qfim_matrix = _hermitian(qfim_fn(theta))
-        eigs, eigenvectors = jnp.linalg.eigh(qfim_matrix)
-        eigs = jnp.clip(jnp.real(eigs), a_min=0.0)
-        coefficients = (
-            jnp.conjugate(eigenvectors).T
-            @ grad.astype(eigenvectors.dtype)
-        )
-        coeff_abs2 = jnp.real(
-            coefficients * jnp.conjugate(coefficients)
-        )
-        denominator = jnp.real(jnp.vdot(grad, grad))
-        weights = jnp.where(
-            denominator > jnp.asarray(norm_eps, dtype=denominator.dtype),
-            coeff_abs2 / denominator,
-            jnp.full_like(coeff_abs2, jnp.nan),
-        )
-        if sort_desc:
-            order = jnp.argsort(eigs)[::-1]
-            eigs = eigs[order]
-            weights = weights[order]
-            coeff_abs2 = coeff_abs2[order]
-        return eigs, weights, coeff_abs2
-
-    return jax.jit(jax.vmap(alignment_one, in_axes=(0, 0)))
-
-
-def _evaluate_qfim_alignment_in_batches(
-    theta_points,
-    grad_points,
-    batched_fn,
-    *,
-    batch_size: Optional[int] = None,
-    description: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Evaluate paired theta/gradient points in fixed-size JAX batches."""
-    effective_batch_size = _resolve_analysis_batch_size(batch_size)
-    theta_points = np.asarray(theta_points, dtype=NP_REAL_DTYPE)
-    grad_points = np.asarray(grad_points, dtype=NP_REAL_DTYPE)
-    if theta_points.shape != grad_points.shape or theta_points.ndim != 2:
-        raise ValueError(
-            "theta_points and grad_points must have the same 2D shape."
-        )
-    num_points = int(theta_points.shape[0])
-    if num_points <= 0:
-        raise ValueError("At least one theta/gradient point is required.")
-
-    output_parts = ([], [], [])
-    batch_starts = range(0, num_points, effective_batch_size)
-    for batch_start in tqdm(
-        batch_starts,
-        total=(num_points + effective_batch_size - 1)
-        // effective_batch_size,
-        desc=description,
-        unit="batch",
-        leave=False,
-    ):
-        batch_end = min(batch_start + effective_batch_size, num_points)
-        theta_batch, valid_count = _pad_analysis_theta_batch(
-            jnp.asarray(
-                theta_points[batch_start:batch_end],
-                dtype=REAL_DTYPE,
-            ),
-            effective_batch_size,
-        )
-        grad_batch, grad_valid_count = _pad_analysis_theta_batch(
-            jnp.asarray(
-                grad_points[batch_start:batch_end],
-                dtype=REAL_DTYPE,
-            ),
-            effective_batch_size,
-        )
-        if grad_valid_count != valid_count:
-            raise AssertionError("Theta and gradient batch sizes diverged.")
-        host_outputs = jax.device_get(batched_fn(theta_batch, grad_batch))
-        for parts, values in zip(output_parts, host_outputs):
-            parts.append(np.asarray(values[:valid_count]))
-
-    return tuple(np.concatenate(parts, axis=0) for parts in output_parts)
 
 def compute_qfim_rank_history_by_layer(
     theta_samples_by_layer: dict,
@@ -2229,74 +1939,6 @@ def compute_qfim_rank_history_by_layer(
 
     return rank_history_by_layer, eigs_history_by_layer, thresh_history_by_layer
 
-
-def compute_ortk_rank_history_by_layer(
-    theta_samples_by_layer: dict,
-    layers,
-    *,
-    batch_size: Optional[int] = None,
-):
-    rank_history_by_layer = {}
-    effective_rank_history_by_layer = {}
-    eigs_history_by_layer = {}
-
-    for L in tqdm(
-        layers,
-        desc="ORTK rank history along optimization path",
-        unit="layer",
-    ):
-        L_int = int(L)
-        if theta_samples_by_layer.get(L_int) is None:
-            continue
-
-        theta_samples = np.asarray(
-            theta_samples_by_layer[L_int],
-            dtype=NP_REAL_DTYPE,
-        )
-        if theta_samples.ndim != 3:
-            raise ValueError(
-                "theta_samples must have shape "
-                "(num_runs, num_sample_iters, num_params)."
-            )
-
-        num_runs, num_times, _ = theta_samples.shape
-        num_observables = int(H_OBSERVABLE_MATRICES.shape[0])
-        num_params = int(theta_samples.shape[-1])
-        batch_runner = make_ortk_analysis_batch_runner(L_int)
-        ranks_flat, effective_ranks_flat, eigs_flat, _ = (
-            _evaluate_analysis_in_batches(
-                theta_samples.reshape((-1, num_params)),
-                batch_runner,
-                batch_size=batch_size,
-                description=(
-                    f"ORTK batches (L={L_int}, "
-                    f"batch={_resolve_analysis_batch_size(batch_size)})"
-                ),
-            )
-        )
-        ranks_L = np.asarray(ranks_flat, dtype=NP_REAL_DTYPE).reshape(
-            (num_runs, num_times)
-        )
-        effective_ranks_L = np.asarray(
-            effective_ranks_flat,
-            dtype=NP_REAL_DTYPE,
-        ).reshape((num_runs, num_times))
-        eigs_L = np.asarray(eigs_flat, dtype=NP_REAL_DTYPE).reshape(
-            (num_runs, num_times, num_observables)
-        )
-
-        rank_history_by_layer[L_int] = ranks_L
-        effective_rank_history_by_layer[L_int] = effective_ranks_L
-        eigs_history_by_layer[L_int] = eigs_L
-
-        del batch_runner
-        _release_jax_compilation_cache()
-
-    return (
-        rank_history_by_layer,
-        effective_rank_history_by_layer,
-        eigs_history_by_layer,
-    )
 
 def compute_hs_rank_history_by_layer(
     theta_samples_by_layer: dict,
@@ -2627,363 +2269,6 @@ def plot_qfim_rank_history_min_by_layer(
         legend_space_frac=0.26,
     )
 
-def compute_qfim_grad_alignment_table_for_layer(
-    L,
-    theta_samples_by_layer,
-    grad_samples_by_layer,
-    *,
-    run_indices=None,
-    time_indices=None,
-    sample_iters_for_labels=None,
-    jvp_chunk=RED_JVP_CHUNK,
-    keep_wires=KEEP_WIRES_4,
-    sort_desc=True,
-    batch_size: Optional[int] = None,
-):
-    theta_samples = np.asarray(theta_samples_by_layer[L], dtype=NP_REAL_DTYPE)
-    grad_samples = np.asarray(grad_samples_by_layer[L], dtype=NP_REAL_DTYPE)
-
-    if theta_samples.shape != grad_samples.shape:
-        raise ValueError(
-            f"theta and grad must have the same shape for L={L}. "
-            f"Got {theta_samples.shape} and {grad_samples.shape}."
-        )
-
-    if theta_samples.ndim == 2:
-        theta_samples = theta_samples[:, None, :]
-        grad_samples = grad_samples[:, None, :]
-    elif theta_samples.ndim != 3:
-        raise ValueError(
-            "theta and grad arrays must have shape "
-            "(num_runs, num_sample_times, num_params) or "
-            "(num_samples, num_params)."
-        )
-
-    num_runs, num_times, _ = theta_samples.shape
-    run_ids = _normalize_index_list(run_indices, num_runs)
-    time_ids = _normalize_index_list(time_indices, num_times)
-    if len(run_ids) == 0:
-        raise ValueError("run_indices must select at least one run.")
-    if len(time_ids) == 0:
-        raise ValueError("time_indices must select at least one sample time.")
-
-    if sample_iters_for_labels is None:
-        sample_iters_arr = np.arange(num_times, dtype=NP_INT_DTYPE)
-    else:
-        sample_iters_arr = np.asarray(sample_iters_for_labels, dtype=NP_INT_DTYPE)
-
-    batch_runner = make_qfim_grad_alignment_batch_runner(
-        num_layers=int(L),
-        keep_wires=keep_wires,
-        jvp_chunk=jvp_chunk,
-        sort_desc=sort_desc,
-        norm_eps=float(
-            getattr(cfg, "QFIM_GRAD_ALIGNMENT_NORM_EPS", 1e-24)
-        ),
-    )
-    point_run_ids = np.asarray(
-        [run_idx for run_idx in run_ids for _ in time_ids],
-        dtype=NP_INT_DTYPE,
-    )
-    point_time_ids = np.asarray(
-        [time_idx for _ in run_ids for time_idx in time_ids],
-        dtype=NP_INT_DTYPE,
-    )
-    theta_points = theta_samples[point_run_ids, point_time_ids]
-    grad_points = grad_samples[point_run_ids, point_time_ids]
-    eigs, weights, coeff_abs2 = _evaluate_qfim_alignment_in_batches(
-        theta_points,
-        grad_points,
-        batch_runner,
-        batch_size=batch_size,
-        description=(
-            f"QFIM-gradient batches (L={L}, "
-            f"batch={_resolve_analysis_batch_size(batch_size)})"
-        ),
-    )
-
-    num_points, num_params = eigs.shape
-    point_iterations = np.asarray(
-        [
-            sample_iters_arr[time_idx]
-            if time_idx < sample_iters_arr.size
-            else time_idx
-            for time_idx in point_time_ids
-        ],
-        dtype=NP_INT_DTYPE,
-    )
-    table = {
-        "lambda": np.asarray(eigs, dtype=NP_REAL_DTYPE).reshape((-1,)),
-        "w_grad": np.asarray(weights, dtype=NP_REAL_DTYPE).reshape((-1,)),
-        "coeff_abs2": np.asarray(
-            coeff_abs2,
-            dtype=NP_REAL_DTYPE,
-        ).reshape((-1,)),
-        "eig_index": np.tile(
-            np.arange(1, num_params + 1, dtype=NP_INT_DTYPE),
-            num_points,
-        ),
-        "layer": np.full(
-            num_points * num_params,
-            int(L),
-            dtype=NP_INT_DTYPE,
-        ),
-        "run": np.repeat(point_run_ids, num_params),
-        "time_index": np.repeat(point_time_ids, num_params),
-        "iteration": np.repeat(point_iterations, num_params),
-    }
-    del batch_runner
-    _release_jax_compilation_cache()
-    return table
-
-def plot_qfim_grad_alignment_table(
-    table,
-    *,
-    title,
-    outpath,
-    log_x=True,
-    log_y=False,
-    eig_floor=QFIM_GRAD_ALIGN_EIG_FLOOR,
-    weight_floor=QFIM_GRAD_ALIGN_WEIGHT_FLOOR,
-    color_by=None,
-    point_size=14.0,
-    alpha=0.45,
-):
-    lambdas = np.asarray(table["lambda"], dtype=NP_REAL_DTYPE)
-    weights = np.asarray(table["w_grad"], dtype=NP_REAL_DTYPE)
-    finite = (
-        np.isfinite(lambdas)
-        & np.isfinite(weights)
-        & (lambdas >= 0.0)
-        & (weights >= 0.0)
-    )
-
-    x = np.maximum(lambdas[finite], eig_floor)
-    y_raw = weights[finite]
-    y = np.maximum(y_raw, weight_floor) if log_y else y_raw
-
-    new_prx_figure(width="double")
-    ax = plt.gca()
-
-    if color_by is not None and color_by in table:
-        color_values = np.asarray(table[color_by])[finite]
-        sc = ax.scatter(
-            x,
-            y,
-            c=color_values,
-            cmap="viridis",
-            s=point_size,
-            alpha=alpha,
-            edgecolors="none",
-        )
-        cbar = plt.gcf().colorbar(sc, ax=ax, pad=0.02)
-        cbar.set_label(color_by.replace("_", " "))
-    else:
-        ax.scatter(
-            x,
-            y,
-            s=point_size,
-            alpha=alpha,
-            edgecolors="black",
-            linewidths=0.25,
-        )
-
-    if log_x:
-        ax.set_xscale("log")
-
-    if log_y:
-        ax.set_yscale("log")
-    else:
-        ax.set_ylim(-0.02, 1.02)
-
-    ax.set_xlabel(r"QFIM eigenvalue $\lambda_i$")
-    ax.set_ylabel("Gradient coeff.")
-    set_prx_title(title, ax=ax)
-    ax.grid(True, which="both", alpha=0.30)
-
-    save_current_figure(outpath, outside_legend=False)
-
-def run_qfim_grad_alignment_by_layer_iteration_folders(
-    *,
-    layers=None,
-    target_iterations=None,
-    run_indices=None,
-    sample_iters_for_labels=None,
-    jvp_chunk=RED_JVP_CHUNK,
-    log_x=True,
-    log_y=False,
-    save_npz=True,
-    make_plots=True,
-    data_dir=None,
-    plot_dir=None,
-    result_key=QFIM_KEEP0123_KEY,
-    state_label=QFIM_KEEP0123_LABEL,
-    keep_wires=KEEP_WIRES_4,
-    analysis_batch_size: Optional[int] = None,
-):
-    result_key = str(result_key)
-    keep_wires = tuple(int(wire) for wire in keep_wires)
-    expected_keep_wires = {
-        QFIM_KEEP0123_KEY: KEEP_WIRES_4,
-        QFIM_KEEP01234_KEY: KEEP_WIRES_5,
-    }
-    if result_key not in expected_keep_wires:
-        raise ValueError(
-            f"result_key must be one of {tuple(expected_keep_wires)}, "
-            f"got {result_key!r}."
-        )
-    if keep_wires != expected_keep_wires[result_key]:
-        raise ValueError(
-            f"keep_wires={keep_wires} does not match result_key={result_key}."
-        )
-
-    if layers is None:
-        candidate_layers = layer_list
-    else:
-        candidate_layers = layers
-
-    if sample_iters_for_labels is None:
-        sample_iters_for_labels = sample_iters
-
-    if target_iterations is None:
-        target_iterations = tuple(int(t) for t in sample_iters_for_labels)
-    else:
-        target_iterations = tuple(int(t) for t in target_iterations)
-
-    available_layers = []
-    for L in candidate_layers:
-        L = int(L)
-        if L in theta_sample_traces_by_layer and L in grad_sample_traces_by_layer:
-            available_layers.append(L)
-
-    if not available_layers:
-        raise ValueError(
-            "No layers are available in theta_sample_traces_by_layer and "
-            "grad_sample_traces_by_layer. Run the VQE optimization first."
-        )
-
-    data_root = qfim_grad_align_dir if data_dir is None else data_dir
-    plot_root = qfim_grad_align_dir if plot_dir is None else plot_dir
-    if result_key != QFIM_KEEP0123_KEY:
-        data_root = os.path.join(data_root, result_key)
-        plot_root = os.path.join(plot_root, result_key)
-
-    table_by_layer_iteration = {}
-    for L in tqdm(
-        available_layers,
-        desc=f"QFIM gradient alignment ({result_key}) by layer/iteration",
-        unit="layer",
-    ):
-        layer_data_dir = os.path.join(data_root, f"L{L}")
-        layer_plot_dir = os.path.join(plot_root, f"L{L}")
-        os.makedirs(layer_data_dir, exist_ok=True)
-        if make_plots:
-            os.makedirs(layer_plot_dir, exist_ok=True)
-        table_by_layer_iteration[L] = {}
-
-        time_indices = [
-            _time_index_from_iteration(
-                sample_iters_for_labels,
-                iteration,
-            )
-            for iteration in target_iterations
-        ]
-        table_L_all = compute_qfim_grad_alignment_table_for_layer(
-            L,
-            theta_sample_traces_by_layer,
-            grad_sample_traces_by_layer,
-            run_indices=run_indices,
-            time_indices=time_indices,
-            sample_iters_for_labels=sample_iters_for_labels,
-            jvp_chunk=jvp_chunk,
-            keep_wires=keep_wires,
-            sort_desc=True,
-            batch_size=analysis_batch_size,
-        )
-
-        for iteration, time_idx in tqdm(
-            tuple(zip(target_iterations, time_indices)),
-            desc=f"Iterations (L={L})",
-            unit="iter",
-            leave=False,
-        ):
-            row_mask = np.asarray(table_L_all["time_index"]) == int(time_idx)
-            table_L_iter = {
-                key: np.asarray(values)[row_mask]
-                for key, values in table_L_all.items()
-            }
-            table_by_layer_iteration[L][iteration] = table_L_iter
-
-            iter_tag = f"iter{iteration:06d}"
-            if save_npz:
-                save_npz_result(
-                    os.path.join(
-                        layer_data_dir,
-                        f"qfim_grad_alignment_scatter_data_L{L}_{iter_tag}.npz",
-                    ),
-                    keep_key=np.asarray(result_key),
-                    keep_wires=np.asarray(keep_wires, dtype=NP_INT_DTYPE),
-                    state_label=np.asarray(state_label),
-                    representation=np.asarray(
-                        "reduced_mixed"
-                        if result_key == QFIM_KEEP0123_KEY
-                        else "pure_full"
-                    ),
-                    qfim_definition=np.asarray("SLD_QFIM"),
-                    qfim_implementation=np.asarray(
-                        "mixed_state_sld_jvp"
-                        if result_key == QFIM_KEEP0123_KEY
-                        else "pure_state_wavefunction"
-                    ),
-                    h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-                    qfim_effective_rank_threshold=np.asarray(
-                        QFIM_EFFECTIVE_RANK_THRESHOLD,
-                        dtype=NP_REAL_DTYPE,
-                    ),
-                    qfim_gradient_norm_eps=np.asarray(
-                        getattr(
-                            cfg,
-                            "QFIM_GRAD_ALIGNMENT_NORM_EPS",
-                            1e-24,
-                        ),
-                        dtype=NP_REAL_DTYPE,
-                    ),
-                    eigenvalue_order=np.asarray("descending"),
-                    gradient_weight_normalization=np.asarray(
-                        "|v_i^H grad|^2 / ||grad||_2^2"
-                    ),
-                    degenerate_eigenspace_note=np.asarray(
-                        "individual eigenvector weights are basis-dependent; "
-                        "their sum within each degenerate eigenspace is invariant"
-                    ),
-                    analysis_batch_size=np.asarray(
-                        _resolve_analysis_batch_size(analysis_batch_size),
-                        dtype=NP_INT_DTYPE,
-                    ),
-                    sample_semantics=np.asarray("pre_update_theta_t"),
-                    **table_L_iter,
-                )
-
-            if make_plots:
-                plot_qfim_grad_alignment_table(
-                    table_L_iter,
-                    title=(
-                        rf"QFIM eigenvalue vs gradient weight, "
-                        rf"{state_label}, L={L}, iteration {iteration}"
-                    ),
-                    outpath=os.path.join(
-                        layer_plot_dir,
-                        f"qfim_grad_weight_scatter_L{L}_{iter_tag}.pdf",
-                    ),
-                    log_x=log_x,
-                    log_y=log_y,
-                    color_by=None,
-                    point_size=14.0,
-                    alpha=0.45,
-                )
-
-    return table_by_layer_iteration
-
 def configure_unitary_pqc_overparam(
     *,
     h_value: Optional[float] = None,
@@ -2996,29 +2281,20 @@ def configure_unitary_pqc_overparam(
     global TICK_LABEL_FONT_SIZE, LEGEND_FONT_SIZE, _DEFAULT_AXES_MARGINS_PRX, _DEFAULT_AXES_MARGINS_PRX_OUTSIDE_LEGEND, key, num_system_qubits
     global ANCILLA_QUBIT, num_total_qubits, SYSTEM_WIRES, FULL_WIRES, h_param, tolerance
     global steps, num_runs, lr, NUM_BLOCKS, PARAMS_PER_BLOCK, num_params_per_layer
-    global LAYER_PAIRS, H_terms, PAULI, H_matrix, H_OBSERVABLE_MATRICES, eigvals_np, smallest_eigval
+    global LAYER_PAIRS, H_terms, PAULI, H_matrix, eigvals_np, smallest_eigval
     global X2, _PSI_FULL_INIT
-    global save_dir, figures_dir, energy_fig_dir, qfim_fig_dir, hs_fig_dir, ortk_fig_dir, hessian_fig_dir
+    global save_dir, figures_dir, energy_fig_dir, qfim_fig_dir, hs_fig_dir, hessian_fig_dir
     global circuit_dir, numerical_results_dir, energy_results_dir, qfim_results_dir
-    global hs_results_dir, ortk_results_dir, hessian_results_dir
+    global hs_results_dir, hessian_results_dir
     global qfim_eigs_dir, qfim_eigs_pure_dir, qfim_eigs_reduced_0123_dir
     global qfim_rank_dir, qfim_rank_random_dir, qfim_rank_optimization_path_dir
     global qfim_rank_optimization_path_mean_dir, qfim_rank_optimization_path_min_dir
     global hs_eigs_dir, hs_eigs_reduced_0123_dir
     global hs_rank_dir, hs_rank_random_dir, hs_rank_optimization_path_dir
     global hs_rank_optimization_path_mean_dir, hs_rank_optimization_path_min_dir
-    global ortk_eigs_dir, ortk_rank_dir, ortk_rank_random_dir
-    global ortk_rank_optimization_path_dir
-    global ortk_rank_optimization_path_mean_dir, ortk_rank_optimization_path_min_dir
-    global ortk_effective_rank_dir, ortk_effective_rank_random_dir
-    global ortk_effective_rank_optimization_path_dir
-    global ortk_effective_rank_optimization_path_mean_dir
-    global ortk_effective_rank_optimization_path_min_dir
-    global ortk_trace_dir, ortk_trace_optimization_path_dir
     global hessian_eigs_dir, hessian_rank_dir, hessian_rank_random_dir
     global hessian_rank_optimization_path_dir
     global hessian_rank_optimization_path_mean_dir, hessian_rank_optimization_path_min_dir
-    global qfim_grad_align_dir, qfim_grad_align_results_dir
     # ============================================================
     # DPQC optimization + plots + QFIM rank (pure + reduced)
     #
@@ -3041,7 +2317,7 @@ def configure_unitary_pqc_overparam(
     #       * Pure(full) QFIM for the full 5-qubit state for small layers
     #   - Eigenvalue thresholding rule identical to DPQC_overparam.ipynb:
     #       thresh = 1e-12
-    #     and eigenvalues <= thresh are zeroed BEFORE storage/plotting.
+    #     and eigenvalues <= thresh are zeroed before numerical storage.
     #
     #   - NEW:
     #       * All box plots are replaced by violin plots.
@@ -3049,16 +2325,10 @@ def configure_unitary_pqc_overparam(
     #           final_energy_error_beeswarm.pdf
     #       * A log-scale final-energy-error violin plot is also saved as:
     #           final_energy_error_log.pdf
-    #       * For each per-layer QFIM eigenvalue plot saved in qfim_eigs/,
-    #         a horizontal red solid line is drawn at the fixed rank threshold.
-    #       * pure_full and reduced_keep_0123 are saved into separate folders:
-    #           qfim_eigs/pure_full/
-    #           qfim_eigs/reduced_keep_0123/
-    #
     #   - DTYPE UPDATE:
     #       * Unified to float64 / complex128
     #       * JAX x64 enabled
-    #       * TensorCircuit dtype set to complex128
+    #       * The optional TensorCircuit compatibility builder uses complex128
     # ============================================================
     
     # ==============================
@@ -3120,8 +2390,6 @@ def configure_unitary_pqc_overparam(
     # ==============================
     # Backend & Seed
     # ==============================
-    tc.set_backend("jax")
-    tc.set_dtype("complex128")
     key = jax.random.PRNGKey(42)
     
     # ==============================
@@ -3147,14 +2415,12 @@ def configure_unitary_pqc_overparam(
     energy_fig_dir = os.path.join(figures_dir, "energy")
     qfim_fig_dir = os.path.join(figures_dir, "qfim")
     hs_fig_dir = os.path.join(figures_dir, "hs")
-    ortk_fig_dir = os.path.join(figures_dir, "ortk")
     hessian_fig_dir = os.path.join(figures_dir, "hessian")
     circuit_dir = os.path.join(save_dir, "optimized_circuits")
     numerical_results_dir = os.path.join(save_dir, "numerical_results")
     energy_results_dir = os.path.join(numerical_results_dir, "energy")
     qfim_results_dir = os.path.join(numerical_results_dir, "qfim")
     hs_results_dir = os.path.join(numerical_results_dir, "hs")
-    ortk_results_dir = os.path.join(numerical_results_dir, "ortk")
     hessian_results_dir = os.path.join(numerical_results_dir, "hessian")
     qfim_eigs_dir = os.path.join(qfim_fig_dir, "eigs")
     qfim_eigs_pure_dir = os.path.join(qfim_eigs_dir, "pure_full")
@@ -3183,43 +2449,6 @@ def configure_unitary_pqc_overparam(
         hs_rank_optimization_path_dir,
         "min",
     )
-    ortk_eigs_dir = os.path.join(ortk_fig_dir, "eigs")
-    ortk_rank_dir = os.path.join(ortk_fig_dir, "rank")
-    ortk_rank_random_dir = os.path.join(ortk_rank_dir, "random_points")
-    ortk_rank_optimization_path_dir = os.path.join(
-        ortk_rank_dir,
-        "optimization_path",
-    )
-    ortk_rank_optimization_path_mean_dir = os.path.join(
-        ortk_rank_optimization_path_dir,
-        "mean",
-    )
-    ortk_rank_optimization_path_min_dir = os.path.join(
-        ortk_rank_optimization_path_dir,
-        "min",
-    )
-    ortk_effective_rank_dir = os.path.join(ortk_fig_dir, "effective_rank")
-    ortk_effective_rank_random_dir = os.path.join(
-        ortk_effective_rank_dir,
-        "random_points",
-    )
-    ortk_effective_rank_optimization_path_dir = os.path.join(
-        ortk_effective_rank_dir,
-        "optimization_path",
-    )
-    ortk_effective_rank_optimization_path_mean_dir = os.path.join(
-        ortk_effective_rank_optimization_path_dir,
-        "mean",
-    )
-    ortk_effective_rank_optimization_path_min_dir = os.path.join(
-        ortk_effective_rank_optimization_path_dir,
-        "min",
-    )
-    ortk_trace_dir = os.path.join(ortk_fig_dir, "trace")
-    ortk_trace_optimization_path_dir = os.path.join(
-        ortk_trace_dir,
-        "optimization_path",
-    )
     hessian_eigs_dir = os.path.join(hessian_fig_dir, "eigs")
     hessian_rank_dir = os.path.join(hessian_fig_dir, "rank")
     hessian_rank_random_dir = os.path.join(hessian_rank_dir, "random_points")
@@ -3235,8 +2464,6 @@ def configure_unitary_pqc_overparam(
         hessian_rank_optimization_path_dir,
         "min",
     )
-    qfim_grad_align_dir = os.path.join(qfim_fig_dir, "grad_alignment")
-    qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "grad_alignment")
     _ensure_unitary_result_dirs()
     
     # Block structure constants
@@ -3254,7 +2481,7 @@ def configure_unitary_pqc_overparam(
     )
     
     # ==============================
-    # Circuit blocks (TensorCircuit)
+    # Optional TensorCircuit compatibility builder
     # ==============================
     
     
@@ -3276,18 +2503,7 @@ def configure_unitary_pqc_overparam(
 
     # 5-qubit Hamiltonian matrix (32x32): H_system 竓・I_ancilla
     H_matrix = build_H_matrix_jax(H_terms, num_total_qubits)
-    if RUN_ORTK_ANALYSIS:
-        H_OBSERVABLE_MATRICES = jnp.stack(
-            [
-                jnp.asarray(coef, dtype=REAL_DTYPE)
-                * local_term_to_matrix(local_ops, num_system_qubits)
-                for coef, local_ops in H_terms
-            ],
-            axis=0,
-        )
-    else:
-        H_OBSERVABLE_MATRICES = None
-    
+
     eigvals_np, _ = np.linalg.eigh(np.array(H_matrix, dtype=NP_COMPLEX_DTYPE))
     smallest_eigval = float(eigvals_np.min().real)
     
@@ -3511,11 +2727,12 @@ def run_vqe_optimization(
     """Run VQE optimization for every configured layer and collect traces.
 
     ``save_circuits`` is retained for call compatibility. Circuit drawing is
-    now always deferred to ``unitary_pqc_overparam_draw_circuits.py``.
+    now always deferred to
+    ``unitary_pqc_measured_0_overparam_draw_circuits.py``.
     Independent trials are compiled as ``jit(vmap(scan))`` batches.
     """
     global success_rates_history, energy_mean_history, energy_std_history, final_stats, dense_until_layer, max_layer
-    global sparse_step, dense_end, layer_list, save_dir, figures_dir, energy_fig_dir, qfim_fig_dir, hs_fig_dir, ortk_fig_dir, hessian_fig_dir, circuit_dir, optimizer
+    global sparse_step, dense_end, layer_list, save_dir, figures_dir, energy_fig_dir, qfim_fig_dir, hs_fig_dir, hessian_fig_dir, circuit_dir, optimizer
     global qfim_eigs_dir, qfim_eigs_pure_dir, qfim_eigs_reduced_0123_dir
     global qfim_rank_dir, qfim_rank_random_dir, qfim_rank_optimization_path_dir
     global qfim_rank_optimization_path_mean_dir, qfim_rank_optimization_path_min_dir
@@ -3527,14 +2744,15 @@ def run_vqe_optimization(
     global hessian_rank_optimization_path_mean_dir, hessian_rank_optimization_path_min_dir
     global theta_history, best_theta_by_layer, final_theta_wrapped_rmsdist_by_layer, energy_traces_by_layer, grad_norm_traces_by_layer, sample_every
     global sample_iters, sample_iter_set, theta_sample_traces_by_layer, grad_sample_traces_by_layer, cmap
-    global numerical_results_dir, energy_results_dir, qfim_results_dir, hs_results_dir, ortk_results_dir, hessian_results_dir, qfim_grad_align_dir, qfim_grad_align_results_dir
+    global numerical_results_dir, energy_results_dir, qfim_results_dir, hs_results_dir, hessian_results_dir
     effective_batch_size = _resolve_vqe_batch_size(vqe_batch_size)
     if int(num_runs) <= 0:
         raise ValueError("cfg.NUM_RUNS must be a positive integer.")
     if save_circuits:
         warnings.warn(
             "save_circuits is no longer executed during VQE. Run "
-            "src/unitary_pqc/unitary_pqc_overparam_draw_circuits.py after "
+            "src/unitary_pqc/"
+            "unitary_pqc_measured_0_overparam_draw_circuits.py after "
             "the numerical results have been saved.",
             UserWarning,
             stacklevel=2,
@@ -3561,14 +2779,12 @@ def run_vqe_optimization(
     energy_fig_dir = os.path.join(figures_dir, "energy")
     qfim_fig_dir = os.path.join(figures_dir, "qfim")
     hs_fig_dir = os.path.join(figures_dir, "hs")
-    ortk_fig_dir = os.path.join(figures_dir, "ortk")
     hessian_fig_dir = os.path.join(figures_dir, "hessian")
     circuit_dir = os.path.join(save_dir, "optimized_circuits")
     numerical_results_dir = os.path.join(save_dir, "numerical_results")
     energy_results_dir = os.path.join(numerical_results_dir, "energy")
     qfim_results_dir = os.path.join(numerical_results_dir, "qfim")
     hs_results_dir = os.path.join(numerical_results_dir, "hs")
-    ortk_results_dir = os.path.join(numerical_results_dir, "ortk")
     hessian_results_dir = os.path.join(numerical_results_dir, "hessian")
     qfim_eigs_dir = os.path.join(qfim_fig_dir, "eigs")
     qfim_eigs_pure_dir = os.path.join(qfim_eigs_dir, "pure_full")
@@ -3612,8 +2828,6 @@ def run_vqe_optimization(
         hessian_rank_optimization_path_dir,
         "min",
     )
-    qfim_grad_align_dir = os.path.join(qfim_fig_dir, "grad_alignment")
-    qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "grad_alignment")
     _ensure_unitary_result_dirs()
     
     optimizer = optax.adam(learning_rate=lr)
@@ -3628,8 +2842,8 @@ def run_vqe_optimization(
     energy_traces_by_layer = {}
     grad_norm_traces_by_layer = {}  # L -> (num_runs, steps) gradient-norm traces
     
-    # Sampled optimization-time states and gradients used later for
-    # QFIM-eigenbasis gradient-weight plots.
+    # Sampled optimization-time states feed the post-VQE matrix analyses.
+    # Sampled gradients remain in the VQE archive for schema compatibility.
     sample_every = cfg.SAMPLE_EVERY
     sample_iters = np.arange(0, steps, sample_every, dtype=NP_INT_DTYPE)
     if sample_iters.size == 0 or sample_iters[0] != 0:
@@ -3794,6 +3008,15 @@ def save_unitary_vqe_results() -> str:
 
     save_npz_result(
         outpath,
+        ansatz=np.asarray(ANSATZ_NAME),
+        measurement_outcome=np.asarray(
+            MEASUREMENT_OUTCOME,
+            dtype=NP_INT_DTYPE,
+        ),
+        num_params_per_layer=np.asarray(
+            num_params_per_layer,
+            dtype=NP_INT_DTYPE,
+        ),
         h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
         tolerance=np.asarray(tolerance, dtype=NP_REAL_DTYPE),
         steps=np.asarray(steps, dtype=NP_INT_DTYPE),
@@ -3872,11 +3095,10 @@ def save_unitary_vqe_results() -> str:
 def load_unitary_vqe_samples(inpath: Optional[str] = None) -> str:
     """Restore only the saved VQE arrays required by post-VQE analyses.
 
-    The QFIM stage runs in a fresh process, so its optimization-path and
-    gradient-alignment calculations cannot use the dictionaries populated by
-    ``run_vqe_optimization`` directly.  The VQE archive is the process
-    boundary: validate it before publishing any of its values as module
-    globals.
+    The QFIM stage runs in a fresh process, so its optimization-path analyses
+    cannot use the dictionaries populated by ``run_vqe_optimization``
+    directly. The VQE archive is the process boundary: validate it before
+    publishing any of its values as module globals.
     """
     global layer_list, sample_iters, sample_iter_set, steps, num_runs, cmap
     global theta_sample_traces_by_layer, grad_sample_traces_by_layer
@@ -3894,6 +3116,9 @@ def load_unitary_vqe_samples(inpath: Optional[str] = None) -> str:
 
     with np.load(result_path, allow_pickle=False) as data:
         metadata_keys = (
+            "ansatz",
+            "measurement_outcome",
+            "num_params_per_layer",
             "h_param",
             "steps",
             "num_runs",
@@ -3910,13 +3135,50 @@ def load_unitary_vqe_samples(inpath: Optional[str] = None) -> str:
         archived_h_param = np.asarray(data["h_param"])
         archived_steps = np.asarray(data["steps"])
         archived_num_runs = np.asarray(data["num_runs"])
+        archived_ansatz = np.asarray(data["ansatz"])
+        archived_measurement_outcome = np.asarray(
+            data["measurement_outcome"]
+        )
+        archived_num_params_per_layer = np.asarray(
+            data["num_params_per_layer"]
+        )
         if (
             archived_h_param.shape != ()
             or archived_steps.shape != ()
             or archived_num_runs.shape != ()
+            or archived_ansatz.shape != ()
+            or archived_measurement_outcome.shape != ()
+            or archived_num_params_per_layer.shape != ()
         ):
             raise ValueError(
-                "Saved h_param, steps, and num_runs must be scalar values."
+                "Saved variant metadata, h_param, steps, and num_runs must "
+                "be scalar values."
+            )
+        if str(archived_ansatz.item()) != ANSATZ_NAME:
+            raise ValueError(
+                "Saved VQE ansatz does not match this program: "
+                f"{archived_ansatz.item()!r} != {ANSATZ_NAME!r}."
+            )
+        if not np.issubdtype(archived_measurement_outcome.dtype, np.integer):
+            raise TypeError("Saved measurement_outcome must use an integer dtype.")
+        if int(archived_measurement_outcome.item()) != MEASUREMENT_OUTCOME:
+            raise ValueError(
+                "Saved VQE measurement outcome does not match this program: "
+                f"{int(archived_measurement_outcome.item())} != "
+                f"{MEASUREMENT_OUTCOME}."
+            )
+        if not np.issubdtype(
+            archived_num_params_per_layer.dtype,
+            np.integer,
+        ):
+            raise TypeError(
+                "Saved num_params_per_layer must use an integer dtype."
+            )
+        if int(archived_num_params_per_layer.item()) != num_params_per_layer:
+            raise ValueError(
+                "Saved VQE parameter count does not match this program: "
+                f"{int(archived_num_params_per_layer.item())} != "
+                f"{num_params_per_layer}."
             )
         if (
             not np.issubdtype(archived_h_param.dtype, np.number)
@@ -4483,10 +3745,6 @@ def run_random_qfim_analysis(
     global qfim_rank_dir, qfim_rank_random_dir
     global hs_rank_reduced_by_layer, hs_eigs_reduced_by_layer, hs_thresh_reduced_by_layer, hs_eigs_dir, hs_eigs_reduced_0123_dir
     global hs_rank_dir, hs_rank_random_dir
-    global ORTK_RANK_THRESHOLD, ORTK_PARTICIPATION_EPS
-    global ortk_rank_by_layer, ortk_effective_rank_by_layer, ortk_eigs_by_layer, ortk_trace_by_layer
-    global ortk_eigs_dir, ortk_rank_dir, ortk_rank_random_dir
-    global ortk_effective_rank_dir, ortk_effective_rank_random_dir
     global hessian_rank_by_layer, hessian_eigs_by_layer, hessian_thresh_by_layer, hessian_trace_by_layer, hessian_abs_eigsum_by_layer, hessian_eigs_dir
     global hessian_rank_dir, hessian_rank_random_dir
     global qfim_random_result_paths_by_keep
@@ -4510,7 +3768,7 @@ def run_random_qfim_analysis(
             "UNITARY_PQC_QFIM_DENSE_UNTIL_LAYER, and "
             "UNITARY_PQC_QFIM_SPARSE_STEP."
         )
-    # QFIM rank (pure + reduced) + eig plots
+    # QFIM rank (pure + reduced)
     #   - evaluated at RANDOM points in parameter space (per layer)
     #
     # Reduced(mixed):
@@ -4522,11 +3780,6 @@ def run_random_qfim_analysis(
     #   - Computed on the full 5-qubit pure state for every configured layer.
     #   - No wire is traced, so the pure-state QFIM is the efficient SLD-QFIM.
     #
-    # Eigenvalue plots:
-    #   - eigenvalues <= thresh are set to 0.0 BEFORE plotting/storage
-    #   - log-safety epsilon applied ONLY at plotting time
-    #   - the fixed rank threshold 10^{-12} is overlaid as a horizontal line
-    #     in each saved per-layer plot
     # ============================================================
     
     # ------------------------------
@@ -4562,8 +3815,6 @@ def run_random_qfim_analysis(
     # Reduced-QFIM derivative chunk size
     # ------------------------------
     RED_JVP_CHUNK = cfg.RED_JVP_CHUNK
-    ORTK_RANK_THRESHOLD = cfg.ORTK_RANK_THRESHOLD
-    ORTK_PARTICIPATION_EPS = cfg.ORTK_PARTICIPATION_EPS
     
     
     
@@ -4611,10 +3862,6 @@ def run_random_qfim_analysis(
     hs_rank_pure_by_layer = {}
     hs_eigs_pure_by_layer = {}
     hs_thresh_pure_by_layer = {}
-    ortk_rank_by_layer = {}             # L -> (NUM_QFIM_SAMPLES,)
-    ortk_effective_rank_by_layer = {}   # L -> (NUM_QFIM_SAMPLES,)
-    ortk_eigs_by_layer = {}             # L -> (NUM_QFIM_SAMPLES, num_observables)
-    ortk_trace_by_layer = {}            # L -> (NUM_QFIM_SAMPLES,)
     hessian_rank_by_layer = {}          # L -> (NUM_QFIM_SAMPLES,)
     hessian_eigs_by_layer = {}          # L -> (NUM_QFIM_SAMPLES, num_params)
     hessian_thresh_by_layer = {}        # L -> (NUM_QFIM_SAMPLES,)
@@ -4630,28 +3877,14 @@ def run_random_qfim_analysis(
     hs_eigs_reduced_0123_dir = os.path.join(hs_eigs_dir, "reduced_keep_0123")
     hs_rank_dir = os.path.join(hs_fig_dir, "rank")
     hs_rank_random_dir = os.path.join(hs_rank_dir, "random_points")
-    ortk_eigs_dir = os.path.join(ortk_fig_dir, "eigs")
-    ortk_rank_dir = os.path.join(ortk_fig_dir, "rank")
-    ortk_rank_random_dir = os.path.join(ortk_rank_dir, "random_points")
-    ortk_effective_rank_dir = os.path.join(ortk_fig_dir, "effective_rank")
-    ortk_effective_rank_random_dir = os.path.join(
-        ortk_effective_rank_dir,
-        "random_points",
-    )
     hessian_eigs_dir = os.path.join(hessian_fig_dir, "eigs")
     hessian_rank_dir = os.path.join(hessian_fig_dir, "rank")
     hessian_rank_random_dir = os.path.join(hessian_rank_dir, "random_points")
     
-    os.makedirs(qfim_eigs_dir, exist_ok=True)
-    os.makedirs(qfim_eigs_pure_dir, exist_ok=True)
-    os.makedirs(qfim_eigs_reduced_0123_dir, exist_ok=True)
     os.makedirs(qfim_rank_random_dir, exist_ok=True)
     os.makedirs(hs_eigs_dir, exist_ok=True)
     os.makedirs(hs_eigs_reduced_0123_dir, exist_ok=True)
     os.makedirs(hs_rank_random_dir, exist_ok=True)
-    os.makedirs(ortk_eigs_dir, exist_ok=True)
-    os.makedirs(ortk_rank_random_dir, exist_ok=True)
-    os.makedirs(ortk_effective_rank_random_dir, exist_ok=True)
     os.makedirs(hessian_eigs_dir, exist_ok=True)
     os.makedirs(hessian_rank_random_dir, exist_ok=True)
     _ensure_unitary_result_dirs()
@@ -4713,31 +3946,6 @@ def run_random_qfim_analysis(
         del red_qfim_batch_runner
         _release_jax_compilation_cache()
     
-        if make_plots:
-            _save_qfim_eigs_violinplot_by_index(
-                qfim_eigs_reduced_by_layer[L],
-                title=rf"QFIM eigenvalues at {NUM_QFIM_SAMPLES} random points (L={L})",
-                outpath=os.path.join(qfim_eigs_reduced_0123_dir, f"L{L}_reduced_0123.pdf"),
-                rank_thresholds=qfim_thresh_reduced_by_layer[L],
-            )
-            plot_style.save_eigenvalue_histograms_by_trial(
-                qfim_eigs_reduced_by_layer[L],
-                outdir=os.path.join(
-                    qfim_eigs_reduced_0123_dir,
-                    "histograms",
-                    "random_points",
-                    f"L{L}",
-                ),
-                matrix_tag="unitary_pqc_qfim",
-                matrix_label="QFIM",
-                num_layers=L,
-                context_tag="random",
-                context_label="random point",
-                condition_tag="reduced0123",
-                condition_label="reduced keep=(0,1,2,3)",
-                color="C0",
-            )
-
         # --------------------------
         # Hilbert-Schmidt tangent Gram matrix (keep 0..3)
         #   G_ij = Re Tr[(partial_i rho)(partial_j rho)]
@@ -4883,60 +4091,6 @@ def run_random_qfim_analysis(
                 color="C3",
             )
 
-        if RUN_ORTK_ANALYSIS:
-            # Observable-Relevant Tangent Kernel
-            #   o_a(theta) = Tr[(c_a O_a) rho_system(theta)]
-            #   K_obs(theta) = J_obs(theta) J_obs(theta)^T
-            ortk_batch_runner = make_ortk_analysis_batch_runner(L)
-            (
-                ortk_ranks,
-                ortk_effective_ranks,
-                ortk_eigs,
-                ortk_traces,
-            ) = _evaluate_analysis_in_batches(
-                qfim_random_thetas_by_layer[L],
-                ortk_batch_runner,
-                batch_size=effective_analysis_batch_size,
-                description=(
-                    f"ORTK batches (L={L}, "
-                    f"batch={effective_analysis_batch_size})"
-                ),
-            )
-            ortk_rank_by_layer[L] = np.asarray(
-                ortk_ranks,
-                dtype=NP_INT_DTYPE,
-            )
-            ortk_effective_rank_by_layer[L] = np.asarray(
-                ortk_effective_ranks,
-                dtype=NP_REAL_DTYPE,
-            )
-            ortk_eigs_by_layer[L] = np.asarray(
-                ortk_eigs,
-                dtype=NP_REAL_DTYPE,
-            )
-            ortk_trace_by_layer[L] = np.asarray(
-                ortk_traces,
-                dtype=NP_REAL_DTYPE,
-            )
-
-            del ortk_batch_runner
-            _release_jax_compilation_cache()
-
-            if make_plots:
-                _save_qfim_eigs_violinplot_by_index(
-                    ortk_eigs_by_layer[L],
-                    title=(
-                        rf"Observable-Relevant Tangent Kernel eigenvalues at "
-                        rf"{NUM_QFIM_SAMPLES} random points (L={L})"
-                    ),
-                    outpath=os.path.join(ortk_eigs_dir, f"L{L}.pdf"),
-                    rank_thresholds=np.asarray(
-                        [ORTK_RANK_THRESHOLD],
-                        dtype=NP_REAL_DTYPE,
-                    ),
-                    ylabel="ORTK eigenvalue",
-                )
-
         # --------------------------
         # Energy Hessian
         #   H_ij = partial_i partial_j E(theta)
@@ -5006,35 +4160,6 @@ def run_random_qfim_analysis(
                 color="C6",
             )
     
-        # --------------------------
-        # keep01234 / pure(full) QFIM
-        # --------------------------
-        if L < PURE_QFIM_LAYER_THRESHOLD:
-            if make_plots:
-                _save_qfim_eigs_violinplot_by_index(
-                    qfim_eigs_pure_by_layer[L],
-                    title=rf"QFIM eigenvalues (Pure full-state) at {NUM_QFIM_SAMPLES} random points (L={L})",
-                    outpath=os.path.join(qfim_eigs_pure_dir, f"L{L}_pure_full.pdf"),
-                    rank_thresholds=qfim_thresh_pure_by_layer[L],
-                )
-                plot_style.save_eigenvalue_histograms_by_trial(
-                    qfim_eigs_pure_by_layer[L],
-                    outdir=os.path.join(
-                        qfim_eigs_pure_dir,
-                        "histograms",
-                        "random_points",
-                        f"L{L}",
-                    ),
-                    matrix_tag="unitary_pqc_qfim",
-                    matrix_label="QFIM",
-                    num_layers=L,
-                    context_tag="random",
-                    context_label="random point",
-                    condition_tag="pure_full",
-                    condition_label="pure full state",
-                    color="C0",
-                )
-
     save_npz_result(
         os.path.join(qfim_results_dir, "qfim_random_points.npz"),
         h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
@@ -5152,53 +4277,6 @@ def run_random_qfim_analysis(
         **{f"L{int(L)}_rank_threshold": arr for L, arr in hs_thresh_pure_by_layer.items()},
     )
 
-    if RUN_ORTK_ANALYSIS:
-        save_npz_result(
-            os.path.join(ortk_results_dir, "ortk_random_points.npz"),
-            representation_equivalence=np.asarray(
-                "pure_full == reduced_keep_0123 for system-observable expectations"
-            ),
-            h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-            num_ortk_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
-            ortk_sample_seed_base=np.asarray(
-                QFIM_SAMPLE_SEED_BASE,
-                dtype=NP_INT_DTYPE,
-            ),
-            ortk_rank_threshold=np.asarray(
-                ORTK_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            ortk_participation_eps=np.asarray(
-                ORTK_PARTICIPATION_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            ortk_num_observables=np.asarray(
-                H_OBSERVABLE_MATRICES.shape[0],
-                dtype=NP_INT_DTYPE,
-            ),
-            layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
-            analysis_batch_size=np.asarray(
-                effective_analysis_batch_size,
-                dtype=NP_INT_DTYPE,
-            ),
-            **{
-                f"L{int(L)}_rank": arr
-                for L, arr in ortk_rank_by_layer.items()
-            },
-            **{
-                f"L{int(L)}_effective_rank": arr
-                for L, arr in ortk_effective_rank_by_layer.items()
-            },
-            **{
-                f"L{int(L)}_eigs_desc": arr
-                for L, arr in ortk_eigs_by_layer.items()
-            },
-            **{
-                f"L{int(L)}_trace": arr
-                for L, arr in ortk_trace_by_layer.items()
-            },
-        )
-
     save_npz_result(
         os.path.join(hessian_results_dir, "hessian_random_points.npz"),
         representation_equivalence=np.asarray(
@@ -5245,37 +4323,6 @@ def run_random_qfim_analysis(
     if not make_plots:
         return
 
-    if RUN_ORTK_ANALYSIS:
-        plot_scalar_violin_by_layer(
-            ortk_rank_by_layer,
-            qfim_layer_list,
-            title=(
-                rf"Observable-Relevant Tangent Kernel rank at "
-                rf"{NUM_QFIM_SAMPLES} random points"
-            ),
-            ylabel="ORTK rank",
-            outpath=os.path.join(
-                ortk_rank_random_dir,
-                "ortk_rank_violinplot_random_points.pdf",
-            ),
-            integer_y_axis=True,
-        )
-        plot_scalar_violin_by_layer(
-            ortk_effective_rank_by_layer,
-            qfim_layer_list,
-            title=(
-                rf"Observable-Relevant Tangent Kernel participation effective "
-                rf"rank at {NUM_QFIM_SAMPLES} random points"
-            ),
-            ylabel="ORTK participation effective rank",
-            outpath=os.path.join(
-                ortk_effective_rank_random_dir,
-                "ortk_effective_rank_violinplot_random_points.pdf",
-            ),
-            integer_y_axis=False,
-        )
-    
-    
     # ============================================================
     # Plot: QFIM rank vs depth  (VIOLIN)
     #   - reduced 縺ｨ pure(full) 縺ｮ縺ｿ繧定｡ｨ遉ｺ
@@ -5565,8 +4612,6 @@ def run_optimization_path_qfim_analysis(
     """Compute trajectory matrix metrics with fixed-size JAX batches."""
     global qfim_rank_history_by_layer, qfim_eigs_history_by_layer, qfim_thresh_history_by_layer, qfim_rank_history_npz
     global hs_rank_history_by_layer, hs_eigs_history_by_layer, hs_thresh_history_by_layer, hs_rank_history_npz
-    global ortk_rank_history_by_layer, ortk_effective_rank_history_by_layer
-    global ortk_eigs_history_by_layer, ortk_trace_history_by_layer
     global hessian_rank_history_by_layer, hessian_eigs_history_by_layer, hessian_thresh_history_by_layer, hessian_trace_history_by_layer, hessian_abs_eigsum_history_by_layer, hessian_rank_history_npz
     global qfim_optimization_path_result_paths_by_keep
     effective_analysis_batch_size = _resolve_analysis_batch_size(
@@ -5756,95 +4801,6 @@ def run_optimization_path_qfim_analysis(
         **{f"L{int(L)}_rank_threshold": arr for L, arr in hs_thresh_history_pure.items()},
     )
 
-    ortk_rank_history_by_layer = {}
-    ortk_effective_rank_history_by_layer = {}
-    ortk_eigs_history_by_layer = {}
-    ortk_trace_history_by_layer = {}
-    if RUN_ORTK_ANALYSIS:
-        (
-            ortk_rank_history_by_layer,
-            ortk_effective_rank_history_by_layer,
-            ortk_eigs_history_by_layer,
-        ) = compute_ortk_rank_history_by_layer(
-            theta_sample_traces_by_layer,
-            layer_list,
-            batch_size=effective_analysis_batch_size,
-        )
-        ortk_trace_history_by_layer = {
-            int(L): np.sum(np.asarray(arr, dtype=NP_REAL_DTYPE), axis=2)
-            for L, arr in ortk_eigs_history_by_layer.items()
-        }
-
-        ortk_history_metadata = {
-            "sample_iters": np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-            "plot_iters": _qfim_history_plot_iterations(sample_iters),
-            "layers": np.asarray(layer_list, dtype=NP_INT_DTYPE),
-            "analysis_batch_size": np.asarray(
-                effective_analysis_batch_size,
-                dtype=NP_INT_DTYPE,
-            ),
-        }
-        save_npz_result(
-            os.path.join(
-                ortk_results_dir,
-                "ortk_rank_history_optimization_path.npz",
-            ),
-            **ortk_history_metadata,
-            ortk_rank_threshold=np.asarray(
-                ORTK_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            **{
-                f"L{int(L)}": arr
-                for L, arr in ortk_rank_history_by_layer.items()
-            },
-        )
-        save_npz_result(
-            os.path.join(
-                ortk_results_dir,
-                "ortk_effective_rank_history_optimization_path.npz",
-            ),
-            **ortk_history_metadata,
-            ortk_participation_eps=np.asarray(
-                ORTK_PARTICIPATION_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            **{
-                f"L{int(L)}": arr
-                for L, arr in ortk_effective_rank_history_by_layer.items()
-            },
-        )
-        save_npz_result(
-            os.path.join(
-                ortk_results_dir,
-                "ortk_eigs_history_optimization_path.npz",
-            ),
-            **ortk_history_metadata,
-            ortk_rank_threshold=np.asarray(
-                ORTK_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            ortk_participation_eps=np.asarray(
-                ORTK_PARTICIPATION_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            **{
-                f"L{int(L)}": arr
-                for L, arr in ortk_eigs_history_by_layer.items()
-            },
-        )
-        save_npz_result(
-            os.path.join(
-                ortk_results_dir,
-                "ortk_trace_history_optimization_path.npz",
-            ),
-            **ortk_history_metadata,
-            **{
-                f"L{int(L)}": arr
-                for L, arr in ortk_trace_history_by_layer.items()
-            },
-        )
-
     (
         hessian_rank_history_by_layer,
         hessian_eigs_history_by_layer,
@@ -5966,76 +4922,6 @@ def run_optimization_path_qfim_analysis(
         cmap=cmap,
     )
 
-    if RUN_ORTK_ANALYSIS:
-        plot_qfim_rank_history_mean_by_layer(
-            ortk_rank_history_by_layer,
-            layer_list,
-            sample_iters,
-            title="Mean Observable-Relevant Tangent Kernel rank along optimization path",
-            outpath=os.path.join(
-                ortk_rank_optimization_path_mean_dir,
-                "ortk_rank_mean_history_optimization_path.pdf",
-            ),
-            ylabel="Mean ORTK rank",
-            cmap=cmap,
-        )
-        plot_qfim_rank_history_min_by_layer(
-            ortk_rank_history_by_layer,
-            layer_list,
-            sample_iters,
-            title="Minimum Observable-Relevant Tangent Kernel rank along optimization path",
-            outpath=os.path.join(
-                ortk_rank_optimization_path_min_dir,
-                "ortk_rank_min_history_optimization_path.pdf",
-            ),
-            ylabel="Minimum ORTK rank",
-            cmap=cmap,
-            integer_y_axis=True,
-        )
-        plot_qfim_rank_history_mean_by_layer(
-            ortk_effective_rank_history_by_layer,
-            layer_list,
-            sample_iters,
-            title=(
-                "Mean Observable-Relevant Tangent Kernel participation effective "
-                "rank along optimization path"
-            ),
-            outpath=os.path.join(
-                ortk_effective_rank_optimization_path_mean_dir,
-                "ortk_effective_rank_mean_history_optimization_path.pdf",
-            ),
-            ylabel="Mean ORTK participation effective rank",
-            cmap=cmap,
-        )
-        plot_qfim_rank_history_min_by_layer(
-            ortk_effective_rank_history_by_layer,
-            layer_list,
-            sample_iters,
-            title=(
-                "Minimum Observable-Relevant Tangent Kernel participation "
-                "effective rank along optimization path"
-            ),
-            outpath=os.path.join(
-                ortk_effective_rank_optimization_path_min_dir,
-                "ortk_effective_rank_min_history_optimization_path.pdf",
-            ),
-            ylabel="Minimum ORTK participation effective rank",
-            cmap=cmap,
-            integer_y_axis=False,
-        )
-        plot_qfim_rank_history_mean_by_layer(
-            ortk_trace_history_by_layer,
-            layer_list,
-            sample_iters,
-            title="Mean Observable-Relevant Tangent Kernel trace along optimization path",
-            outpath=os.path.join(
-                ortk_trace_optimization_path_dir,
-                "ortk_trace_mean_history_optimization_path.pdf",
-            ),
-            ylabel="Mean ORTK trace",
-            cmap=cmap,
-        )
-
     plot_qfim_rank_history_mean_by_layer(
         hessian_rank_history_by_layer,
         layer_list,
@@ -6065,132 +4951,30 @@ def run_optimization_path_qfim_analysis(
     
     # ============================================================
 
-def run_qfim_grad_alignment_analysis(
-    *,
-    make_plots: bool = False,
-    analysis_batch_size: Optional[int] = None,
-) -> None:
-    """Compute batched QFIM-gradient alignment tables and scatter plots."""
-    global QFIM_GRAD_ALIGN_EIG_FLOOR, QFIM_GRAD_ALIGN_WEIGHT_FLOOR, qfim_grad_align_dir, qfim_grad_align_results_dir, RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION, LOG_X_QFIM_GRAD_ALIGNMENT
-    global LOG_Y_QFIM_GRAD_ALIGNMENT, QFIM_GRAD_ALIGNMENT_RUN_INDICES, QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS, qfim_grad_alignment_table_by_layer_iteration
-    global qfim_grad_alignment_tables_by_keep
-    # QFIM eigenvalue vs gradient-direction weight scatter plots
-    #   x-axis: QFIM eigenvalue lambda_i
-    #   y-axis: w_i^grad = |v_i^T g|^2 / sum_j |v_j^T g|^2
-    #
-    # This section uses optimization-path samples already stored in
-    #   theta_sample_traces_by_layer[L]
-    #   grad_sample_traces_by_layer[L]
-    # and constructs one scatter plot per available layer/iteration.
-    # ============================================================
-    
-    QFIM_GRAD_ALIGN_EIG_FLOOR = 1e-16
-    QFIM_GRAD_ALIGN_WEIGHT_FLOOR = 1e-16
-    
-    qfim_grad_align_dir = os.path.join(qfim_fig_dir, "grad_alignment")
-    os.makedirs(qfim_grad_align_dir, exist_ok=True)
-    os.makedirs(qfim_grad_align_results_dir, exist_ok=True)
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    # ------------------------------------------------------------
-    # Execution settings
-    # ------------------------------------------------------------
-    # keep0123 is saved at the historical root.  keep01234 is organized below
-    # qfim_grad_alignment/keep01234 so both states use the DPQC directory rule.
-    RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION = cfg.RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION
-    LOG_X_QFIM_GRAD_ALIGNMENT = cfg.LOG_X_QFIM_GRAD_ALIGNMENT
-    LOG_Y_QFIM_GRAD_ALIGNMENT = cfg.LOG_Y_QFIM_GRAD_ALIGNMENT
-    
-    # Use None for all VQE runs, or e.g. range(5) for a quick test.
-    QFIM_GRAD_ALIGNMENT_RUN_INDICES = cfg.QFIM_GRAD_ALIGNMENT_RUN_INDICES
-    target_iterations_cfg = cfg.QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS
-    if target_iterations_cfg is None:
-        QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS = tuple(int(t) for t in sample_iters)
-    else:
-        QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS = tuple(
-            int(t) for t in target_iterations_cfg
-        )
-    
-    qfim_grad_alignment_tables_by_keep = {}
-    qfim_grad_alignment_table_by_layer_iteration = {}
-    if RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION:
-        for result_key, keep_wires, state_label in (
-            (
-                QFIM_KEEP0123_KEY,
-                KEEP_WIRES_4,
-                QFIM_KEEP0123_LABEL,
-            ),
-            (
-                QFIM_KEEP01234_KEY,
-                KEEP_WIRES_5,
-                QFIM_KEEP01234_LABEL,
-            ),
-        ):
-            qfim_grad_alignment_tables_by_keep[result_key] = (
-                run_qfim_grad_alignment_by_layer_iteration_folders(
-                    layers=layer_list,
-                    target_iterations=QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS,
-                    run_indices=QFIM_GRAD_ALIGNMENT_RUN_INDICES,
-                    sample_iters_for_labels=sample_iters,
-                    jvp_chunk=RED_JVP_CHUNK,
-                    log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-                    log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-                    save_npz=True,
-                    make_plots=make_plots,
-                    data_dir=qfim_grad_align_results_dir,
-                    plot_dir=qfim_grad_align_dir,
-                    result_key=result_key,
-                    state_label=state_label,
-                    keep_wires=keep_wires,
-                    analysis_batch_size=analysis_batch_size,
-                )
-            )
-        qfim_grad_alignment_table_by_layer_iteration = (
-            qfim_grad_alignment_tables_by_keep[QFIM_KEEP0123_KEY]
-        )
-
-
 def collect_unitary_pqc_result() -> dict:
     """Return the compact summary shown by the notebook after execution."""
     return {
+        "ansatz": ANSATZ_NAME,
+        "measurement_outcome": MEASUREMENT_OUTCOME,
+        "num_params_per_layer": num_params_per_layer,
         "save_dir": save_dir,
         "figures_dir": figures_dir,
         "energy_fig_dir": energy_fig_dir,
         "qfim_fig_dir": qfim_fig_dir,
         "hs_fig_dir": hs_fig_dir,
-        "ortk_fig_dir": ortk_fig_dir,
         "hessian_fig_dir": hessian_fig_dir,
         "circuit_dir": circuit_dir,
         "numerical_results_dir": numerical_results_dir,
         "energy_results_dir": energy_results_dir,
         "qfim_results_dir": qfim_results_dir,
         "hs_results_dir": hs_results_dir,
-        "ortk_results_dir": ortk_results_dir,
         "hessian_results_dir": hessian_results_dir,
         "qfim_keep_keys": (QFIM_KEEP0123_KEY, QFIM_KEEP01234_KEY),
         "qfim_random_result_paths_by_keep": qfim_random_result_paths_by_keep,
         "qfim_optimization_path_result_paths_by_keep": (
             qfim_optimization_path_result_paths_by_keep
         ),
-        "qfim_grad_alignment_results_dir": qfim_grad_align_results_dir,
         "h_param": h_param,
-        "ortk_analysis_enabled": RUN_ORTK_ANALYSIS,
         "vqe_batch_size": VQE_BATCH_SIZE,
         "analysis_batch_size": ANALYSIS_BATCH_SIZE,
         "layer_list": layer_list,
@@ -6235,10 +5019,6 @@ def run_unitary_pqc_qfim_stage(
         make_plots=False,
         analysis_batch_size=effective_analysis_batch_size,
     )
-    run_qfim_grad_alignment_analysis(
-        make_plots=False,
-        analysis_batch_size=effective_analysis_batch_size,
-    )
     result = collect_unitary_pqc_result()
     result["analysis_batch_size"] = effective_analysis_batch_size
     result["vqe_input_path"] = vqe_input_path
@@ -6267,10 +5047,6 @@ def run_unitary_pqc_overparam(
         analysis_batch_size=effective_analysis_batch_size,
     )
     run_optimization_path_qfim_analysis(
-        make_plots=False,
-        analysis_batch_size=effective_analysis_batch_size,
-    )
-    run_qfim_grad_alignment_analysis(
         make_plots=False,
         analysis_batch_size=effective_analysis_batch_size,
     )
@@ -6310,7 +5086,8 @@ def _run_selected_cli_stage(args: argparse.Namespace) -> int:
         print(
             "Circuit drawing was skipped. To draw the saved optimized "
             "circuits, run "
-            "src/unitary_pqc/unitary_pqc_overparam_draw_circuits.py "
+            "src/unitary_pqc/"
+            "unitary_pqc_measured_0_overparam_draw_circuits.py "
             "separately."
         )
         return 0

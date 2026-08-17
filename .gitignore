@@ -6,6 +6,8 @@
 !/.gitignore
 !/src/
 !/src/**
+!/analysis_landscape/
+!/analysis_landscape/**
 
 # Python runtime caches and local tooling state
 __pycache__/

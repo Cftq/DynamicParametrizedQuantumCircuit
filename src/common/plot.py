@@ -562,6 +562,78 @@ def save_eigenvalue_histograms_by_trial(
     return saved_paths
 
 
+def save_eigenvalue_histogram_across_trials(
+    eigenvalues_by_trial: np.ndarray,
+    *,
+    outdir: str,
+    matrix_tag: str,
+    matrix_label: str,
+    num_layers: int,
+    context_tag: str,
+    context_label: str,
+    iteration: Optional[int] = None,
+    condition_tag: Optional[str] = None,
+    condition_label: Optional[str] = None,
+    bins="auto",
+    color: str = "C0",
+    trial_index_start: int = 0,
+) -> str:
+    """Save one histogram containing all eigenvalues from several trials."""
+    eigs = np.asarray(eigenvalues_by_trial, dtype=np.float64)
+    if eigs.ndim == 1:
+        eigs = eigs[None, :]
+    if eigs.ndim != 2:
+        raise ValueError(
+            "eigenvalues_by_trial must have shape "
+            "(num_trials, num_eigenvalues)."
+        )
+    if eigs.shape[0] == 0 or eigs.shape[1] == 0:
+        raise ValueError("eigenvalues_by_trial must not be empty.")
+    if not np.all(np.isfinite(eigs)):
+        raise ValueError("eigenvalues_by_trial must contain only finite values.")
+
+    num_layers = int(num_layers)
+    num_trials, num_params = (int(size) for size in eigs.shape)
+    first_trial = int(trial_index_start)
+    last_trial = first_trial + num_trials - 1
+    filename_tags = [
+        str(matrix_tag).strip("_"),
+        "eig_hist",
+        f"L{num_layers:04d}",
+        f"params{num_params:04d}",
+        f"trials{first_trial:04d}-{last_trial:04d}",
+    ]
+    if iteration is not None:
+        filename_tags.append(f"iter{int(iteration):06d}")
+    filename_tags.append(str(context_tag).strip("_"))
+    if condition_tag:
+        filename_tags.append(str(condition_tag).strip("_"))
+
+    title_parts = [
+        f"{matrix_label} eigenvalue histogram",
+        f"L={num_layers}",
+        f"parameters={num_params}",
+        f"trials={first_trial}-{last_trial}",
+        context_label,
+    ]
+    if iteration is not None:
+        title_parts.append(f"iteration={int(iteration)}")
+    if condition_label:
+        title_parts.append(condition_label)
+
+    os.makedirs(outdir, exist_ok=True)
+    outpath = os.path.join(outdir, "_".join(filename_tags) + ".pdf")
+    save_eigenvalue_histogram(
+        eigs,
+        title=f"{title_parts[0]} ({', '.join(title_parts[1:])})",
+        outpath=outpath,
+        bins=bins,
+        xlabel=f"{matrix_label} eigenvalue",
+        color=color,
+    )
+    return outpath
+
+
 def plot_qfim_grad_alignment_table(
     table,
     *,

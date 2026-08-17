@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 # coding: utf-8
-"""Visualize saved Unitary-PQC numerical results.
+"""Visualize saved measurement-outcome-0 Unitary-PQC numerical results.
 
-Run unitary_pqc_overparam_compute.py first. This script loads saved .npz
-results under figs/unitary_pqc/h_<h_param>/numerical_results and generates
+Run ``unitary_pqc_measured_0_overparam_compute.py`` first. This script loads
+saved .npz results under
+``figs/unitary_pqc_measured_0/h_<h_param>/numerical_results`` and generates
 numerical figures without recomputing VQE or QFIM quantities. Circuit drawings
-are handled independently by unitary_pqc_overparam_draw_circuits.py.
+are handled independently by
+``unitary_pqc_measured_0_overparam_draw_circuits.py``.
 
-    python src/unitary_pqc/unitary_pqc_overparam_visualize.py --h-param 0.1
+    python src/unitary_pqc/unitary_pqc_measured_0_overparam_visualize.py --h-param 0.1
 """
 from __future__ import annotations
 
@@ -45,8 +47,8 @@ def _finite_float(value: str) -> float:
 def _parse_cli_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
-            "Visualize saved Unitary-PQC results for one Hamiltonian "
-            "parameter h."
+            "Visualize saved measurement-outcome-0 Unitary-PQC results for "
+            "one Hamiltonian parameter h."
         )
     )
     parser.add_argument(
@@ -74,8 +76,10 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
-import unitary_pqc_overparam_compute as upqc
-from dpqc_overparam_common import load_npz_result as _load_npz_result_unchecked
+if __package__:
+    from . import unitary_pqc_measured_0_overparam_compute as upqc
+else:
+    import unitary_pqc_measured_0_overparam_compute as upqc
 
 
 NP_REAL_DTYPE = np.float64
@@ -97,6 +101,12 @@ METRIC_COLORS = {
     "energy": "#E69F00",
 }
 STATISTIC_LINESTYLES = {"mean": "-"}
+
+
+def _load_npz_result_unchecked(inpath: str) -> dict:
+    """Load one numerical archive without importing simulator packages."""
+    with np.load(inpath, allow_pickle=False) as data:
+        return {key: data[key] for key in data.files}
 
 
 def _validate_result_h_param(
@@ -139,11 +149,64 @@ def _validate_result_h_param(
         )
 
 
+def _validate_result_variant(
+    result: dict,
+    result_path,
+    *,
+    required: bool = False,
+) -> None:
+    """Ensure variant-tagged archives belong to measurement outcome 0."""
+    keys = ("ansatz", "measurement_outcome", "num_params_per_layer")
+    present = tuple(key for key in keys if key in result)
+    if not present:
+        if required:
+            raise KeyError(
+                "The required archive does not contain Unitary-PQC variant "
+                f"metadata: {Path(result_path).resolve()}"
+            )
+        return
+    missing = tuple(key for key in keys if key not in result)
+    if missing:
+        raise KeyError(
+            "The archive contains incomplete Unitary-PQC variant metadata "
+            f"({', '.join(missing)} missing): {Path(result_path).resolve()}"
+        )
+
+    ansatz = np.asarray(result["ansatz"])
+    outcome = np.asarray(result["measurement_outcome"])
+    params_per_layer = np.asarray(result["num_params_per_layer"])
+    if ansatz.size != 1 or str(ansatz.reshape(-1)[0]) != upqc.ANSATZ_NAME:
+        raise ValueError(
+            "Saved ansatz does not match this visualizer: "
+            f"{ansatz!r} != {upqc.ANSATZ_NAME!r} in "
+            f"{Path(result_path).resolve()}"
+        )
+    if (
+        outcome.size != 1
+        or not np.issubdtype(outcome.dtype, np.integer)
+        or int(outcome.reshape(-1)[0]) != upqc.MEASUREMENT_OUTCOME
+    ):
+        raise ValueError(
+            "Saved measurement_outcome does not match this visualizer in "
+            f"{Path(result_path).resolve()}"
+        )
+    if (
+        params_per_layer.size != 1
+        or not np.issubdtype(params_per_layer.dtype, np.integer)
+        or int(params_per_layer.reshape(-1)[0]) != upqc.num_params_per_layer
+    ):
+        raise ValueError(
+            "Saved num_params_per_layer does not match this visualizer in "
+            f"{Path(result_path).resolve()}"
+        )
+
+
 def _load_required_result(
     path: str,
     *,
     expected_h_param: Optional[float] = None,
     require_h_param: bool = False,
+    require_variant: bool = False,
 ) -> dict:
     """Load a compute-stage result or explain how to generate it."""
     result_path = Path(path).resolve()
@@ -151,7 +214,9 @@ def _load_required_result(
         upqc.h_param if expected_h_param is None else expected_h_param
     )
     if not result_path.is_file():
-        compute_script = _MODULE_DIR / "unitary_pqc_overparam_compute.py"
+        compute_script = (
+            _MODULE_DIR / "unitary_pqc_measured_0_overparam_compute.py"
+        )
         raise FileNotFoundError(
             "Required Unitary-PQC numerical result is missing:\n"
             f"  {result_path}\n"
@@ -166,6 +231,11 @@ def _load_required_result(
         result_path,
         expected_h_param=selected_h_param,
         required=require_h_param,
+    )
+    _validate_result_variant(
+        result,
+        result_path,
+        required=require_variant,
     )
     return result
 
@@ -516,6 +586,9 @@ def _plot_final_energy_error_beeswarm(
 
 def _success_probability_threshold_label(threshold: float) -> str:
     threshold = float(threshold)
+    if np.isclose(threshold, 1.0, rtol=1e-12, atol=0.0):
+        return r"$\delta=1.0$"
+
     hundredths = int(np.rint(100.0 * threshold))
     if 1 <= hundredths <= 10 and np.isclose(
         threshold,
@@ -539,6 +612,7 @@ def _plot_success_probability_multiple_tolerances(
     statistics: dict,
     *,
     outpath: str,
+    only_threshold: Optional[float] = None,
 ) -> None:
     """Plot the fraction of trials below each final-energy-error threshold."""
     layers = np.asarray(statistics["layers"], dtype=NP_INT_DTYPE)
@@ -550,6 +624,24 @@ def _plot_success_probability_multiple_tolerances(
     num_trials = int(statistics["num_trials"])
     if probabilities.shape != (layers.size, thresholds.size):
         raise ValueError("Success-probability array has an inconsistent shape.")
+
+    if only_threshold is not None:
+        requested_threshold = float(only_threshold)
+        matching = np.flatnonzero(
+            np.isclose(
+                thresholds,
+                requested_threshold,
+                rtol=1e-12,
+                atol=0.0,
+            )
+        )
+        if matching.size != 1:
+            raise ValueError(
+                "Expected exactly one success-probability threshold matching "
+                f"{requested_threshold:g}; found {matching.size}."
+            )
+        thresholds = thresholds[matching]
+        probabilities = probabilities[:, matching]
 
     colors = matplotlib.colormaps.get_cmap("viridis")(
         np.linspace(0.08, 0.92, thresholds.size)
@@ -576,11 +668,18 @@ def _plot_success_probability_multiple_tolerances(
 
     ax.set_xlabel(r"Number of Layers $L$")
     ax.set_ylabel(r"Empirical success probability $\widehat{S}_L(\delta)$")
-    upqc.set_prx_title(
-        "Success probability at multiple accuracy levels "
-        f"({num_trials} independent trials)",
-        ax=ax,
-    )
+    if thresholds.size == 1:
+        title = (
+            "Success probability at "
+            f"{_success_probability_threshold_label(thresholds[0])} "
+            f"({num_trials} independent trials)"
+        )
+    else:
+        title = (
+            "Success probability at multiple accuracy levels "
+            f"({num_trials} independent trials)"
+        )
+    upqc.set_prx_title(title, ax=ax)
     ax.set_xticks(layers)
     ax.set_xticklabels([str(int(L)) for L in layers])
     ax.set_ylim(0.0, 1.0)
@@ -699,6 +798,14 @@ def _plot_vqe_ground_truth_error_results() -> dict:
             "success_probability_multiple_tolerances.pdf",
         ),
     )
+    _plot_success_probability_multiple_tolerances(
+        success_statistics,
+        outpath=os.path.join(
+            energy_dir,
+            "success_probability_delta_1.pdf",
+        ),
+        only_threshold=1.0,
+    )
     return success_statistics
 
 
@@ -754,7 +861,11 @@ def _load_unitary_vqe_results(result: Optional[dict] = None) -> dict:
         "vqe_optimization_results.npz",
     )
     if result is None:
-        result = _load_required_result(path, require_h_param=True)
+        result = _load_required_result(
+            path,
+            require_h_param=True,
+            require_variant=True,
+        )
     else:
         _validate_result_h_param(
             result,
@@ -762,6 +873,7 @@ def _load_unitary_vqe_results(result: Optional[dict] = None) -> dict:
             expected_h_param=upqc.h_param,
             required=True,
         )
+        _validate_result_variant(result, path, required=True)
 
     upqc.layer_list = [
         int(L)
@@ -1357,6 +1469,7 @@ def run_unitary_pqc_visualization(
         vqe_result_path,
         expected_h_param=selected_h_param,
         require_h_param=True,
+        require_variant=True,
     )
 
     upqc.configure_unitary_pqc_overparam(h_value=selected_h_param)

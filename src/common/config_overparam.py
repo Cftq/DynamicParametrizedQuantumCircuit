@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
-"""Configuration for DPQC overparameterization computations and plots."""
+"""Configuration for DPQC and Unitary-PQC computations and plots."""
 
 
 # ------------------------------------------------------------
@@ -42,18 +42,29 @@ SUCCESS_PROBABILITY_FIGURE_THRESHOLDS = tuple(
 # ------------------------------------------------------------
 # Layer schedules
 # ------------------------------------------------------------
-VQE_MAX_LAYER = 44
+# DPQC VQE optimization
 VQE_DENSE_UNTIL_LAYER = 8
 VQE_SPARSE_STEP = 4
 
-UNITARY_PQC_MAX_LAYER = 40
+# Unitary-PQC VQE optimization
+UNITARY_PQC_MAX_LAYER = 20
 UNITARY_PQC_DENSE_UNTIL_LAYER = 8
 UNITARY_PQC_SPARSE_STEP = 4
 
-# QFIM layer schedules
-QFIM_MAX_LAYER = VQE_MAX_LAYER
-QFIM_DENSE_UNTIL_LAYER = VQE_DENSE_UNTIL_LAYER
-QFIM_SPARSE_STEP = VQE_SPARSE_STEP
+# DPQC random-point QFIM/derivative analyses
+DPQC_QFIM_MAX_LAYER = 44
+DPQC_QFIM_DENSE_UNTIL_LAYER = 8
+DPQC_QFIM_SPARSE_STEP = 4
+
+# Unitary-PQC random-point QFIM/derivative analyses
+UNITARY_PQC_QFIM_MAX_LAYER = UNITARY_PQC_MAX_LAYER
+UNITARY_PQC_QFIM_DENSE_UNTIL_LAYER = UNITARY_PQC_DENSE_UNTIL_LAYER
+UNITARY_PQC_QFIM_SPARSE_STEP = UNITARY_PQC_SPARSE_STEP
+
+# Backward-compatible aliases for the former DPQC-only QFIM names.
+QFIM_MAX_LAYER = DPQC_QFIM_MAX_LAYER
+QFIM_DENSE_UNTIL_LAYER = DPQC_QFIM_DENSE_UNTIL_LAYER
+QFIM_SPARSE_STEP = DPQC_QFIM_SPARSE_STEP
 
 # ------------------------------------------------------------
 # QFIM numerical settings
@@ -66,11 +77,11 @@ QFIM_SAMPLE_SEED_BASE = 0
 UNITARY_PQC_QFIM_SAMPLE_SEED_BASE = 123456
 PURE_QFIM_LAYER_THRESHOLD = 8
 RED_JVP_CHUNK = 16
-# Independent parameter points used by QFIM, HS, Hessian, and ORTK analyses
+# Independent parameter points used by QFIM, HS, and Hessian analyses
 # are evaluated with a fixed-shape ``jit(vmap(...))`` runner.  Keep this
 # smaller than VQE_BATCH_SIZE because derivative matrices grow quadratically
 # with the number of circuit parameters.
-ANALYSIS_BATCH_SIZE = 5
+ANALYSIS_BATCH_SIZE = 1
 
 # Save trace-based / participation-rank QFIM diagnostics in addition to the
 # legacy threshold-rank outputs.  These switches do not trigger independent
@@ -85,6 +96,8 @@ RUN_QFIM_SPECTRAL_GRADIENT_SUMMARY = True
 QFIM_GRAD_ALIGNMENT_NORM_EPS = 1e-24
 
 # Observable-Relevant Tangent Kernel (ORTK) numerical settings.
+# Unitary-PQC does not require ORTK in the standard numerical pipeline.
+RUN_UNITARY_PQC_ORTK_ANALYSIS = False
 ORTK_RANK_THRESHOLD = 1e-12
 PARTICIPATION_EFFECTIVE_RANK_EPS = 1e-30
 ORTK_PARTICIPATION_EPS = PARTICIPATION_EFFECTIVE_RANK_EPS
