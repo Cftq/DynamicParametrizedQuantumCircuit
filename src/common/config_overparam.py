@@ -11,6 +11,11 @@ H_PARAM = 0.10
 NUM_RUNS = 100
 STEPS = 3000
 SAMPLE_EVERY = 1000
+# Parameter update used by the DPQC and reset-DPQC VQE pipelines.
+# Supported values are:
+#   "adam": Adam (the historical default),
+#   "gradient_descent": deterministic full-batch gradient descent.
+DPQC_VQE_OPTIMIZER = "gradient_descent"
 LEARNING_RATE = 1e-3
 TOLERANCE = 1e-2
 VQE_SEED_BASE = 0
@@ -43,6 +48,7 @@ SUCCESS_PROBABILITY_FIGURE_THRESHOLDS = tuple(
 # Layer schedules
 # ------------------------------------------------------------
 # DPQC VQE optimization
+VQE_MAX_LAYER = 44
 VQE_DENSE_UNTIL_LAYER = 8
 VQE_SPARSE_STEP = 4
 

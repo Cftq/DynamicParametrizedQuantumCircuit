@@ -19,6 +19,10 @@ inspected explicitly.
 Results are isolated below ``figs/dpqc_reset`` and never share archives with
 the original 14-parameters-per-layer DPQC model.
 
+The parameter-update rule is selected with ``DPQC_VQE_OPTIMIZER`` in
+``config_overparam.py``.  Use ``"adam"`` (the default) or
+``"gradient_descent"`` for deterministic full-batch gradient descent.
+
 Examples::
 
     python DPQC_overparam_reset_compute.py --stage all

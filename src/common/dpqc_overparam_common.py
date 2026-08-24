@@ -20,6 +20,66 @@ NP_REAL_DTYPE = np.float64
 NP_INT_DTYPE = np.int64
 
 
+_DPQC_VQE_OPTIMIZER_ALIASES = {
+    "adam": "adam",
+    "gd": "gradient_descent",
+    "gradient_descent": "gradient_descent",
+    "deterministic_gradient_descent": "gradient_descent",
+}
+_DPQC_VQE_OPTIMIZER_DISPLAY_NAMES = {
+    "adam": "Adam",
+    "gradient_descent": "Deterministic Gradient Descent",
+}
+
+
+def normalize_dpqc_vqe_optimizer_name(name: str) -> str:
+    """Return the canonical DPQC VQE optimizer name from a config value."""
+    if not isinstance(name, str):
+        raise ValueError(
+            "DPQC_VQE_OPTIMIZER must be a string: "
+            "'adam' or 'gradient_descent'."
+        )
+
+    normalized = "_".join(
+        name.strip().casefold().replace("-", " ").split()
+    )
+    try:
+        return _DPQC_VQE_OPTIMIZER_ALIASES[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported DPQC_VQE_OPTIMIZER={name!r}. "
+            "Choose 'adam' or 'gradient_descent'."
+        ) from exc
+
+
+def dpqc_vqe_optimizer_display_name(name: str) -> str:
+    """Return a plot/log label for a supported DPQC VQE optimizer."""
+    canonical_name = normalize_dpqc_vqe_optimizer_name(name)
+    return _DPQC_VQE_OPTIMIZER_DISPLAY_NAMES[canonical_name]
+
+
+def build_dpqc_vqe_optimizer(name: str, learning_rate: float):
+    """Build Adam or deterministic full-batch gradient descent for DPQC VQE."""
+    canonical_name = normalize_dpqc_vqe_optimizer_name(name)
+    try:
+        learning_rate_value = float(learning_rate)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("LEARNING_RATE must be finite and positive.") from exc
+    if not np.isfinite(learning_rate_value) or learning_rate_value <= 0.0:
+        raise ValueError("LEARNING_RATE must be finite and positive.")
+
+    # Import only when a VQE optimizer is actually constructed.  QFIM and
+    # visualization users of this common module do not otherwise need Optax.
+    import optax
+
+    if canonical_name == "adam":
+        return optax.adam(learning_rate=learning_rate_value)
+
+    # With no momentum or gradient sampling, Optax SGD is the exact update
+    # theta <- theta - learning_rate * grad used by deterministic GD.
+    return optax.sgd(learning_rate=learning_rate_value)
+
+
 def build_layer_list(max_layer: int, dense_until_layer: int, sparse_step: int):
     dense_end = min(dense_until_layer, max_layer)
     return list(range(1, dense_end + 1)) + list(

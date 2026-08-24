@@ -1733,8 +1733,10 @@ from dpqc_overparam_common import (
     _thr_tag,
     build_H_matrix_jax,
     build_layer_list,
+    dpqc_vqe_optimizer_display_name,
     hamiltonian_terms,
     load_npz_result as _load_npz_result_unchecked,
+    normalize_dpqc_vqe_optimizer_name,
     rho_zero_state,
 )
 
@@ -2945,6 +2947,29 @@ _validate_result_h_param(
     required=True,
 )
 
+if "optimizer_name" in vqe_optimization_results:
+    archived_optimizer = np.asarray(
+        vqe_optimization_results["optimizer_name"]
+    )
+    if archived_optimizer.shape != ():
+        raise ValueError(
+            "optimizer_name must be a scalar string in the VQE archive: "
+            f"{vqe_optimization_result_path}"
+        )
+    archived_optimizer_value = archived_optimizer.item()
+    if isinstance(archived_optimizer_value, bytes):
+        archived_optimizer_value = archived_optimizer_value.decode("utf-8")
+    vqe_optimizer_name = normalize_dpqc_vqe_optimizer_name(
+        archived_optimizer_value
+    )
+else:
+    # Every archive produced before optimizer provenance was added used Adam.
+    vqe_optimizer_name = "adam"
+
+vqe_optimizer_label = dpqc_vqe_optimizer_display_name(vqe_optimizer_name)
+vqe_optimizer_title_suffix = f" ({vqe_optimizer_label})"
+print(f"Loaded VQE optimizer: {vqe_optimizer_label}")
+
 # Create output directories only after confirming that the selected h has a
 # valid VQE archive.  Numerical-result directories are inputs and are never
 # created by the visualization stage.
@@ -3070,7 +3095,7 @@ plot_history_violin(
     violin_width=box_width,
     cmap=cmap,
     ylabel="Absolute energy error",
-    title=f"Loss history over {num_runs} runs",
+    title=f"Loss history over {num_runs} runs{vqe_optimizer_title_suffix}",
     outpath=os.path.join(energy_fig_dir, "loss_history.pdf"),
     transform=lambda x: np.abs(x - smallest_eigval) + eps,
 )
@@ -3084,7 +3109,10 @@ plot_history_violin(
     violin_width=box_width,
     cmap=cmap,
     ylabel="Gradient norm",
-    title=f"Gradient-norm history over {num_runs} runs",
+    title=(
+        f"Gradient-norm history over {num_runs} runs"
+        f"{vqe_optimizer_title_suffix}"
+    ),
     outpath=os.path.join(energy_fig_dir, "grad_norm_history.pdf"),
     transform=lambda x: x + eps,
 )
@@ -3105,7 +3133,7 @@ plot_violin_by_layer(
     vqe_layer_list,
     cmap=cmap,
     ylabel="Final energy error",
-    title="Final energy-error distributions",
+    title=f"Final energy-error distributions{vqe_optimizer_title_suffix}",
     outpath=os.path.join(energy_fig_dir, "final_energy_error.pdf"),
     show_legend=False,
     log_scale=False,
@@ -3119,7 +3147,7 @@ plot_violin_by_layer(
     vqe_layer_list,
     cmap=cmap,
     ylabel="Final energy error",
-    title="Final energy-error distributions",
+    title=f"Final energy-error distributions{vqe_optimizer_title_suffix}",
     outpath=os.path.join(energy_fig_dir, "final_energy_error_logscale.pdf"),
     show_legend=False,
     log_scale=True,
@@ -3130,7 +3158,7 @@ plot_beeswarm_by_layer(
     vqe_layer_list,
     cmap=cmap,
     ylabel="Final energy error",
-    title="Final energy-error distributions",
+    title=f"Final energy-error distributions{vqe_optimizer_title_suffix}",
     outpath=os.path.join(energy_fig_dir, "final_energy_error_beeswarm.pdf"),
     point_size=18.0,
     alpha=0.65,
@@ -3146,7 +3174,7 @@ plot_beeswarm_by_layer(
     vqe_layer_list,
     cmap=cmap,
     ylabel="Final energy error",
-    title="Final energy-error distributions",
+    title=f"Final energy-error distributions{vqe_optimizer_title_suffix}",
     outpath=os.path.join(energy_fig_dir, "final_energy_error_beeswarm_logscale.pdf"),
     point_size=18.0,
     alpha=0.65,
@@ -3195,6 +3223,7 @@ else:
         title=(
             "Detailed final energy-error distributions "
             rf"($\Delta E \leq {final_energy_error_detail_threshold:g}$)"
+            f"{vqe_optimizer_title_suffix}"
         ),
         outpath=os.path.join(
             energy_fig_dir,
@@ -3213,7 +3242,10 @@ plot_single_line_by_layer(
     np.array(final_stats["layer"], dtype=NP_REAL_DTYPE),
     np.array(final_stats["success_rate"], dtype=NP_REAL_DTYPE),
     ylabel="Success Rate",
-    title=f"Success Rate over {num_runs} runs (Tol={tolerance})",
+    title=(
+        f"Success Rate over {num_runs} runs (Tol={tolerance})"
+        f"{vqe_optimizer_title_suffix}"
+    ),
     outpath=os.path.join(energy_fig_dir, "success_rate.pdf"),
     label="Success Rate",
     ylim=(-0.02, 1.02),

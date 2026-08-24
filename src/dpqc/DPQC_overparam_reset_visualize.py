@@ -14,7 +14,8 @@ It is launched in a separate Python process with the result family fixed to
 ``dpqc_reset``.  Keeping the model selection here non-configurable prevents a
 reset visualization command from silently reading the original DPQC archive.
 The shared plotter also validates ``reset_model_metadata.json`` before it
-loads the numerical results.
+loads the numerical results.  VQE figures are labeled with the optimizer saved
+in the numerical archive; legacy archives without that field are labeled Adam.
 
 Examples::
 

@@ -118,10 +118,13 @@ NP_INT_DTYPE = np.int64
 
 from dpqc_overparam_common import (
     _thr_tag,
+    build_dpqc_vqe_optimizer,
     build_H_matrix_jax,
     build_layer_list,
+    dpqc_vqe_optimizer_display_name,
     hamiltonian_terms,
     load_npz_result,
+    normalize_dpqc_vqe_optimizer_name,
     rho_zero_state,
     threshold_psd_eigvals_for_rank,
 )
@@ -137,6 +140,9 @@ num_runs = int(cfg.NUM_RUNS)
 if RUN_VQE_STAGE and num_runs <= 0:
     raise ValueError("cfg.NUM_RUNS must be a positive integer.")
 lr = cfg.LEARNING_RATE
+vqe_optimizer_name = normalize_dpqc_vqe_optimizer_name(
+    getattr(cfg, "DPQC_VQE_OPTIMIZER", "adam")
+)
 success_probability_thresholds = np.asarray(
     cfg.SUCCESS_PROBABILITY_THRESHOLDS,
     dtype=NP_REAL_DTYPE,
@@ -881,7 +887,12 @@ def _pad_vqe_theta_batch(
 
 def _run_vqe_optimization():
     """Run scan/vmap VQE, save the historical NPZ schema, and return samples."""
-    optimizer = optax.adam(learning_rate=lr)
+    optimizer = build_dpqc_vqe_optimizer(vqe_optimizer_name, lr)
+    print(
+        "VQE optimizer: "
+        f"{dpqc_vqe_optimizer_display_name(vqe_optimizer_name)} "
+        f"(learning_rate={float(lr):g})"
+    )
 
     theta_history = {}
     ancilla_p1_stats_by_layer = {}
@@ -1066,6 +1077,7 @@ def _run_vqe_optimization():
         tolerance=np.asarray(tolerance, dtype=NP_REAL_DTYPE),
         steps=np.asarray(steps, dtype=NP_INT_DTYPE),
         num_runs=np.asarray(num_runs, dtype=NP_INT_DTYPE),
+        optimizer_name=np.asarray(vqe_optimizer_name),
         lr=np.asarray(lr, dtype=NP_REAL_DTYPE),
         smallest_eigval=np.asarray(
             smallest_eigval,
@@ -1155,6 +1167,8 @@ def _run_vqe_optimization():
         multiple_tolerance_success_result_path,
         h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
         final_iteration=np.asarray(steps, dtype=NP_INT_DTYPE),
+        optimizer_name=np.asarray(vqe_optimizer_name),
+        lr=np.asarray(lr, dtype=NP_REAL_DTYPE),
         layers=multiple_tolerance_success["layers"],
         thresholds=multiple_tolerance_success["thresholds"],
         tolerances=multiple_tolerance_success["thresholds"],
