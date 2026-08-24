@@ -910,7 +910,6 @@ def _load_unitary_vqe_results(result: Optional[dict] = None) -> dict:
     upqc.energy_traces_by_layer = {}
     upqc.grad_norm_traces_by_layer = {}
     upqc.theta_sample_traces_by_layer = {}
-    upqc.grad_sample_traces_by_layer = {}
     upqc.energy_mean_history = {}
     upqc.energy_std_history = {}
     upqc.success_rates_history = {}
@@ -940,11 +939,6 @@ def _load_unitary_vqe_results(result: Optional[dict] = None) -> dict:
             result[f"L{L}_theta_samples"],
             dtype=NP_REAL_DTYPE,
         )
-        upqc.grad_sample_traces_by_layer[L] = np.asarray(
-            result[f"L{L}_grad_samples"],
-            dtype=NP_REAL_DTYPE,
-        )
-
         energy_data = upqc.energy_traces_by_layer[L]
         upqc.energy_mean_history[L] = np.mean(energy_data, axis=0)
         upqc.energy_std_history[L] = np.std(energy_data, axis=0)
@@ -1204,7 +1198,6 @@ def _load_optimization_path_results() -> None:
     )
     upqc.hessian_rank_history_by_layer = {}
     upqc.hessian_eigs_history_by_layer = {}
-    upqc.hessian_thresh_history_by_layer = {}
 
     if os.path.exists(hessian_rank_path):
         hessian_result = _load_required_result(hessian_rank_path)
@@ -1216,98 +1209,9 @@ def _load_optimization_path_results() -> None:
             L: np.asarray(hessian_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
             for L in layers
         }
-        upqc.hessian_thresh_history_by_layer = {
-            L: np.asarray(
-                hessian_result[f"L{L}_rank_threshold"],
-                dtype=NP_REAL_DTYPE,
-            )
-            for L in layers
-        }
 
 
 def _plot_optimization_path_results() -> None:
-    def save_optimization_path_eigenvalue_histograms(
-        eigs_history_by_layer: dict,
-        *,
-        outdir: str,
-        matrix_tag: str,
-        matrix_label: str,
-        color: str,
-        condition_tag: Optional[str] = None,
-        condition_label: Optional[str] = None,
-    ) -> None:
-        target_iterations = np.asarray(upqc.sample_iters, dtype=NP_INT_DTYPE)
-
-        for L in upqc.layer_list:
-            eigs_L = eigs_history_by_layer.get(L)
-            if eigs_L is None:
-                continue
-
-            eigs_L = np.asarray(eigs_L, dtype=NP_REAL_DTYPE)
-            if eigs_L.ndim != 3:
-                raise ValueError(
-                    "Each optimization-path eigenvalue array must have shape "
-                    "(num_runs, num_sample_iters, num_params)."
-                )
-            if (
-                eigs_L.shape[1] != target_iterations.size
-                and eigs_L.shape[0] == target_iterations.size
-            ):
-                eigs_L = np.transpose(eigs_L, (1, 0, 2))
-            if eigs_L.shape[1] != target_iterations.size:
-                raise ValueError(
-                    f"Shape mismatch for L={L}: eigs_L.shape={eigs_L.shape}, "
-                    f"len(sample_iters)={target_iterations.size}."
-                )
-
-            for time_idx, iteration in enumerate(target_iterations):
-                upqc.plot_style.save_eigenvalue_histogram_across_trials(
-                    eigs_L[:, time_idx, :],
-                    outdir=os.path.join(outdir, "histograms", f"L{L}"),
-                    matrix_tag=matrix_tag,
-                    matrix_label=matrix_label,
-                    num_layers=L,
-                    context_tag="opt_path",
-                    context_label="optimization path",
-                    iteration=int(iteration),
-                    condition_tag=condition_tag,
-                    condition_label=condition_label,
-                    color=color,
-                )
-
-    save_optimization_path_eigenvalue_histograms(
-        upqc.hs_eigs_history_by_layer,
-        outdir=os.path.join(
-            upqc.hs_eigs_dir,
-            "optimization_path_keep0123",
-        ),
-        matrix_tag="unitary_pqc_hs_gram",
-        matrix_label="HS tangent Gram",
-        color=METRIC_COLORS["hs"],
-        condition_tag="reduced0123",
-        condition_label="reduced keep=(0,1,2,3)",
-    )
-    save_optimization_path_eigenvalue_histograms(
-        upqc.hs_eigs_history_pure_by_layer,
-        outdir=os.path.join(upqc.hs_eigs_dir, "optimization_path_pure_full"),
-        matrix_tag="unitary_pqc_hs_gram",
-        matrix_label="HS tangent Gram",
-        color=METRIC_COLORS["hs"],
-        condition_tag="pure_full",
-        condition_label="pure full state",
-    )
-    if upqc.hessian_eigs_history_by_layer:
-        save_optimization_path_eigenvalue_histograms(
-            upqc.hessian_eigs_history_by_layer,
-            outdir=os.path.join(
-                upqc.hessian_eigs_dir,
-                "optimization_path",
-            ),
-            matrix_tag="unitary_pqc_energy_hessian",
-            matrix_label="Energy Hessian",
-            color=METRIC_COLORS["hessian"],
-        )
-
     spectral_path_summaries = (
         (upqc.qfim_eigs_history_by_layer, upqc.qfim_eigs_dir, "QFIM", "qfim", False),
         (upqc.qfim_eigs_history_pure_by_layer, os.path.join(upqc.qfim_eigs_dir, "pure_full"),
@@ -1359,70 +1263,6 @@ def _plot_optimization_path_results() -> None:
             ylabel=r"Minimum Hessian rank $(|\eta_k| > 10^{-12})$",
             cmap=upqc.cmap,
         )
-
-        hessian_path_dir = os.path.join(
-            upqc.hessian_eigs_dir,
-            "optimization_path",
-        )
-        os.makedirs(hessian_path_dir, exist_ok=True)
-
-        target_iterations = np.asarray(upqc.sample_iters, dtype=NP_INT_DTYPE)
-
-        for L in upqc.layer_list:
-            eigs_L = upqc.hessian_eigs_history_by_layer.get(L)
-            if eigs_L is None:
-                continue
-
-            eigs_L = np.asarray(eigs_L, dtype=NP_REAL_DTYPE)
-            if eigs_L.ndim != 3:
-                continue
-
-            if (
-                eigs_L.shape[1] != target_iterations.size
-                and eigs_L.shape[0] == target_iterations.size
-            ):
-                eigs_L = np.transpose(eigs_L, (1, 0, 2))
-
-            if eigs_L.shape[1] != target_iterations.size:
-                continue
-
-            layer_dir = os.path.join(hessian_path_dir, f"L{L}")
-            os.makedirs(layer_dir, exist_ok=True)
-            thresholds_L = upqc.hessian_thresh_history_by_layer.get(L)
-            thresholds_L_arr = None
-            if thresholds_L is not None:
-                thresholds_L_arr = np.asarray(thresholds_L, dtype=NP_REAL_DTYPE)
-                if (
-                    thresholds_L_arr.ndim == 2
-                    and thresholds_L_arr.shape[1] != target_iterations.size
-                    and thresholds_L_arr.shape[0] == target_iterations.size
-                ):
-                    thresholds_L_arr = thresholds_L_arr.T
-                if (
-                    thresholds_L_arr.ndim != 2
-                    or thresholds_L_arr.shape[1] != target_iterations.size
-                ):
-                    thresholds_L_arr = None
-
-            for time_idx, iteration in enumerate(target_iterations):
-                iteration_int = int(iteration)
-                upqc._save_signed_eigs_scatterplot_by_index(
-                    eigs_L[:, time_idx, :],
-                    title=(
-                        rf"Energy Hessian eigenvalues along optimization path "
-                        rf"(L={L}, iteration={iteration_int})"
-                    ),
-                    outpath=os.path.join(
-                        layer_dir,
-                        f"iter{iteration_int:06d}.pdf",
-                    ),
-                    rank_thresholds=(
-                        None
-                        if thresholds_L_arr is None
-                        else thresholds_L_arr[:, time_idx]
-                    ),
-                    ylabel="Energy Hessian eigenvalue",
-                )
 
     # The energy Hessian is invariant under tracing out qubit 4 for the current
     # system-only observables. Emit an explicitly labelled pure-full view.

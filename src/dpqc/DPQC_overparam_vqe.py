@@ -148,15 +148,11 @@ success_probability_thresholds = np.asarray(
     dtype=NP_REAL_DTYPE,
 )
 
-# Optimization-history sampling points used for history plots and
-# QFIM-gradient sector diagnostics.
+# Optimization-history sampling points saved for downstream diagnostics.
 eps = 1e-12
 sample_every = cfg.SAMPLE_EVERY
 
-# Optimization-history sampling points used for history plots and
-# QFIM-gradient sector diagnostics.
-#
-# qfim_grad_weight_scatter is generated at each of these iterations.
+# Store optimized-path parameters at these iterations for the QFIM stage.
 # We intentionally use iteration 1 instead of iteration 0 because the
 # user request is for optimized-path parameters at
 #   1, 1000, 2000, ..., 10000.
@@ -770,11 +766,9 @@ def make_vqe_batch_runner(
             (num_samples, n_total_params),
             dtype=REAL_DTYPE,
         )
-        grad_samples = jnp.zeros_like(theta_samples)
 
         if initial_sample_slot >= 0:
             theta_samples = theta_samples.at[initial_sample_slot].set(theta)
-            grad_samples = grad_samples.at[initial_sample_slot].set(grad)
 
         def one_step(carry, sample_slot):
             (
@@ -782,7 +776,6 @@ def make_vqe_batch_runner(
                 opt_state_old,
                 grad_old,
                 theta_samples_old,
-                grad_samples_old,
             ) = carry
 
             updates, opt_state_new = optimizer.update(
@@ -797,18 +790,11 @@ def make_vqe_batch_runner(
             energy_new, grad_new = energy_and_grad(theta_new)
             grad_norm_new = jnp.linalg.norm(grad_new)
 
-            def record_sample(sample_buffers):
-                theta_buffer, grad_buffer = sample_buffers
-                return (
-                    theta_buffer.at[sample_slot].set(theta_new),
-                    grad_buffer.at[sample_slot].set(grad_new),
-                )
-
-            theta_samples_new, grad_samples_new = jax.lax.cond(
+            theta_samples_new = jax.lax.cond(
                 sample_slot >= 0,
-                record_sample,
-                lambda sample_buffers: sample_buffers,
-                (theta_samples_old, grad_samples_old),
+                lambda theta_buffer: theta_buffer.at[sample_slot].set(theta_new),
+                lambda theta_buffer: theta_buffer,
+                theta_samples_old,
             )
 
             new_carry = (
@@ -816,7 +802,6 @@ def make_vqe_batch_runner(
                 opt_state_new,
                 grad_new,
                 theta_samples_new,
-                grad_samples_new,
             )
             measurements = (energy_new, grad_norm_new)
             return new_carry, measurements
@@ -827,7 +812,6 @@ def make_vqe_batch_runner(
                 _,
                 _,
                 theta_samples_final,
-                grad_samples_final,
             ),
             (energy_after_steps, grad_norm_after_steps),
         ) = jax.lax.scan(
@@ -837,7 +821,6 @@ def make_vqe_batch_runner(
                 opt_state,
                 grad,
                 theta_samples,
-                grad_samples,
             ),
             scan_sample_slots,
         )
@@ -856,7 +839,6 @@ def make_vqe_batch_runner(
             energy_trace,
             grad_norm_trace,
             theta_samples_final,
-            grad_samples_final,
         )
 
     return jax.jit(jax.vmap(optimize_one_run))
@@ -886,7 +868,7 @@ def _pad_vqe_theta_batch(
 
 
 def _run_vqe_optimization():
-    """Run scan/vmap VQE, save the historical NPZ schema, and return samples."""
+    """Run scan/vmap VQE, save optimization histories, and return samples."""
     optimizer = build_dpqc_vqe_optimizer(vqe_optimizer_name, lr)
     print(
         "VQE optimizer: "
@@ -900,7 +882,6 @@ def _run_vqe_optimization():
     energy_traces_by_layer = {}
     grad_norm_traces_by_layer = {}
     theta_sample_traces_by_layer = {}
-    grad_sample_traces_by_layer = {}
     success_rates_history = {}
     final_stats = {
         "layer": [],
@@ -941,7 +922,7 @@ def _run_vqe_optimization():
             axis=0,
         )
 
-        output_parts = tuple([] for _ in range(5))
+        output_parts = tuple([] for _ in range(4))
         batch_starts = range(0, num_runs, VQE_BATCH_SIZE)
 
         for batch_start in tqdm(
@@ -973,7 +954,6 @@ def _run_vqe_optimization():
             energy_data,
             gradnorm_data,
             theta_sample_data,
-            grad_sample_data,
         ) = (
             np.concatenate(parts, axis=0)
             for parts in output_parts
@@ -984,7 +964,6 @@ def _run_vqe_optimization():
             (num_runs, steps + 1),
             (num_runs, steps + 1),
             (num_runs, sample_iters.size, n_total_params),
-            (num_runs, sample_iters.size, n_total_params),
         )
         actual_shapes = tuple(
             array.shape
@@ -993,7 +972,6 @@ def _run_vqe_optimization():
                 energy_data,
                 gradnorm_data,
                 theta_sample_data,
-                grad_sample_data,
             )
         )
         if actual_shapes != expected_shapes:
@@ -1033,7 +1011,6 @@ def _run_vqe_optimization():
         energy_traces_by_layer[current_layer] = energy_data
         grad_norm_traces_by_layer[current_layer] = gradnorm_data
         theta_sample_traces_by_layer[current_layer] = theta_sample_data
-        grad_sample_traces_by_layer[current_layer] = grad_sample_data
 
         p1_runs = jax_to_np(
             jax.jit(
@@ -1112,10 +1089,6 @@ def _run_vqe_optimization():
         **_layer_arrays_for_npz(
             theta_sample_traces_by_layer,
             "theta_samples",
-        ),
-        **_layer_arrays_for_npz(
-            grad_sample_traces_by_layer,
-            "grad_samples",
         ),
         **_layer_arrays_for_npz(success_rates_history, "success_rates"),
         **_layer_arrays_for_npz(
@@ -1264,11 +1237,11 @@ def _run_vqe_optimization():
         ),
     )
 
-    return theta_sample_traces_by_layer, grad_sample_traces_by_layer
+    return theta_sample_traces_by_layer
 
 
 def run_vqe():
-    """Execute VQE, save all numerical results, and return sampled histories."""
+    """Execute VQE, save all results, and return sampled parameter histories."""
     return _run_vqe_optimization()
 
 

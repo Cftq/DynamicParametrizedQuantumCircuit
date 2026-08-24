@@ -94,12 +94,6 @@ ANALYSIS_BATCH_SIZE = 1
 # QFIM evaluations: all metrics are derived from the same eigendecomposition.
 RUN_QFIM_EFFECTIVE_RANK_RANDOM_POINTS = True
 RUN_QFIM_EFFECTIVE_RANK_OPTIMIZATION_PATH = True
-RUN_QFIM_SPECTRAL_GRADIENT_SUMMARY = True
-
-# A gradient at or below this squared Euclidean norm has no well-defined
-# normalized eigen-direction weights.  Such weights and derived quantities
-# are stored as NaN rather than as artificial zeros.
-QFIM_GRAD_ALIGNMENT_NORM_EPS = 1e-24
 
 # Observable-Relevant Tangent Kernel (ORTK) numerical settings.
 # Unitary-PQC does not require ORTK in the standard numerical pipeline.
@@ -109,27 +103,8 @@ PARTICIPATION_EFFECTIVE_RANK_EPS = 1e-30
 ORTK_PARTICIPATION_EPS = PARTICIPATION_EFFECTIVE_RANK_EPS
 
 
-# Thresholds used for large-sector gradient-weight diagnostics.
-GRADIENT_SECTOR_THRESHOLDS = (1e1, 5e0, 1e0, 1e-1, 1e-2, 1e-3, 1e-4)
-
 # Thresholds used for QFIM eigenvalue-count plots along the optimization path.
 QFIM_PATH_EIGCOUNT_THRESHOLDS = (1e1, 5e0, 1e0, 1e-1, 1e-2, 1e-3, 1e-4)
-
-
-# ------------------------------------------------------------
-# QFIM-gradient alignment result generation / visualization
-# ------------------------------------------------------------
-RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER = False
-RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES = False
-RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION = True
-
-LOG_X_QFIM_GRAD_ALIGNMENT = True
-LOG_Y_QFIM_GRAD_ALIGNMENT = False
-QFIM_GRAD_ALIGNMENT_RUN_INDICES = None
-
-# None means all iterations in sample_iters:
-#   1, SAMPLE_EVERY, 2*SAMPLE_EVERY, ..., STEPS
-QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS = None
 
 
 # ------------------------------------------------------------

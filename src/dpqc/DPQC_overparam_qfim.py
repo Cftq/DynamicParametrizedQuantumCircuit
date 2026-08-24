@@ -17,7 +17,6 @@ import argparse
 import math
 import os
 import sys
-import warnings
 from pathlib import Path
 from typing import Tuple
 
@@ -90,10 +89,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import tensorcircuit as tc
-from plot import (
-    plot_qfim_grad_alignment_layer_overlay,
-    plot_qfim_grad_alignment_table,
-)
 from tqdm.auto import tqdm
 
 jax.config.update("jax_enable_x64", True)
@@ -107,15 +102,10 @@ tc.set_dtype("complex128")
 REAL_DTYPE = jnp.float64
 COMPLEX_DTYPE = jnp.complex128
 NP_REAL_DTYPE = np.float64
-NP_COMPLEX_DTYPE = np.complex128
 NP_INT_DTYPE = np.int64
 
 from dpqc_overparam_common import (
-    _thr_tag,
-    build_H_matrix_jax,
     build_layer_list,
-    hamiltonian_terms,
-    load_npz_result,
     rho_zero_state,
     threshold_psd_eigvals_for_rank,
 )
@@ -125,41 +115,6 @@ from dpqc_overparam_common import (
 # ============================================================
 num_system_qubits = 5
 h_param = float(_CLI_ARGS.h_param)
-tolerance = cfg.TOLERANCE
-steps = cfg.STEPS
-num_runs = int(cfg.NUM_RUNS)
-if RUN_VQE_STAGE and num_runs <= 0:
-    raise ValueError("cfg.NUM_RUNS must be a positive integer.")
-lr = cfg.LEARNING_RATE
-success_probability_thresholds = np.asarray(
-    cfg.SUCCESS_PROBABILITY_THRESHOLDS,
-    dtype=NP_REAL_DTYPE,
-)
-
-# Optimization-history sampling points used for history plots and
-# QFIM-gradient sector diagnostics.
-eps = 1e-12
-sample_every = cfg.SAMPLE_EVERY
-
-# Optimization-history sampling points used for history plots and
-# QFIM-gradient sector diagnostics.
-#
-# qfim_grad_weight_scatter is generated at each of these iterations.
-# We intentionally use iteration 1 instead of iteration 0 because the
-# user request is for optimized-path parameters at
-#   1, 1000, 2000, ..., 10000.
-sample_iters = np.asarray(
-    [1] + list(range(sample_every, steps + 1, sample_every)),
-    dtype=NP_INT_DTYPE,
-)
-
-sample_iters = sample_iters[
-    (sample_iters >= 1) & (sample_iters <= steps)
-]
-
-sample_iters = np.unique(sample_iters).astype(NP_INT_DTYPE)
-sample_iter_set = set(int(t) for t in sample_iters.tolist())
-
 NUM_BLOCKS = 4
 PARAMS_PER_BLOCK = 3
 EXTRA_PARAMS_PER_LAYER = 2
@@ -186,18 +141,6 @@ keep_label_5 = "Reduced (0,1,2,3,4)"
 
 def jax_to_np(x, dtype=None):
     return np.asarray(jax.device_get(x), dtype=dtype)
-
-
-# ==============================
-# Hamiltonian & ground truth
-# ==============================
-H_terms = tuple(hamiltonian_terms(h_param))
-
-H_matrix = build_H_matrix_jax(H_terms, num_system_qubits)
-
-smallest_eigval = float(
-    np.linalg.eigvalsh(np.array(H_matrix, dtype=NP_COMPLEX_DTYPE)).min().real
-)
 
 
 # ==============================
@@ -421,10 +364,6 @@ def ancilla_p1_sequential_dpqc(theta: jnp.ndarray, n_layer: int) -> jnp.ndarray:
 
 
 @jax.jit
-def energy_from_rho_keep(rho_keep: jnp.ndarray) -> jnp.ndarray:
-    return jnp.real(jnp.einsum("ij,ji->", rho_keep, H_matrix))
-
-
 def partial_trace_one_qubit(
     rho: jnp.ndarray,
     n_qubits: int,
@@ -535,31 +474,6 @@ def _layer_arrays_for_npz(data_by_layer: dict, suffix: str) -> dict:
     }
 
 
-def _finite_mean_sem(values, *, axis=0):
-    """Return finite-value mean, sample SEM, and contributing counts."""
-    values = np.asarray(values, dtype=NP_REAL_DTYPE)
-    values = np.moveaxis(values, axis, 0)
-    output_shape = values.shape[1:]
-    means = np.full(output_shape, np.nan, dtype=NP_REAL_DTYPE)
-    sems = np.full(output_shape, np.nan, dtype=NP_REAL_DTYPE)
-    counts = np.zeros(output_shape, dtype=NP_INT_DTYPE)
-
-    for output_index in np.ndindex(output_shape):
-        sample = values[(slice(None),) + output_index]
-        sample = sample[np.isfinite(sample)]
-        count = int(sample.size)
-        counts[output_index] = count
-        if count:
-            means[output_index] = NP_REAL_DTYPE(np.mean(sample))
-        if count > 1:
-            sems[output_index] = NP_REAL_DTYPE(
-                np.std(sample, ddof=1) / np.sqrt(count)
-            )
-
-    return means, sems, counts
-
-
-
 vqe_optimization_result_path = os.path.join(
     energy_results_dir,
     "vqe_optimization_histories.npz",
@@ -567,7 +481,7 @@ vqe_optimization_result_path = os.path.join(
 
 
 def _load_saved_vqe_samples(inpath: str):
-    """Load only the float64 VQE arrays required by the QFIM stage."""
+    """Load the float64 VQE parameter arrays required by the QFIM stage."""
     if not os.path.isfile(inpath):
         raise FileNotFoundError(
             "The QFIM-only stage requires an existing VQE archive: "
@@ -636,81 +550,61 @@ def _load_saved_vqe_samples(inpath: str):
             )
 
         theta_by_layer = {}
-        grad_by_layer = {}
         expected_real_dtype = np.dtype(NP_REAL_DTYPE)
 
         for layer_value in archived_layers:
             layer = int(layer_value)
             theta_key = f"L{layer}_theta_samples"
-            grad_key = f"L{layer}_grad_samples"
-            missing_keys = [
-                key for key in (theta_key, grad_key)
-                if key not in data
-            ]
-            if missing_keys:
+            if theta_key not in data:
                 raise KeyError(
-                    "VQE archive is missing required arrays: "
-                    + ", ".join(missing_keys)
+                    "VQE archive is missing required array: " + theta_key
                 )
 
             theta_raw = data[theta_key]
-            grad_raw = data[grad_key]
-            if (
-                theta_raw.dtype != expected_real_dtype
-                or grad_raw.dtype != expected_real_dtype
-            ):
+            if theta_raw.dtype != expected_real_dtype:
                 raise TypeError(
-                    f"Saved L={layer} theta/gradient samples must be "
-                    f"float64, got {theta_raw.dtype} and {grad_raw.dtype}."
+                    f"Saved L={layer} theta samples must be float64, "
+                    f"got {theta_raw.dtype}."
                 )
 
             theta = np.array(theta_raw, dtype=NP_REAL_DTYPE, copy=True)
-            grad = np.array(grad_raw, dtype=NP_REAL_DTYPE, copy=True)
             expected_shape = (
                 archived_num_runs_int,
                 archived_sample_iters.size,
                 n_param_per_layer * layer,
             )
-            if theta.shape != expected_shape or grad.shape != expected_shape:
+            if theta.shape != expected_shape:
                 raise ValueError(
-                    f"Saved L={layer} sample shape mismatch: "
-                    f"theta={theta.shape}, grad={grad.shape}, "
-                    f"expected={expected_shape}."
+                    f"Saved L={layer} theta sample shape mismatch: "
+                    f"theta={theta.shape}, expected={expected_shape}."
                 )
-            if not np.all(np.isfinite(theta)) or not np.all(np.isfinite(grad)):
+            if not np.all(np.isfinite(theta)):
                 raise ValueError(
-                    f"Saved L={layer} theta/gradient samples contain "
-                    "non-finite values."
+                    f"Saved L={layer} theta samples contain non-finite values."
                 )
 
             theta_by_layer[layer] = theta
-            grad_by_layer[layer] = grad
 
     return (
         theta_by_layer,
-        grad_by_layer,
         [int(layer) for layer in archived_layers.tolist()],
         archived_sample_iters.astype(NP_INT_DTYPE, copy=True),
-        archived_num_runs_int,
     )
 
 
 def run_qfim(*, include_optimization_path: bool = True):
     """Compute and save QFIM diagnostics.
 
-    Random-point diagnostics are always computed.  Optimization-path
-    diagnostics additionally require the saved VQE parameter and gradient
-    histories and can be disabled by callers that do not need them.
+    Random-point diagnostics are always computed. Optimization-path
+    diagnostics additionally require the saved VQE parameter histories and can
+    be disabled by callers that do not need them.
     """
     if include_optimization_path:
         (
             theta_sample_traces_by_layer,
-            grad_sample_traces_by_layer,
             vqe_layer_list,
             sample_iters,
-            num_runs,
         ) = _load_saved_vqe_samples(vqe_optimization_result_path)
-        sample_iter_set = set(int(value) for value in sample_iters.tolist())
         print(
             "Loaded saved float64 VQE samples for the QFIM calculation: "
             f"{vqe_optimization_result_path}"
@@ -733,9 +627,6 @@ def run_qfim(*, include_optimization_path: bool = True):
     QFIM_SAMPLE_SEED_BASE = cfg.QFIM_SAMPLE_SEED_BASE
     RED_JVP_CHUNK = cfg.RED_JVP_CHUNK
     PARTICIPATION_EFFECTIVE_RANK_EPS = cfg.PARTICIPATION_EFFECTIVE_RANK_EPS
-    QFIM_GRAD_ALIGNMENT_NORM_EPS = cfg.QFIM_GRAD_ALIGNMENT_NORM_EPS
-    QFIM_DEGENERACY_RTOL = cfg.QFIM_DEGENERACY_RTOL
-    QFIM_DEGENERACY_ATOL = cfg.QFIM_DEGENERACY_ATOL
 
     RUN_QFIM_EFFECTIVE_RANK_RANDOM_POINTS = (
         cfg.RUN_QFIM_EFFECTIVE_RANK_RANDOM_POINTS
@@ -743,15 +634,6 @@ def run_qfim(*, include_optimization_path: bool = True):
     RUN_QFIM_EFFECTIVE_RANK_OPTIMIZATION_PATH = (
         cfg.RUN_QFIM_EFFECTIVE_RANK_OPTIMIZATION_PATH
     )
-    RUN_QFIM_SPECTRAL_GRADIENT_SUMMARY = (
-        cfg.RUN_QFIM_SPECTRAL_GRADIENT_SUMMARY
-    )
-
-    # Thresholds used for large-sector gradient-weight diagnostics.
-    # Keep this broad set unless you also want to reduce the gradient-sector plots.
-    THRESHOLDS = tuple(float(t) for t in cfg.GRADIENT_SECTOR_THRESHOLDS)
-
-
     def psd_rank_and_desc_eigs(F: jnp.ndarray):
         evals = jnp.clip(jnp.linalg.eigvalsh(_hermitian(F)), a_min=0.0)
         rank, _ = threshold_psd_eigvals_for_rank(evals)
@@ -829,245 +711,6 @@ def run_qfim(*, include_optimization_path: bool = True):
             "condition_number_active": condition_active,
             "active_condition_number": condition_active,
         }
-
-
-    def _spectral_threshold_tag(value):
-        """Return compact stable tags such as ``1e0`` and ``5e-1``."""
-        mantissa, exponent = f"{float(value):.0e}".split("e")
-        return f"{mantissa}e{int(exponent)}"
-
-
-    _QFIM_DEGENERACY_WARNING_EMITTED = False
-
-
-    def _warn_if_qfim_spectrum_is_degenerate(eigvals_desc):
-        nonlocal _QFIM_DEGENERACY_WARNING_EMITTED
-
-        eigvals_desc = np.asarray(eigvals_desc, dtype=NP_REAL_DTYPE)
-        if _QFIM_DEGENERACY_WARNING_EMITTED or eigvals_desc.size < 2:
-            return
-
-        adjacent_is_degenerate = np.isclose(
-            eigvals_desc[:-1],
-            eigvals_desc[1:],
-            rtol=QFIM_DEGENERACY_RTOL,
-            atol=QFIM_DEGENERACY_ATOL,
-        )
-        if np.any(adjacent_is_degenerate):
-            warnings.warn(
-                "Individual gradient weights can be basis-dependent inside a "
-                "degenerate QFIM eigenspace. Aggregated weight over the full "
-                "degenerate subspace is basis-independent.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            _QFIM_DEGENERACY_WARNING_EMITTED = True
-
-
-    def qfim_spectral_gradient_diagnostics_from_matrix(
-        F,
-        grad,
-        *,
-        rank_threshold=QFIM_EFFECTIVE_RANK_THRESHOLD,
-        participation_eps=PARTICIPATION_EFFECTIVE_RANK_EPS,
-        grad_norm_eps=QFIM_GRAD_ALIGNMENT_NORM_EPS,
-        sector_thresholds=THRESHOLDS,
-        warn_degenerate=True,
-    ):
-        """Compute all QFIM/gradient diagnostics from one eigendecomposition.
-
-        Individual gradient weights can be basis-dependent inside a degenerate
-        QFIM eigenspace. Aggregated weight over the full degenerate subspace is
-        basis-independent.
-
-        The QFIM is Hermitianized before ``eigh`` and round-off-sized negative
-        eigenvalues are clipped to zero.  Gradient weights are normalized by the
-        directly evaluated Euclidean norm ``||g||^2``.  If that norm is too
-        small, all normalized-gradient diagnostics are represented by NaN.
-        """
-        F = jnp.asarray(F)
-        F = 0.5 * (F + jnp.conjugate(F.T))
-        grad = jnp.asarray(grad, dtype=REAL_DTYPE).reshape((-1,))
-
-        if int(F.shape[0]) != int(F.shape[1]) or int(F.shape[0]) != int(grad.size):
-            raise ValueError(
-                f"Dimension mismatch: F.shape={F.shape}, grad.shape={grad.shape}"
-            )
-
-        evals, evecs = jnp.linalg.eigh(F)
-        evals = jnp.clip(jnp.real(evals), a_min=0.0)
-        order = jnp.argsort(evals)[::-1]
-        evals = evals[order]
-        evecs = evecs[:, order]
-
-        grad_projection = grad.astype(evecs.dtype)
-        coeffs = jnp.conjugate(evecs).T @ grad_projection
-        coeff_abs2 = jnp.real(coeffs * jnp.conjugate(coeffs))
-        gradient_norm_sq = jnp.real(jnp.vdot(grad, grad))
-        projected_norm_sq = jnp.sum(coeff_abs2)
-        is_valid_gradient = gradient_norm_sq > float(grad_norm_eps)
-        weights = jnp.where(
-            is_valid_gradient,
-            coeff_abs2 / gradient_norm_sq,
-            jnp.full_like(coeff_abs2, jnp.nan),
-        )
-
-        evals_np = jax_to_np(evals, dtype=NP_REAL_DTYPE)
-        coeffs_np = jax_to_np(coeffs, dtype=NP_COMPLEX_DTYPE)
-        coeff_abs2_np = jax_to_np(coeff_abs2, dtype=NP_REAL_DTYPE)
-        weights_np = jax_to_np(weights, dtype=NP_REAL_DTYPE)
-        gradient_norm_sq_np = NP_REAL_DTYPE(jax.device_get(gradient_norm_sq))
-        projected_norm_sq_np = NP_REAL_DTYPE(jax.device_get(projected_norm_sq))
-        valid_gradient = bool(jax.device_get(is_valid_gradient))
-        active_by_rank_threshold = evals_np > float(rank_threshold)
-
-        # Truncated Moore--Penrose inverse in the QFIM eigenbasis:
-        #
-        #   chi_H^(tau) = sum_{lambda_i > tau} |v_i^dagger g|^2 / lambda_i.
-        #
-        # Evaluating this directly in the eigenbasis avoids explicitly forming an
-        # ill-conditioned pseudoinverse.  The complementary squared norm measures
-        # the part of the Hamiltonian gradient outside the numerically retained
-        # image of F.  Both quantities reuse this routine's single QFIM
-        # eigendecomposition.
-        if np.any(active_by_rank_threshold):
-            hamiltonian_qfim_sensitivity = NP_REAL_DTYPE(
-                np.sum(
-                    coeff_abs2_np[active_by_rank_threshold]
-                    / evals_np[active_by_rank_threshold]
-                )
-            )
-            gradient_image_projection_norm_sq = NP_REAL_DTYPE(
-                np.sum(coeff_abs2_np[active_by_rank_threshold])
-            )
-        else:
-            hamiltonian_qfim_sensitivity = NP_REAL_DTYPE(0.0)
-            gradient_image_projection_norm_sq = NP_REAL_DTYPE(0.0)
-
-        gradient_image_residual_norm_sq = NP_REAL_DTYPE(
-            np.sum(coeff_abs2_np[~active_by_rank_threshold])
-        )
-        gradient_image_residual_norm = NP_REAL_DTYPE(
-            np.sqrt(max(float(gradient_image_residual_norm_sq), 0.0))
-        )
-        gradient_image_residual_fraction = (
-            NP_REAL_DTYPE(
-                gradient_image_residual_norm_sq / gradient_norm_sq_np
-            )
-            if valid_gradient
-            else NP_REAL_DTYPE(np.nan)
-        )
-
-        spectral = qfim_spectral_summary_from_eigvals(
-            evals_np,
-            rank_threshold=rank_threshold,
-            participation_eps=participation_eps,
-        )
-        trace = float(spectral["qfim_trace"])
-
-        if trace > float(participation_eps):
-            lambda_fraction = evals_np / trace
-            cumulative_lambda_fraction = np.cumsum(lambda_fraction)
-        else:
-            lambda_fraction = np.full_like(evals_np, np.nan)
-            cumulative_lambda_fraction = np.full_like(evals_np, np.nan)
-
-        if valid_gradient:
-            gradient_weight_sum = NP_REAL_DTYPE(np.sum(weights_np))
-            weight_square_sum = NP_REAL_DTYPE(np.sum(weights_np * weights_np))
-            gradient_participation_rank = (
-                NP_REAL_DTYPE(1.0 / weight_square_sum)
-                if weight_square_sum > float(participation_eps)
-                else NP_REAL_DTYPE(np.nan)
-            )
-            gradient_weighted_eigenvalue = NP_REAL_DTYPE(
-                np.sum(weights_np * evals_np)
-            )
-            cumulative_gradient_weight = np.cumsum(weights_np)
-            parseval_relative_error = NP_REAL_DTYPE(
-                abs(projected_norm_sq_np - gradient_norm_sq_np)
-                / max(abs(float(gradient_norm_sq_np)), float(grad_norm_eps))
-            )
-        else:
-            gradient_weight_sum = NP_REAL_DTYPE(np.nan)
-            gradient_participation_rank = NP_REAL_DTYPE(np.nan)
-            gradient_weighted_eigenvalue = NP_REAL_DTYPE(np.nan)
-            cumulative_gradient_weight = np.full_like(evals_np, np.nan)
-            parseval_relative_error = NP_REAL_DTYPE(np.nan)
-
-        diagnostics = {
-            **spectral,
-            "weights": weights_np,
-            "w_grad": weights_np,
-            "coeffs": coeffs_np,
-            "coeff_abs2": coeff_abs2_np,
-            "eig_index": np.arange(1, evals_np.size + 1, dtype=NP_INT_DTYPE),
-            "lambda_fraction": np.asarray(
-                lambda_fraction,
-                dtype=NP_REAL_DTYPE,
-            ),
-            "cumulative_lambda_fraction": np.asarray(
-                cumulative_lambda_fraction,
-                dtype=NP_REAL_DTYPE,
-            ),
-            "cumulative_gradient_weight": np.asarray(
-                cumulative_gradient_weight,
-                dtype=NP_REAL_DTYPE,
-            ),
-            "active_by_rank_threshold": np.asarray(
-                active_by_rank_threshold,
-                dtype=np.bool_,
-            ),
-            "gradient_norm_sq": gradient_norm_sq_np,
-            "projected_gradient_norm_sq": projected_norm_sq_np,
-            "hamiltonian_qfim_sensitivity": hamiltonian_qfim_sensitivity,
-            "chi_hamiltonian": hamiltonian_qfim_sensitivity,
-            "gradient_image_projection_norm_sq": (
-                gradient_image_projection_norm_sq
-            ),
-            "gradient_image_residual_norm_sq": gradient_image_residual_norm_sq,
-            "gradient_image_residual_norm": gradient_image_residual_norm,
-            "gradient_image_residual_fraction": gradient_image_residual_fraction,
-            "gradient_weight_sum": gradient_weight_sum,
-            "gradient_participation_rank": gradient_participation_rank,
-            "gradient_effective_dimension": gradient_participation_rank,
-            "gradient_weighted_qfim_eigenvalue": gradient_weighted_eigenvalue,
-            "lambda_grad_mean": gradient_weighted_eigenvalue,
-            "parseval_relative_error": parseval_relative_error,
-        }
-
-        sector_weights = {}
-        for threshold in sector_thresholds:
-            metric_name = f"grad_weight_above_{_spectral_threshold_tag(threshold)}"
-            sector_weight = (
-                NP_REAL_DTYPE(np.sum(weights_np[evals_np > float(threshold)]))
-                if valid_gradient
-                else NP_REAL_DTYPE(np.nan)
-            )
-            diagnostics[metric_name] = sector_weight
-            sector_weights[float(threshold)] = sector_weight
-        diagnostics["sector_weights"] = sector_weights
-
-        if warn_degenerate:
-            _warn_if_qfim_spectrum_is_degenerate(evals_np)
-
-        return diagnostics
-
-
-    def qfim_spectral_gradient_diagnostics_at_point(
-        theta,
-        grad,
-        qfim_fn,
-        **kwargs,
-    ):
-        """Evaluate one QFIM once and derive all spectral-gradient diagnostics."""
-        theta = jnp.asarray(theta, dtype=REAL_DTYPE)
-        F = qfim_fn(theta)
-        return qfim_spectral_gradient_diagnostics_from_matrix(
-            F,
-            grad,
-            **kwargs,
-        )
 
 
     def make_mixed_state_qfim_matrix_fn_for_layer_sequential(
@@ -1220,23 +863,20 @@ def run_qfim(*, include_optimization_path: bool = True):
         n_layer: int,
         *,
         jvp_chunk: int = RED_JVP_CHUNK,
-        compute_hamiltonian_gradient: bool = True,
     ):
-        """Build F4/F5 and auxiliary data from one rho5 linearization.
+        """Build F4/F5 and density-matrix ranks from one rho5 linearization.
 
-        At each parameter point, ``rho5`` and its linear map are evaluated once.
-        Every parameter-direction chunk ``d_rho5`` is also evaluated once; the
-        corresponding ``rho4`` and ``d_rho4`` are obtained only by tracing wire 4.
-        The same state eigendecompositions provide the two density-matrix ranks,
-        and the same ``d_rho5`` chunks provide the Hamiltonian gradient.
+        At each parameter point, ``rho5`` and its linear map are evaluated
+        once. Every parameter-direction chunk ``d_rho5`` is also evaluated
+        once; the corresponding ``rho4`` and ``d_rho4`` are obtained by
+        tracing wire 4. The same state eigendecompositions provide both
+        density-matrix ranks.
 
-        The returned tuple is ``(F4, F5, rho_rank4, rho_rank5, grad_hamiltonian)``.
-        When ``compute_hamiltonian_gradient`` is false, its final entry is an empty
-        array. Callers should JIT the returned function once per layer.
+        The returned tuple is ``(F4, F5, rho_rank4, rho_rank5)``.
+        Callers should JIT the returned function once per layer.
         """
         n_layer = int(n_layer)
         jvp_chunk = int(jvp_chunk)
-        compute_hamiltonian_gradient = bool(compute_hamiltonian_gradient)
         if n_layer <= 0:
             raise ValueError(f"n_layer must be positive, got {n_layer}.")
         if jvp_chunk <= 0:
@@ -1287,8 +927,6 @@ def run_qfim(*, include_optimization_path: bool = True):
                     rho_keep_sequential_dpqc(theta_value, n_layer=n_layer)
                 )
 
-            # This is the only primal rho5 evaluation and the only rho5 JVP map
-            # created for this parameter point.
             rho5, rho5_jvp = jax.linearize(rho5_fn, theta)
             rho4 = _hermitian(rho4_from_rho5(rho5))
 
@@ -1298,15 +936,12 @@ def run_qfim(*, include_optimization_path: bool = True):
             identity_tangents = jnp.eye(n_params, dtype=theta.dtype)
             feature4_blocks = []
             feature5_blocks = []
-            gradient_blocks = [] if compute_hamiltonian_gradient else None
 
             for start in range(0, n_params, jvp_chunk):
                 tangent_block = identity_tangents[
                     start: min(start + jvp_chunk, n_params), :
                 ]
 
-                # Evaluate each d_rho5 direction once.  Linearity of partial trace
-                # gives d_rho4 = Tr_4(d_rho5), without a second circuit/JVP pass.
                 d_rho5_block = jax.vmap(rho5_jvp)(tangent_block)
                 d_rho5_block = 0.5 * (
                     d_rho5_block
@@ -1332,24 +967,9 @@ def run_qfim(*, include_optimization_path: bool = True):
                         sqrt_weight5,
                     )
                 )
-                if compute_hamiltonian_gradient:
-                    gradient_blocks.append(
-                        jnp.real(
-                            jnp.einsum(
-                                "bij,ji->b",
-                                d_rho5_block,
-                                H_matrix,
-                            )
-                        )
-                    )
 
             feature4 = jnp.concatenate(feature4_blocks, axis=0)
             feature5 = jnp.concatenate(feature5_blocks, axis=0)
-            grad_hamiltonian = (
-                jnp.concatenate(gradient_blocks, axis=0)
-                if compute_hamiltonian_gradient
-                else jnp.empty((0,), dtype=theta.dtype)
-            )
 
             if feature4.shape != (n_params, dim4 * dim4):
                 raise AssertionError(
@@ -1365,7 +985,7 @@ def run_qfim(*, include_optimization_path: bool = True):
             F4 = 0.5 * (F4 + F4.T)
             F5 = 0.5 * (F5 + F5.T)
 
-            return F4, F5, rho_rank4, rho_rank5, grad_hamiltonian
+            return F4, F5, rho_rank4, rho_rank5
 
         return joint_qfim_data
 
@@ -1373,7 +993,6 @@ def run_qfim(*, include_optimization_path: bool = True):
     qfim_rank_reduced_0123_by_layer = {}
     qfim_eigs_reduced_0123_by_layer = {}
     qfim_rho_rank_reduced_0123_by_layer = {}
-
     qfim_eigsum_reduced_0123_by_layer = {}
     qfim_abs_entry_sum_reduced_0123_by_layer = {}
     qfim_participation_rank_random_by_layer = {}
@@ -1381,12 +1000,7 @@ def run_qfim(*, include_optimization_path: bool = True):
     qfim_largest_eigenvalue_random_by_layer = {}
     qfim_smallest_active_eigenvalue_random_by_layer = {}
     qfim_active_condition_number_random_by_layer = {}
-    hamiltonian_qfim_sensitivity_random_by_layer = {}
-    gradient_image_residual_norm_sq_random_by_layer = {}
-    qfim_active_rank_random_by_layer = {}
 
-    # Full five-qubit kept-state diagnostics.  These have dedicated names so every
-    # existing keep0123 variable and archive remains unchanged.
     qfim_rank_reduced_01234_by_layer = {}
     qfim_eigs_reduced_01234_by_layer = {}
     qfim_rho_rank_reduced_01234_by_layer = {}
@@ -1397,14 +1011,6 @@ def run_qfim(*, include_optimization_path: bool = True):
     qfim_largest_eigenvalue_random_keep01234_by_layer = {}
     qfim_smallest_active_eigenvalue_random_keep01234_by_layer = {}
     qfim_active_condition_number_random_keep01234_by_layer = {}
-    hamiltonian_qfim_sensitivity_random_keep01234_by_layer = {}
-    gradient_image_residual_norm_sq_random_keep01234_by_layer = {}
-    qfim_active_rank_random_keep01234_by_layer = {}
-
-    qfim_eigs_dir = os.path.join(qfim_fig_dir, "qfim_eigs")
-    qfim_eigs_dir_red4 = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
-
-    os.makedirs(qfim_eigs_dir_red4, exist_ok=True)
 
     for L in tqdm(
         qfim_layer_list,
@@ -1412,7 +1018,6 @@ def run_qfim(*, include_optimization_path: bool = True):
         unit="layer",
     ):
         n_params = n_param_per_layer * L
-
         thetas_L = jax.random.uniform(
             jax.random.PRNGKey(QFIM_SAMPLE_SEED_BASE + int(L)),
             shape=(NUM_QFIM_SAMPLES, n_params),
@@ -1420,7 +1025,6 @@ def run_qfim(*, include_optimization_path: bool = True):
             minval=jnp.asarray(-jnp.pi, dtype=REAL_DTYPE),
             maxval=jnp.asarray(jnp.pi, dtype=REAL_DTYPE),
         )
-
         joint_qfim_data_fn = jax.jit(
             make_joint_reduced_qfim_data_fn_for_layer_sequential(
                 n_layer=L,
@@ -1428,240 +1032,121 @@ def run_qfim(*, include_optimization_path: bool = True):
             )
         )
 
-        rr4_list = []
-        eigs4_list = []
-        rho_rank4_list = []
-        eigsum4_list = []
-        abs_entry_sum4_list = []
-        participation_rank4_list = []
-        frobenius_norm_sq4_list = []
-        largest_eigenvalue4_list = []
-        smallest_active_eigenvalue4_list = []
-        active_condition_number4_list = []
-        chi_hamiltonian4_list = []
-        gradient_image_residual_norm_sq4_list = []
-        active_rank4_list = []
-        rr5_list = []
-        eigs5_list = []
-        rho_rank5_list = []
-        eigsum5_list = []
-        abs_entry_sum5_list = []
-        participation_rank5_list = []
-        frobenius_norm_sq5_list = []
-        largest_eigenvalue5_list = []
-        smallest_active_eigenvalue5_list = []
-        active_condition_number5_list = []
-        chi_hamiltonian5_list = []
-        gradient_image_residual_norm_sq5_list = []
-        active_rank5_list = []
+        state_lists = [
+            {
+                "rank": [],
+                "eigs": [],
+                "rho_rank": [],
+                "trace": [],
+                "abs_entry_sum": [],
+                "participation_rank": [],
+                "frobenius_norm_sq": [],
+                "largest_eigenvalue": [],
+                "smallest_active_eigenvalue": [],
+                "active_condition_number": [],
+            }
+            for _ in range(2)
+        ]
 
-        for s in tqdm(
+        for sample_index in tqdm(
             range(NUM_QFIM_SAMPLES),
             desc=f"QFIM samples for both kept states (L={L})",
             unit="sample",
             leave=False,
         ):
-            th = thetas_L[s]
+            F4, F5, rho_rank4, rho_rank5 = joint_qfim_data_fn(
+                thetas_L[sample_index]
+            )
+            for state_index, (F, rho_rank) in enumerate(
+                ((F4, rho_rank4), (F5, rho_rank5))
+            ):
+                _, eigs_desc = psd_rank_and_desc_eigs(F)
+                eigs_np = jax_to_np(eigs_desc, dtype=NP_REAL_DTYPE)
+                spectral = qfim_spectral_summary_from_eigvals(eigs_np)
+                values = state_lists[state_index]
+                values["rank"].append(int(spectral["qfim_threshold_rank"]))
+                values["eigs"].append(eigs_np)
+                values["rho_rank"].append(int(jax.device_get(rho_rank)))
+                values["trace"].append(spectral["qfim_trace"])
+                values["abs_entry_sum"].append(
+                    NP_REAL_DTYPE(
+                        np.sum(np.abs(jax_to_np(F, dtype=NP_REAL_DTYPE)))
+                    )
+                )
+                values["participation_rank"].append(
+                    spectral["qfim_participation_rank"]
+                )
+                values["frobenius_norm_sq"].append(
+                    spectral["qfim_frobenius_norm_sq"]
+                )
+                values["largest_eigenvalue"].append(
+                    spectral["largest_qfim_eigenvalue"]
+                )
+                values["smallest_active_eigenvalue"].append(
+                    spectral["smallest_active_qfim_eigenvalue"]
+                )
+                values["active_condition_number"].append(
+                    spectral["condition_number_active"]
+                )
 
-            (
-                F4,
-                F5,
-                rho_rank4,
-                rho_rank5,
-                grad_hamiltonian,
-            ) = joint_qfim_data_fn(th)
-            diagnostics4 = qfim_spectral_gradient_diagnostics_from_matrix(
-                F4,
-                grad_hamiltonian,
-                sector_thresholds=(),
-                warn_degenerate=False,
-            )
-            diagnostics5 = qfim_spectral_gradient_diagnostics_from_matrix(
-                F5,
-                grad_hamiltonian,
-                sector_thresholds=(),
-                warn_degenerate=False,
-            )
-
-            evals4_np = np.asarray(
-                diagnostics4["evals"],
-                dtype=NP_REAL_DTYPE,
-            )
-            F4_np = jax_to_np(F4, dtype=NP_REAL_DTYPE)
-            evals5_np = np.asarray(
-                diagnostics5["evals"],
-                dtype=NP_REAL_DTYPE,
-            )
-            F5_np = jax_to_np(F5, dtype=NP_REAL_DTYPE)
-
-            rr4_list.append(int(diagnostics4["qfim_threshold_rank"]))
-            eigs4_list.append(evals4_np)
-            rho_rank4_list.append(int(jax.device_get(rho_rank4)))
-
-            eigsum4_list.append(NP_REAL_DTYPE(np.sum(evals4_np)))
-            abs_entry_sum4_list.append(NP_REAL_DTYPE(np.sum(np.abs(F4_np))))
-
-            # Rank, spectrum, trace-based diagnostics, and Hamiltonian sensitivity
-            # all reuse the single eigendecomposition inside ``diagnostics4``.
-            spectral4 = diagnostics4
-            participation_rank4_list.append(
-                spectral4["qfim_participation_rank"]
-            )
-            frobenius_norm_sq4_list.append(
-                spectral4["qfim_frobenius_norm_sq"]
-            )
-            largest_eigenvalue4_list.append(
-                spectral4["largest_qfim_eigenvalue"]
-            )
-            smallest_active_eigenvalue4_list.append(
-                spectral4["smallest_active_qfim_eigenvalue"]
-            )
-            active_condition_number4_list.append(
-                spectral4["condition_number_active"]
-            )
-            chi_hamiltonian4_list.append(
-                diagnostics4["hamiltonian_qfim_sensitivity"]
-            )
-            gradient_image_residual_norm_sq4_list.append(
-                diagnostics4["gradient_image_residual_norm_sq"]
-            )
-            active_rank4_list.append(
-                diagnostics4["qfim_threshold_rank"]
-            )
-            rr5_list.append(int(diagnostics5["qfim_threshold_rank"]))
-            eigs5_list.append(evals5_np)
-            rho_rank5_list.append(int(jax.device_get(rho_rank5)))
-            eigsum5_list.append(NP_REAL_DTYPE(np.sum(evals5_np)))
-            abs_entry_sum5_list.append(NP_REAL_DTYPE(np.sum(np.abs(F5_np))))
-            participation_rank5_list.append(
-                diagnostics5["qfim_participation_rank"]
-            )
-            frobenius_norm_sq5_list.append(
-                diagnostics5["qfim_frobenius_norm_sq"]
-            )
-            largest_eigenvalue5_list.append(
-                diagnostics5["largest_qfim_eigenvalue"]
-            )
-            smallest_active_eigenvalue5_list.append(
-                diagnostics5["smallest_active_qfim_eigenvalue"]
-            )
-            active_condition_number5_list.append(
-                diagnostics5["condition_number_active"]
-            )
-            chi_hamiltonian5_list.append(
-                diagnostics5["hamiltonian_qfim_sensitivity"]
-            )
-            gradient_image_residual_norm_sq5_list.append(
-                diagnostics5["gradient_image_residual_norm_sq"]
-            )
-            active_rank5_list.append(
-                diagnostics5["qfim_threshold_rank"]
-            )
-
+        values4, values5 = state_lists
         qfim_rank_reduced_0123_by_layer[L] = np.asarray(
-            rr4_list,
-            dtype=NP_INT_DTYPE,
+            values4["rank"], dtype=NP_INT_DTYPE
         )
-
-        qfim_eigs_reduced_0123_by_layer[L] = np.stack(eigs4_list, axis=0)
-
+        qfim_eigs_reduced_0123_by_layer[L] = np.stack(values4["eigs"], axis=0)
         qfim_rho_rank_reduced_0123_by_layer[L] = np.asarray(
-            rho_rank4_list,
-            dtype=NP_INT_DTYPE,
+            values4["rho_rank"], dtype=NP_INT_DTYPE
         )
-
         qfim_eigsum_reduced_0123_by_layer[L] = np.asarray(
-            eigsum4_list,
-            dtype=NP_REAL_DTYPE,
+            values4["trace"], dtype=NP_REAL_DTYPE
         )
-
         qfim_abs_entry_sum_reduced_0123_by_layer[L] = np.asarray(
-            abs_entry_sum4_list,
-            dtype=NP_REAL_DTYPE,
+            values4["abs_entry_sum"], dtype=NP_REAL_DTYPE
         )
-
         qfim_participation_rank_random_by_layer[L] = np.asarray(
-            participation_rank4_list,
-            dtype=NP_REAL_DTYPE,
+            values4["participation_rank"], dtype=NP_REAL_DTYPE
         )
         qfim_frobenius_norm_sq_random_by_layer[L] = np.asarray(
-            frobenius_norm_sq4_list,
-            dtype=NP_REAL_DTYPE,
+            values4["frobenius_norm_sq"], dtype=NP_REAL_DTYPE
         )
         qfim_largest_eigenvalue_random_by_layer[L] = np.asarray(
-            largest_eigenvalue4_list,
-            dtype=NP_REAL_DTYPE,
+            values4["largest_eigenvalue"], dtype=NP_REAL_DTYPE
         )
         qfim_smallest_active_eigenvalue_random_by_layer[L] = np.asarray(
-            smallest_active_eigenvalue4_list,
-            dtype=NP_REAL_DTYPE,
+            values4["smallest_active_eigenvalue"], dtype=NP_REAL_DTYPE
         )
         qfim_active_condition_number_random_by_layer[L] = np.asarray(
-            active_condition_number4_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        hamiltonian_qfim_sensitivity_random_by_layer[L] = np.asarray(
-            chi_hamiltonian4_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        gradient_image_residual_norm_sq_random_by_layer[L] = np.asarray(
-            gradient_image_residual_norm_sq4_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        qfim_active_rank_random_by_layer[L] = np.asarray(
-            active_rank4_list,
-            dtype=NP_INT_DTYPE,
-        )
-        qfim_rank_reduced_01234_by_layer[L] = np.asarray(
-            rr5_list,
-            dtype=NP_INT_DTYPE,
-        )
-        qfim_eigs_reduced_01234_by_layer[L] = np.stack(eigs5_list, axis=0)
-        qfim_rho_rank_reduced_01234_by_layer[L] = np.asarray(
-            rho_rank5_list,
-            dtype=NP_INT_DTYPE,
-        )
-        qfim_eigsum_reduced_01234_by_layer[L] = np.asarray(
-            eigsum5_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        qfim_abs_entry_sum_reduced_01234_by_layer[L] = np.asarray(
-            abs_entry_sum5_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        qfim_participation_rank_random_keep01234_by_layer[L] = np.asarray(
-            participation_rank5_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        qfim_frobenius_norm_sq_random_keep01234_by_layer[L] = np.asarray(
-            frobenius_norm_sq5_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        qfim_largest_eigenvalue_random_keep01234_by_layer[L] = np.asarray(
-            largest_eigenvalue5_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        qfim_smallest_active_eigenvalue_random_keep01234_by_layer[L] = np.asarray(
-            smallest_active_eigenvalue5_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        qfim_active_condition_number_random_keep01234_by_layer[L] = np.asarray(
-            active_condition_number5_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        hamiltonian_qfim_sensitivity_random_keep01234_by_layer[L] = np.asarray(
-            chi_hamiltonian5_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        gradient_image_residual_norm_sq_random_keep01234_by_layer[L] = np.asarray(
-            gradient_image_residual_norm_sq5_list,
-            dtype=NP_REAL_DTYPE,
-        )
-        qfim_active_rank_random_keep01234_by_layer[L] = np.asarray(
-            active_rank5_list,
-            dtype=NP_INT_DTYPE,
+            values4["active_condition_number"], dtype=NP_REAL_DTYPE
         )
 
+        qfim_rank_reduced_01234_by_layer[L] = np.asarray(
+            values5["rank"], dtype=NP_INT_DTYPE
+        )
+        qfim_eigs_reduced_01234_by_layer[L] = np.stack(values5["eigs"], axis=0)
+        qfim_rho_rank_reduced_01234_by_layer[L] = np.asarray(
+            values5["rho_rank"], dtype=NP_INT_DTYPE
+        )
+        qfim_eigsum_reduced_01234_by_layer[L] = np.asarray(
+            values5["trace"], dtype=NP_REAL_DTYPE
+        )
+        qfim_abs_entry_sum_reduced_01234_by_layer[L] = np.asarray(
+            values5["abs_entry_sum"], dtype=NP_REAL_DTYPE
+        )
+        qfim_participation_rank_random_keep01234_by_layer[L] = np.asarray(
+            values5["participation_rank"], dtype=NP_REAL_DTYPE
+        )
+        qfim_frobenius_norm_sq_random_keep01234_by_layer[L] = np.asarray(
+            values5["frobenius_norm_sq"], dtype=NP_REAL_DTYPE
+        )
+        qfim_largest_eigenvalue_random_keep01234_by_layer[L] = np.asarray(
+            values5["largest_eigenvalue"], dtype=NP_REAL_DTYPE
+        )
+        qfim_smallest_active_eigenvalue_random_keep01234_by_layer[L] = np.asarray(
+            values5["smallest_active_eigenvalue"], dtype=NP_REAL_DTYPE
+        )
+        qfim_active_condition_number_random_keep01234_by_layer[L] = np.asarray(
+            values5["active_condition_number"], dtype=NP_REAL_DTYPE
+        )
 
 
     qfim_random_points_result_path = os.path.join(
@@ -1679,7 +1164,6 @@ def run_qfim(*, include_optimization_path: bool = True):
         qfim_eig_plot_eps=np.asarray(QFIM_EIG_PLOT_EPS, dtype=NP_REAL_DTYPE),
         red_jvp_chunk=np.asarray(RED_JVP_CHUNK, dtype=NP_INT_DTYPE),
         layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
-        grad_sector_thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
         **_layer_arrays_for_npz(qfim_rank_reduced_0123_by_layer, "rank"),
         **_layer_arrays_for_npz(qfim_eigs_reduced_0123_by_layer, "eigs_desc"),
         **_layer_arrays_for_npz(qfim_rho_rank_reduced_0123_by_layer, "rho_rank"),
@@ -1706,18 +1190,6 @@ def run_qfim(*, include_optimization_path: bool = True):
             qfim_active_condition_number_random_by_layer,
             "active_condition_number",
         ),
-        **_layer_arrays_for_npz(
-            hamiltonian_qfim_sensitivity_random_by_layer,
-            "chi_hamiltonian",
-        ),
-        **_layer_arrays_for_npz(
-            gradient_image_residual_norm_sq_random_by_layer,
-            "gradient_image_residual_norm_sq",
-        ),
-        **_layer_arrays_for_npz(
-            qfim_active_rank_random_by_layer,
-            "active_rank",
-        ),
     )
 
     qfim_random_points_keep01234_result_path = os.path.join(
@@ -1741,7 +1213,6 @@ def run_qfim(*, include_optimization_path: bool = True):
         state_label=np.asarray(keep_label_5),
         representation=np.asarray("reduced_keep_01234"),
         layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
-        grad_sector_thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
         **_layer_arrays_for_npz(qfim_rank_reduced_01234_by_layer, "rank"),
         **_layer_arrays_for_npz(
             qfim_eigs_reduced_01234_by_layer,
@@ -1780,223 +1251,6 @@ def run_qfim(*, include_optimization_path: bool = True):
             qfim_active_condition_number_random_keep01234_by_layer,
             "active_condition_number",
         ),
-        **_layer_arrays_for_npz(
-            hamiltonian_qfim_sensitivity_random_keep01234_by_layer,
-            "chi_hamiltonian",
-        ),
-        **_layer_arrays_for_npz(
-            gradient_image_residual_norm_sq_random_keep01234_by_layer,
-            "gradient_image_residual_norm_sq",
-        ),
-        **_layer_arrays_for_npz(
-            qfim_active_rank_random_keep01234_by_layer,
-            "active_rank",
-        ),
-    )
-
-
-    def _build_hamiltonian_sensitivity_layer_statistics(
-        layers,
-        chi_by_layer,
-        residual_norm_sq_by_layer,
-        active_rank_by_layer,
-    ):
-        """Build the common per-layer NPZ schema for random/path sensitivity."""
-        npz_arrays = {}
-        chi_mean_by_layer = []
-        chi_sem_by_layer = []
-        chi_count_by_layer = []
-
-        for L in layers:
-            L = int(L)
-            chi_hamiltonian = np.asarray(
-                chi_by_layer[L],
-                dtype=NP_REAL_DTYPE,
-            )
-            residual_norm_sq = np.asarray(
-                residual_norm_sq_by_layer[L],
-                dtype=NP_REAL_DTYPE,
-            )
-            active_rank = np.asarray(
-                active_rank_by_layer[L],
-                dtype=NP_INT_DTYPE,
-            )
-            chi_mean, chi_sem, chi_count = _finite_mean_sem(
-                chi_hamiltonian,
-                axis=0,
-            )
-            residual_mean, residual_sem, residual_count = _finite_mean_sem(
-                residual_norm_sq,
-                axis=0,
-            )
-            active_rank_mean, active_rank_sem, active_rank_count = _finite_mean_sem(
-                active_rank,
-                axis=0,
-            )
-            L_tag = f"L{L}"
-            npz_arrays.update(
-                {
-                    f"{L_tag}_chi_hamiltonian": chi_hamiltonian,
-                    f"{L_tag}_chi_hamiltonian_mean": np.asarray(
-                        chi_mean,
-                        dtype=NP_REAL_DTYPE,
-                    ),
-                    f"{L_tag}_chi_hamiltonian_sem": np.asarray(
-                        chi_sem,
-                        dtype=NP_REAL_DTYPE,
-                    ),
-                    f"{L_tag}_chi_hamiltonian_count": np.asarray(
-                        chi_count,
-                        dtype=NP_INT_DTYPE,
-                    ),
-                    f"{L_tag}_gradient_image_residual_norm_sq": residual_norm_sq,
-                    f"{L_tag}_gradient_image_residual_norm_sq_mean": np.asarray(
-                        residual_mean,
-                        dtype=NP_REAL_DTYPE,
-                    ),
-                    f"{L_tag}_gradient_image_residual_norm_sq_sem": np.asarray(
-                        residual_sem,
-                        dtype=NP_REAL_DTYPE,
-                    ),
-                    f"{L_tag}_gradient_image_residual_norm_sq_count": np.asarray(
-                        residual_count,
-                        dtype=NP_INT_DTYPE,
-                    ),
-                    f"{L_tag}_active_rank": active_rank,
-                    f"{L_tag}_active_rank_mean": np.asarray(
-                        active_rank_mean,
-                        dtype=NP_REAL_DTYPE,
-                    ),
-                    f"{L_tag}_active_rank_sem": np.asarray(
-                        active_rank_sem,
-                        dtype=NP_REAL_DTYPE,
-                    ),
-                    f"{L_tag}_active_rank_count": np.asarray(
-                        active_rank_count,
-                        dtype=NP_INT_DTYPE,
-                    ),
-                }
-            )
-            chi_mean_by_layer.append(chi_mean)
-            chi_sem_by_layer.append(chi_sem)
-            chi_count_by_layer.append(chi_count)
-
-        return (
-            npz_arrays,
-            chi_mean_by_layer,
-            chi_sem_by_layer,
-            chi_count_by_layer,
-        )
-
-
-    (
-        hamiltonian_qfim_sensitivity_random_npz_arrays,
-        random_chi_hamiltonian_mean_by_layer,
-        random_chi_hamiltonian_sem_by_layer,
-        random_chi_hamiltonian_count_by_layer,
-    ) = _build_hamiltonian_sensitivity_layer_statistics(
-        qfim_layer_list,
-        hamiltonian_qfim_sensitivity_random_by_layer,
-        gradient_image_residual_norm_sq_random_by_layer,
-        qfim_active_rank_random_by_layer,
-    )
-
-    hamiltonian_qfim_sensitivity_random_result_path = os.path.join(
-        qfim_results_dir,
-        f"hamiltonian_qfim_normalized_sensitivity_random_points_{keep_key}.npz",
-    )
-    save_npz_result(
-        hamiltonian_qfim_sensitivity_random_result_path,
-        h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-        layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
-        keep_wires=np.asarray((0, 1, 2, 3), dtype=NP_INT_DTYPE),
-        state_label=np.asarray(keep_label),
-        qfim_eigenvalue_threshold=np.asarray(
-            QFIM_EFFECTIVE_RANK_THRESHOLD,
-            dtype=NP_REAL_DTYPE,
-        ),
-        num_qfim_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
-        qfim_sample_seed_base=np.asarray(
-            QFIM_SAMPLE_SEED_BASE,
-            dtype=NP_INT_DTYPE,
-        ),
-        definition=np.asarray(
-            "chi_H^(tau) = sum_{lambda_i > tau} "
-            "|v_i^dagger g|^2 / lambda_i"
-        ),
-        gradient_image_residual_definition=np.asarray(
-            "sum_{lambda_i <= tau} |v_i^dagger g|^2"
-        ),
-        chi_hamiltonian_mean_by_layer=np.asarray(
-            random_chi_hamiltonian_mean_by_layer,
-            dtype=NP_REAL_DTYPE,
-        ),
-        chi_hamiltonian_sem_by_layer=np.asarray(
-            random_chi_hamiltonian_sem_by_layer,
-            dtype=NP_REAL_DTYPE,
-        ),
-        chi_hamiltonian_count_by_layer=np.asarray(
-            random_chi_hamiltonian_count_by_layer,
-            dtype=NP_INT_DTYPE,
-        ),
-        **hamiltonian_qfim_sensitivity_random_npz_arrays,
-    )
-
-
-    (
-        hamiltonian_qfim_sensitivity_random_keep01234_npz_arrays,
-        random_chi_hamiltonian_mean_keep01234_by_layer,
-        random_chi_hamiltonian_sem_keep01234_by_layer,
-        random_chi_hamiltonian_count_keep01234_by_layer,
-    ) = _build_hamiltonian_sensitivity_layer_statistics(
-        qfim_layer_list,
-        hamiltonian_qfim_sensitivity_random_keep01234_by_layer,
-        gradient_image_residual_norm_sq_random_keep01234_by_layer,
-        qfim_active_rank_random_keep01234_by_layer,
-    )
-
-    hamiltonian_qfim_sensitivity_random_keep01234_result_path = os.path.join(
-        qfim_results_dir,
-        (
-            "hamiltonian_qfim_normalized_sensitivity_random_points_"
-            f"{keep_key_5}.npz"
-        ),
-    )
-    save_npz_result(
-        hamiltonian_qfim_sensitivity_random_keep01234_result_path,
-        h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-        layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
-        keep_wires=np.asarray((0, 1, 2, 3, 4), dtype=NP_INT_DTYPE),
-        state_label=np.asarray(keep_label_5),
-        qfim_eigenvalue_threshold=np.asarray(
-            QFIM_EFFECTIVE_RANK_THRESHOLD,
-            dtype=NP_REAL_DTYPE,
-        ),
-        num_qfim_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
-        qfim_sample_seed_base=np.asarray(
-            QFIM_SAMPLE_SEED_BASE,
-            dtype=NP_INT_DTYPE,
-        ),
-        definition=np.asarray(
-            "chi_H^(tau) = sum_{lambda_i > tau} "
-            "|v_i^dagger g|^2 / lambda_i"
-        ),
-        gradient_image_residual_definition=np.asarray(
-            "sum_{lambda_i <= tau} |v_i^dagger g|^2"
-        ),
-        chi_hamiltonian_mean_by_layer=np.asarray(
-            random_chi_hamiltonian_mean_keep01234_by_layer,
-            dtype=NP_REAL_DTYPE,
-        ),
-        chi_hamiltonian_sem_by_layer=np.asarray(
-            random_chi_hamiltonian_sem_keep01234_by_layer,
-            dtype=NP_REAL_DTYPE,
-        ),
-        chi_hamiltonian_count_by_layer=np.asarray(
-            random_chi_hamiltonian_count_keep01234_by_layer,
-            dtype=NP_INT_DTYPE,
-        ),
-        **hamiltonian_qfim_sensitivity_random_keep01234_npz_arrays,
     )
 
 
@@ -2114,346 +1368,26 @@ def run_qfim(*, include_optimization_path: bool = True):
         return
 
     # ============================================================
-    # Large-sector gradient weights: compute and save numerical results
+    # Optimization-path QFIM rank/eigenvalues: compute and save numerical results
     # ============================================================
-    # Large-sector gradient weight along the VQE optimization path
-    #   color  = layer number
-    #   marker = QFIM eigenvalue threshold
+    # QFIM rank along the VQE optimization path
+    #   x-axis: sampled optimization iteration
+    #   y-axis: run-mean QFIM effective rank at theta(iteration)
+    #   color: layer number
     # ============================================================
-    GRADIENT_SECTOR_NORM_EPS = QFIM_GRAD_ALIGNMENT_NORM_EPS
-
-
-    def make_large_sector_gradient_weight_fn_for_layer(
-        n_layer: int,
-        thresholds,
-        *,
-        jvp_chunk: int = RED_JVP_CHUNK,
-    ):
-        qfim_fn = make_reduced0123_qfim_matrix_fn_for_layer_sequential(
-            n_layer=n_layer,
-            jvp_chunk=jvp_chunk,
-        )
-
-        thresholds_jnp = jnp.asarray(thresholds, dtype=REAL_DTYPE)
-
-        @jax.jit
-        def large_sector_gradient_weight(theta: jnp.ndarray, grad: jnp.ndarray):
-            F = qfim_fn(theta)
-            F = 0.5 * (F + F.T)
-
-            evals, evecs = jnp.linalg.eigh(F)
-            evals = jnp.clip(evals, a_min=0.0)
-
-            grad = jnp.asarray(grad, dtype=REAL_DTYPE)
-            grad_norm_sq = jnp.real(jnp.vdot(grad, grad))
-
-            coeffs = evecs.T @ grad
-            coeff_abs2 = jnp.real(coeffs * jnp.conjugate(coeffs))
-            valid_gradient = grad_norm_sq > GRADIENT_SECTOR_NORM_EPS
-            weights = jnp.where(
-                valid_gradient,
-                coeff_abs2 / grad_norm_sq,
-                jnp.full_like(coeff_abs2, jnp.nan),
-            )
-
-            large_masks = evals[None, :] > thresholds_jnp[:, None]
-            large_weights = jnp.sum(
-                jnp.where(large_masks, weights[None, :], 0.0),
-                axis=1,
-            )
-
-            return jnp.where(
-                valid_gradient,
-                jnp.clip(large_weights, a_min=0.0, a_max=1.0),
-                jnp.full_like(large_weights, jnp.nan),
-            )
-
-        return large_sector_gradient_weight
-
-
-    def compute_large_sector_gradient_weight_by_layer(
+    def compute_joint_qfim_rank_history_by_layer(
         theta_samples_by_layer: dict,
-        grad_samples_by_layer: dict,
         layers,
-        thresholds,
         *,
         jvp_chunk: int = RED_JVP_CHUNK,
     ):
-        thresholds = tuple(float(thr) for thr in thresholds)
-        result = {}
-
-        for L in tqdm(
-            layers,
-            desc="Large-sector gradient weights",
-            unit="layer",
-        ):
-            if theta_samples_by_layer.get(L) is None:
-                continue
-            if grad_samples_by_layer.get(L) is None:
-                continue
-
-            theta_samples = np.asarray(
-                theta_samples_by_layer[L],
-                dtype=NP_REAL_DTYPE,
-            )
-            grad_samples = np.asarray(
-                grad_samples_by_layer[L],
-                dtype=NP_REAL_DTYPE,
-            )
-
-            if theta_samples.shape != grad_samples.shape:
-                raise ValueError(
-                    f"theta_samples and grad_samples must have the same shape for L={L}. "
-                    f"Got {theta_samples.shape} and {grad_samples.shape}."
-                )
-
-            if theta_samples.ndim != 3:
-                raise ValueError(
-                    "theta_samples and grad_samples must have shape "
-                    "(num_runs, num_sample_iters, num_params)."
-                )
-
-            n_runs, n_times, _ = theta_samples.shape
-
-            weight_fn = make_large_sector_gradient_weight_fn_for_layer(
-                n_layer=int(L),
-                thresholds=thresholds,
-                jvp_chunk=jvp_chunk,
-            )
-
-            weights_L = {
-                thr: np.full((n_runs, n_times), np.nan, dtype=NP_REAL_DTYPE)
-                for thr in thresholds
-            }
-
-            for run_idx in tqdm(
-                range(n_runs),
-                desc=f"Gradient-sector runs (L={L})",
-                unit="run",
-                leave=False,
-            ):
-                for time_idx in range(n_times):
-                    weights = weight_fn(
-                        jnp.asarray(theta_samples[run_idx, time_idx], dtype=REAL_DTYPE),
-                        jnp.asarray(grad_samples[run_idx, time_idx], dtype=REAL_DTYPE),
-                    )
-                    weights_np = jax_to_np(weights, dtype=NP_REAL_DTYPE)
-
-                    for threshold_idx, threshold in enumerate(thresholds):
-                        weights_L[threshold][run_idx, time_idx] = weights_np[threshold_idx]
-
-            result[int(L)] = weights_L
-
-        return result
-
-
-    def compute_qfim_spectral_gradient_history_by_layer(
-        theta_samples_by_layer,
-        grad_samples_by_layer,
-        layers,
-        *,
-        jvp_chunk=RED_JVP_CHUNK,
-        sector_thresholds=THRESHOLDS,
-        qfim_matrix_fn_factory=make_reduced0123_qfim_matrix_fn_for_layer_sequential,
-        progress_description="QFIM spectral diagnostics along optimization path",
-    ):
-        """Compute one QFIM/eigendecomposition per optimization-path point.
-
-        The returned cache is reused by the legacy rank/eigenvalue outputs, the
-        large-sector output, the new spectral summary, and all requested alignment
-        tables.  QFIM eigenvectors are used only transiently and are not stored.
-        """
-        scalar_metric_names = (
-            "qfim_threshold_rank",
-            "qfim_participation_rank",
-            "qfim_trace",
-            "qfim_frobenius_norm_sq",
-            "gradient_norm_sq",
-            "hamiltonian_qfim_sensitivity",
-            "gradient_image_projection_norm_sq",
-            "gradient_image_residual_norm_sq",
-            "gradient_image_residual_norm",
-            "gradient_image_residual_fraction",
-            "gradient_participation_rank",
-            "gradient_weighted_qfim_eigenvalue",
-            "gradient_weight_sum",
-            "largest_qfim_eigenvalue",
-            "smallest_active_qfim_eigenvalue",
-            "condition_number_active",
-            "parseval_relative_error",
-        )
-        sector_thresholds = tuple(float(value) for value in sector_thresholds)
-        diagnostics_cache = {}
-        summary_by_layer = {}
-        eigs_by_layer = {}
-        large_sector_by_layer = {}
-
-        for L in tqdm(
-            layers,
-            desc=progress_description,
-            unit="layer",
-        ):
-            L = int(L)
-            if theta_samples_by_layer.get(L) is None:
-                continue
-            if grad_samples_by_layer.get(L) is None:
-                continue
-
-            theta_samples = np.asarray(
-                theta_samples_by_layer[L],
-                dtype=NP_REAL_DTYPE,
-            )
-            grad_samples = np.asarray(
-                grad_samples_by_layer[L],
-                dtype=NP_REAL_DTYPE,
-            )
-            if theta_samples.shape != grad_samples.shape:
-                raise ValueError(
-                    f"theta_samples and grad_samples must match for L={L}: "
-                    f"{theta_samples.shape} != {grad_samples.shape}."
-                )
-            if theta_samples.ndim != 3:
-                raise ValueError(
-                    "theta_samples and grad_samples must have shape "
-                    "(num_runs, num_sample_iters, num_params)."
-                )
-
-            n_runs_L, n_times_L, n_params_L = theta_samples.shape
-            expected_n_params = n_param_per_layer * L
-            if n_params_L != expected_n_params:
-                raise ValueError(
-                    f"Expected M=14L={expected_n_params} parameters for L={L}, "
-                    f"got {n_params_L}."
-                )
-
-            # Compiling the complete QFIM callable once per layer avoids dispatching
-            # every internal JVP block as a separate eager operation.
-            qfim_fn = jax.jit(
-                qfim_matrix_fn_factory(
-                    n_layer=L,
-                    jvp_chunk=jvp_chunk,
-                )
-            )
-            summary_L = {
-                name: np.full(
-                    (n_runs_L, n_times_L),
-                    np.nan,
-                    dtype=NP_REAL_DTYPE,
-                )
-                for name in scalar_metric_names
-            }
-            for threshold in sector_thresholds:
-                summary_L[
-                    f"grad_weight_above_{_spectral_threshold_tag(threshold)}"
-                ] = np.full(
-                    (n_runs_L, n_times_L),
-                    np.nan,
-                    dtype=NP_REAL_DTYPE,
-                )
-            eigs_L = np.full(
-                (n_runs_L, n_times_L, n_params_L),
-                np.nan,
-                dtype=NP_REAL_DTYPE,
-            )
-
-            for run_idx in tqdm(
-                range(n_runs_L),
-                desc=f"QFIM spectral runs (L={L})",
-                unit="run",
-                leave=False,
-            ):
-                for time_idx in range(n_times_L):
-                    diagnostics = qfim_spectral_gradient_diagnostics_at_point(
-                        theta_samples[run_idx, time_idx],
-                        grad_samples[run_idx, time_idx],
-                        qfim_fn,
-                        sector_thresholds=sector_thresholds,
-                    )
-                    diagnostics_cache[(L, run_idx, time_idx)] = diagnostics
-                    eigs_L[run_idx, time_idx, :] = diagnostics["evals"]
-                    for metric_name in summary_L:
-                        summary_L[metric_name][run_idx, time_idx] = diagnostics[
-                            metric_name
-                        ]
-
-            summary_by_layer[L] = summary_L
-            eigs_by_layer[L] = eigs_L
-            large_sector_by_layer[L] = {
-                threshold: summary_L[
-                    f"grad_weight_above_{_spectral_threshold_tag(threshold)}"
-                ]
-                for threshold in sector_thresholds
-            }
-
-        parseval_parts = [
-            np.ravel(metrics["parseval_relative_error"])
-            for metrics in summary_by_layer.values()
-        ]
-        finite_parseval_errors = (
-            np.concatenate(parseval_parts)
-            if parseval_parts
-            else np.empty(0, dtype=NP_REAL_DTYPE)
-        )
-        finite_parseval_errors = finite_parseval_errors[
-            np.isfinite(finite_parseval_errors)
-        ]
-        max_parseval_error = (
-            float(np.max(finite_parseval_errors))
-            if finite_parseval_errors.size
-            else float("nan")
-        )
-        print(
-            "QFIM gradient Parseval check: "
-            f"max relative error={max_parseval_error:.3e}"
-        )
-
-        return (
-            diagnostics_cache,
-            summary_by_layer,
-            eigs_by_layer,
-            large_sector_by_layer,
-        )
-
-
-    def compute_joint_qfim_spectral_gradient_history_by_layer(
-        theta_samples_by_layer,
-        grad_samples_by_layer,
-        layers,
-        *,
-        jvp_chunk=RED_JVP_CHUNK,
-        sector_thresholds=THRESHOLDS,
-    ):
-        """Compute both kept-state histories from one rho5/d_rho5 pass per point."""
-        scalar_metric_names = (
-            "qfim_threshold_rank",
-            "qfim_participation_rank",
-            "qfim_trace",
-            "qfim_frobenius_norm_sq",
-            "gradient_norm_sq",
-            "hamiltonian_qfim_sensitivity",
-            "gradient_image_projection_norm_sq",
-            "gradient_image_residual_norm_sq",
-            "gradient_image_residual_norm",
-            "gradient_image_residual_fraction",
-            "gradient_participation_rank",
-            "gradient_weighted_qfim_eigenvalue",
-            "gradient_weight_sum",
-            "largest_qfim_eigenvalue",
-            "smallest_active_qfim_eigenvalue",
-            "condition_number_active",
-            "parseval_relative_error",
-        )
-        sector_thresholds = tuple(float(value) for value in sector_thresholds)
-
-        diagnostics_caches = ({}, {})
-        summaries_by_layer = ({}, {})
-        eigs_by_layer = ({}, {})
-        large_sectors_by_layer = ({}, {})
+        rank_histories = ({}, {})
+        eig_histories = ({}, {})
 
         for L in tqdm(
             layers,
             desc=(
-                "Joint QFIM spectral diagnostics; "
+                "QFIM rank/eigenvalue history; "
                 "keep=(0,1,2,3) and keep=(0,1,2,3,4)"
             ),
             unit="layer",
@@ -2461,25 +1395,14 @@ def run_qfim(*, include_optimization_path: bool = True):
             L = int(L)
             if theta_samples_by_layer.get(L) is None:
                 continue
-            if grad_samples_by_layer.get(L) is None:
-                continue
 
             theta_samples = np.asarray(
                 theta_samples_by_layer[L],
                 dtype=NP_REAL_DTYPE,
             )
-            grad_samples = np.asarray(
-                grad_samples_by_layer[L],
-                dtype=NP_REAL_DTYPE,
-            )
-            if theta_samples.shape != grad_samples.shape:
-                raise ValueError(
-                    f"theta_samples and grad_samples must match for L={L}: "
-                    f"{theta_samples.shape} != {grad_samples.shape}."
-                )
             if theta_samples.ndim != 3:
                 raise ValueError(
-                    "theta_samples and grad_samples must have shape "
+                    "theta_samples must have shape "
                     "(num_runs, num_sample_iters, num_params)."
                 )
 
@@ -2495,29 +1418,16 @@ def run_qfim(*, include_optimization_path: bool = True):
                 make_joint_reduced_qfim_data_fn_for_layer_sequential(
                     n_layer=L,
                     jvp_chunk=jvp_chunk,
-                    compute_hamiltonian_gradient=False,
                 )
             )
-            summaries_L = tuple(
-                {
-                    name: np.full(
-                        (n_runs_L, n_times_L),
-                        np.nan,
-                        dtype=NP_REAL_DTYPE,
-                    )
-                    for name in scalar_metric_names
-                }
+            ranks_L = tuple(
+                np.full(
+                    (n_runs_L, n_times_L),
+                    np.nan,
+                    dtype=NP_REAL_DTYPE,
+                )
                 for _ in range(2)
             )
-            for summary_L in summaries_L:
-                for threshold in sector_thresholds:
-                    summary_L[
-                        f"grad_weight_above_{_spectral_threshold_tag(threshold)}"
-                    ] = np.full(
-                        (n_runs_L, n_times_L),
-                        np.nan,
-                        dtype=NP_REAL_DTYPE,
-                    )
             eigs_L = tuple(
                 np.full(
                     (n_runs_L, n_times_L, n_params_L),
@@ -2529,410 +1439,49 @@ def run_qfim(*, include_optimization_path: bool = True):
 
             for run_idx in tqdm(
                 range(n_runs_L),
-                desc=f"Joint QFIM spectral runs (L={L})",
+                desc=f"QFIM-rank runs (L={L})",
                 unit="run",
                 leave=False,
             ):
                 for time_idx in range(n_times_L):
-                    F4, F5, _, _, _ = joint_qfim_data_fn(
+                    F4, F5, _, _ = joint_qfim_data_fn(
                         jnp.asarray(
                             theta_samples[run_idx, time_idx],
                             dtype=REAL_DTYPE,
                         )
                     )
-                    gradient = grad_samples[run_idx, time_idx]
-                    cache_key = (L, run_idx, time_idx)
-
                     for state_index, F in enumerate((F4, F5)):
-                        diagnostics = qfim_spectral_gradient_diagnostics_from_matrix(
-                            F,
-                            gradient,
-                            sector_thresholds=sector_thresholds,
+                        _, eigs_desc = psd_rank_and_desc_eigs(F)
+                        eigs_np = jax_to_np(eigs_desc, dtype=NP_REAL_DTYPE)
+                        eigs_L[state_index][run_idx, time_idx, :] = eigs_np
+                        ranks_L[state_index][run_idx, time_idx] = np.count_nonzero(
+                            eigs_np > float(QFIM_EFFECTIVE_RANK_THRESHOLD)
                         )
-                        diagnostics_caches[state_index][cache_key] = diagnostics
-                        eigs_L[state_index][run_idx, time_idx, :] = diagnostics[
-                            "evals"
-                        ]
-                        for metric_name in summaries_L[state_index]:
-                            summaries_L[state_index][metric_name][
-                                run_idx,
-                                time_idx,
-                            ] = diagnostics[metric_name]
 
             for state_index in range(2):
-                summary_L = summaries_L[state_index]
-                summaries_by_layer[state_index][L] = summary_L
-                eigs_by_layer[state_index][L] = eigs_L[state_index]
-                large_sectors_by_layer[state_index][L] = {
-                    threshold: summary_L[
-                        f"grad_weight_above_{_spectral_threshold_tag(threshold)}"
-                    ]
-                    for threshold in sector_thresholds
-                }
+                rank_histories[state_index][L] = ranks_L[state_index]
+                eig_histories[state_index][L] = eigs_L[state_index]
 
-        state_names = ("keep0123", "keep01234")
-        for state_index, state_name in enumerate(state_names):
-            parseval_parts = [
-                np.ravel(metrics["parseval_relative_error"])
-                for metrics in summaries_by_layer[state_index].values()
-            ]
-            finite_parseval_errors = (
-                np.concatenate(parseval_parts)
-                if parseval_parts
-                else np.empty(0, dtype=NP_REAL_DTYPE)
-            )
-            finite_parseval_errors = finite_parseval_errors[
-                np.isfinite(finite_parseval_errors)
-            ]
-            max_parseval_error = (
-                float(np.max(finite_parseval_errors))
-                if finite_parseval_errors.size
-                else float("nan")
-            )
-            print(
-                f"QFIM gradient Parseval check ({state_name}): "
-                f"max relative error={max_parseval_error:.3e}"
-            )
-
-        return tuple(
-            (
-                diagnostics_caches[state_index],
-                summaries_by_layer[state_index],
-                eigs_by_layer[state_index],
-                large_sectors_by_layer[state_index],
-            )
-            for state_index in range(2)
-        )
-
-
-    def validate_qfim_spectral_diagnostics_smoke(
-        diagnostics,
-        *,
-        layer,
-        atol=1e-10,
-        rtol=1e-8,
-    ):
-        """Validate the required one-point numerical invariants."""
-        n_params = n_param_per_layer * int(layer)
-        eigvals = np.asarray(diagnostics["evals"], dtype=NP_REAL_DTYPE)
-        if eigvals.shape != (n_params,):
-            raise AssertionError(
-                f"Expected {n_params} QFIM eigenvalues, got {eigvals.shape}."
-            )
-        if np.min(eigvals) < -atol:
-            raise AssertionError("Clipped QFIM eigenvalues must be nonnegative.")
-
-        threshold_rank = int(diagnostics["qfim_threshold_rank"])
-        if not 0 <= threshold_rank <= n_params:
-            raise AssertionError("QFIM threshold rank is outside [0, M].")
-
-        participation_rank = float(diagnostics["qfim_participation_rank"])
-        frobenius_norm_sq = float(diagnostics["qfim_frobenius_norm_sq"])
-        if frobenius_norm_sq <= PARTICIPATION_EFFECTIVE_RANK_EPS:
-            if participation_rank != 0.0:
-                raise AssertionError("The zero-spectrum participation rank must be 0.")
-        elif not 1.0 - atol <= participation_rank <= n_params + atol:
-            raise AssertionError("QFIM participation rank is outside [1, M].")
-
-        if participation_effective_rank_from_eigvals(
-            np.zeros(n_params, dtype=NP_REAL_DTYPE)
-        ) != 0.0:
-            raise AssertionError("Zero-spectrum participation-rank smoke test failed.")
-
-        gradient_norm_sq = float(diagnostics["gradient_norm_sq"])
-        chi_hamiltonian = float(diagnostics["hamiltonian_qfim_sensitivity"])
-        image_projection_norm_sq = float(
-            diagnostics["gradient_image_projection_norm_sq"]
-        )
-        image_residual_norm_sq = float(
-            diagnostics["gradient_image_residual_norm_sq"]
-        )
-        if not np.isfinite(chi_hamiltonian) or chi_hamiltonian < -atol:
-            raise AssertionError(
-                "Hamiltonian-direction QFIM sensitivity must be finite and nonnegative."
-            )
-        if not np.isclose(
-            image_projection_norm_sq + image_residual_norm_sq,
-            gradient_norm_sq,
-            rtol=rtol,
-            atol=atol,
-        ):
-            raise AssertionError(
-                "QFIM-image projection and residual fail the gradient-norm "
-                "decomposition check."
-            )
-        weights = np.asarray(diagnostics["weights"], dtype=NP_REAL_DTYPE)
-        if gradient_norm_sq > QFIM_GRAD_ALIGNMENT_NORM_EPS:
-            if not np.all(np.isfinite(weights)):
-                raise AssertionError("Nonzero-gradient weights must be finite.")
-            if not np.isclose(np.sum(weights), 1.0, rtol=rtol, atol=atol):
-                raise AssertionError("Gradient weights fail the Parseval sum check.")
-            gradient_rank = float(diagnostics["gradient_participation_rank"])
-            if not 1.0 - atol <= gradient_rank <= n_params + atol:
-                raise AssertionError(
-                    "Gradient participation rank is outside [1, M]."
-                )
-            weighted_eigenvalue = float(
-                diagnostics["gradient_weighted_qfim_eigenvalue"]
-            )
-            weighted_tolerance = atol + rtol * max(1.0, float(eigvals[0]))
-            if not (
-                float(eigvals[-1]) - weighted_tolerance
-                <= weighted_eigenvalue
-                <= float(eigvals[0]) + weighted_tolerance
-            ):
-                raise AssertionError(
-                    "Gradient-weighted eigenvalue is outside the QFIM spectrum."
-                )
-        elif not np.all(np.isnan(weights)):
-            raise AssertionError("Near-zero-gradient weights must be NaN.")
-
-        parseval_error = float(diagnostics["parseval_relative_error"])
-        if np.isfinite(parseval_error) and parseval_error > 1e-7:
-            raise AssertionError(
-                f"Parseval relative error is unexpectedly large: {parseval_error}."
-            )
-
-        print(
-            f"QFIM spectral smoke (L={int(layer)}, run=0, time=0): "
-            f"M={n_params}, threshold_rank={threshold_rank}, "
-            f"participation_rank={participation_rank:.6g}, "
-            f"gradient_weight_sum={float(diagnostics['gradient_weight_sum']):.12g}, "
-            f"Parseval relative error={parseval_error:.3e}"
+        return (
+            (rank_histories[0], eig_histories[0]),
+            (rank_histories[1], eig_histories[1]),
         )
 
 
     (
         (
-            qfim_spectral_gradient_diagnostics_cache,
-            qfim_spectral_gradient_summary_by_layer,
+            qfim_rank_history_by_layer,
             qfim_eigs_history_optimization_path_by_layer,
-            qfim_gradient_large_sector_weight_by_layer,
         ),
         (
-            qfim_spectral_gradient_diagnostics_cache_keep01234,
-            qfim_spectral_gradient_summary_keep01234_by_layer,
+            qfim_rank_history_keep01234_by_layer,
             qfim_eigs_history_optimization_path_keep01234_by_layer,
-            qfim_gradient_large_sector_weight_keep01234_by_layer,
         ),
-    ) = compute_joint_qfim_spectral_gradient_history_by_layer(
+    ) = compute_joint_qfim_rank_history_by_layer(
         theta_sample_traces_by_layer,
-        grad_sample_traces_by_layer,
         vqe_layer_list,
         jvp_chunk=RED_JVP_CHUNK,
-        sector_thresholds=THRESHOLDS,
     )
-
-    if qfim_spectral_gradient_diagnostics_cache:
-        _smoke_cache_key = (
-            (1, 0, 0)
-            if (1, 0, 0) in qfim_spectral_gradient_diagnostics_cache
-            else next(iter(qfim_spectral_gradient_diagnostics_cache))
-        )
-        validate_qfim_spectral_diagnostics_smoke(
-            qfim_spectral_gradient_diagnostics_cache[_smoke_cache_key],
-            layer=_smoke_cache_key[0],
-        )
-
-    if qfim_spectral_gradient_diagnostics_cache_keep01234:
-        _smoke_cache_key_keep01234 = (
-            (1, 0, 0)
-            if (1, 0, 0)
-            in qfim_spectral_gradient_diagnostics_cache_keep01234
-            else next(iter(qfim_spectral_gradient_diagnostics_cache_keep01234))
-        )
-        validate_qfim_spectral_diagnostics_smoke(
-            qfim_spectral_gradient_diagnostics_cache_keep01234[
-                _smoke_cache_key_keep01234
-            ],
-            layer=_smoke_cache_key_keep01234[0],
-        )
-
-    np.savez(
-        os.path.join(qfim_fig_dir, f"qfim_large_sector_gradient_weight_{keep_key}.npz"),
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
-        layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-        **{
-            f"L{int(L)}_thr_{_thr_tag(thr)}": arr
-            for L, data_L in qfim_gradient_large_sector_weight_by_layer.items()
-            for thr, arr in data_L.items()
-        },
-    )
-
-    np.savez(
-        os.path.join(
-            qfim_fig_dir,
-            f"qfim_large_sector_gradient_weight_{keep_key_5}.npz",
-        ),
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
-        layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-        keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
-        state_label=np.asarray(keep_label_5),
-        **{
-            f"L{int(L)}_thr_{_thr_tag(thr)}": arr
-            for L, data_L
-            in qfim_gradient_large_sector_weight_keep01234_by_layer.items()
-            for thr, arr in data_L.items()
-        },
-    )
-
-
-    qfim_large_sector_gradient_weight_result_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_large_sector_gradient_weight_{keep_key}.npz",
-    )
-
-    save_npz_result(
-        qfim_large_sector_gradient_weight_result_path,
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
-        layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-        **{
-            f"L{int(L)}_thr_{_thr_tag(thr)}": arr
-            for L, data_L in qfim_gradient_large_sector_weight_by_layer.items()
-            for thr, arr in data_L.items()
-        },
-    )
-
-    qfim_large_sector_gradient_weight_keep01234_result_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_large_sector_gradient_weight_{keep_key_5}.npz",
-    )
-
-    save_npz_result(
-        qfim_large_sector_gradient_weight_keep01234_result_path,
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
-        layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-        keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
-        state_label=np.asarray(keep_label_5),
-        **{
-            f"L{int(L)}_thr_{_thr_tag(thr)}": arr
-            for L, data_L
-            in qfim_gradient_large_sector_weight_keep01234_by_layer.items()
-            for thr, arr in data_L.items()
-        },
-    )
-
-
-    # ============================================================
-    # Optimization-path QFIM rank/eigenvalues: compute and save numerical results
-    # ============================================================
-    # QFIM rank along the VQE optimization path
-    #   x-axis: sampled optimization iteration
-    #   y-axis: run-mean QFIM effective rank at theta(iteration)
-    #   color: layer number
-    # ============================================================
-    def make_qfim_rank_and_eigs_fn_for_layer(
-        n_layer: int,
-        *,
-        jvp_chunk: int = RED_JVP_CHUNK,
-    ):
-        qfim_fn = make_reduced0123_qfim_matrix_fn_for_layer_sequential(
-            n_layer=n_layer,
-            jvp_chunk=jvp_chunk,
-        )
-
-        @jax.jit
-        def qfim_rank_and_eigs(theta: jnp.ndarray):
-            F = qfim_fn(theta)
-            return psd_rank_and_desc_eigs(F)
-
-        return qfim_rank_and_eigs
-
-
-    def compute_qfim_rank_history_by_layer(
-        theta_samples_by_layer: dict,
-        layers,
-        *,
-        jvp_chunk: int = RED_JVP_CHUNK,
-        return_eigs: bool = False,
-    ):
-        rank_history_by_layer = {}
-        eigs_history_by_layer = {}
-
-        for L in tqdm(
-            layers,
-            desc="QFIM rank history along optimization path",
-            unit="layer",
-        ):
-            if theta_samples_by_layer.get(L) is None:
-                continue
-
-            theta_samples = np.asarray(
-                theta_samples_by_layer[L],
-                dtype=NP_REAL_DTYPE,
-            )
-
-            if theta_samples.ndim != 3:
-                raise ValueError(
-                    "theta_samples must have shape "
-                    "(num_runs, num_sample_iters, num_params)."
-                )
-
-            n_runs, n_times, n_params = theta_samples.shape
-            rank_eigs_fn = make_qfim_rank_and_eigs_fn_for_layer(
-                n_layer=int(L),
-                jvp_chunk=jvp_chunk,
-            )
-
-            ranks_L = np.full((n_runs, n_times), np.nan, dtype=NP_REAL_DTYPE)
-            eigs_L = None
-            if return_eigs:
-                eigs_L = np.full(
-                    (n_runs, n_times, n_params),
-                    np.nan,
-                    dtype=NP_REAL_DTYPE,
-                )
-
-            for run_idx in tqdm(
-                range(n_runs),
-                desc=f"QFIM-rank runs (L={L})",
-                unit="run",
-                leave=False,
-            ):
-                for time_idx in range(n_times):
-                    rank_value, eigs_desc = rank_eigs_fn(
-                        jnp.asarray(theta_samples[run_idx, time_idx], dtype=REAL_DTYPE)
-                    )
-                    ranks_L[run_idx, time_idx] = NP_REAL_DTYPE(
-                        jax.device_get(rank_value)
-                    )
-                    if return_eigs:
-                        eigs_L[run_idx, time_idx, :] = jax_to_np(
-                            eigs_desc,
-                            dtype=NP_REAL_DTYPE,
-                        )
-
-            rank_history_by_layer[int(L)] = ranks_L
-            if return_eigs:
-                eigs_history_by_layer[int(L)] = eigs_L
-
-        if return_eigs:
-            return rank_history_by_layer, eigs_history_by_layer
-
-        return rank_history_by_layer
-
-
-    # Reuse the consolidated per-point diagnostics above.  The compatibility
-    # ``compute_qfim_rank_history_by_layer`` function remains available for
-    # callers, but the main program deliberately does not perform a second pass.
-    qfim_rank_history_by_layer = {
-        int(L): np.asarray(
-            metrics["qfim_threshold_rank"],
-            dtype=NP_REAL_DTYPE,
-        )
-        for L, metrics in qfim_spectral_gradient_summary_by_layer.items()
-    }
-    qfim_rank_history_keep01234_by_layer = {
-        int(L): np.asarray(
-            metrics["qfim_threshold_rank"],
-            dtype=NP_REAL_DTYPE,
-        )
-        for L, metrics in qfim_spectral_gradient_summary_keep01234_by_layer.items()
-    }
 
     np.savez(
         os.path.join(qfim_fig_dir, f"qfim_rank_history_optimization_path_{keep_key}.npz"),
@@ -3070,294 +1619,95 @@ def run_qfim(*, include_optimization_path: bool = True):
 
 
     # ============================================================
-    # Trace-based / gradient-participation summary (new schema)
+    # Optimization-path QFIM effective-rank summary
     # ============================================================
-    _QFIM_SPECTRAL_SUMMARY_FIELDS = (
-        ("threshold_rank", "qfim_threshold_rank", NP_INT_DTYPE),
-        ("qfim_threshold_rank", "qfim_threshold_rank", NP_INT_DTYPE),
-        ("participation_rank", "qfim_participation_rank", NP_REAL_DTYPE),
-        ("qfim_participation_rank", "qfim_participation_rank", NP_REAL_DTYPE),
-        ("trace", "qfim_trace", NP_REAL_DTYPE),
-        ("qfim_trace", "qfim_trace", NP_REAL_DTYPE),
-        ("frobenius_norm_sq", "qfim_frobenius_norm_sq", NP_REAL_DTYPE),
-        ("qfim_frobenius_norm_sq", "qfim_frobenius_norm_sq", NP_REAL_DTYPE),
-        ("gradient_norm_sq", "gradient_norm_sq", NP_REAL_DTYPE),
-        (
-            "hamiltonian_qfim_sensitivity",
-            "hamiltonian_qfim_sensitivity",
-            NP_REAL_DTYPE,
-        ),
-        ("chi_hamiltonian", "hamiltonian_qfim_sensitivity", NP_REAL_DTYPE),
-        (
-            "gradient_image_projection_norm_sq",
-            "gradient_image_projection_norm_sq",
-            NP_REAL_DTYPE,
-        ),
-        (
-            "gradient_image_residual_norm_sq",
-            "gradient_image_residual_norm_sq",
-            NP_REAL_DTYPE,
-        ),
-        (
-            "gradient_image_residual_norm",
-            "gradient_image_residual_norm",
-            NP_REAL_DTYPE,
-        ),
-        (
-            "gradient_image_residual_fraction",
-            "gradient_image_residual_fraction",
-            NP_REAL_DTYPE,
-        ),
-        (
-            "gradient_participation_rank",
-            "gradient_participation_rank",
-            NP_REAL_DTYPE,
-        ),
-        (
-            "gradient_weighted_qfim_eigenvalue",
-            "gradient_weighted_qfim_eigenvalue",
-            NP_REAL_DTYPE,
-        ),
-        ("gradient_weight_sum", "gradient_weight_sum", NP_REAL_DTYPE),
-        ("largest_eigenvalue", "largest_qfim_eigenvalue", NP_REAL_DTYPE),
-        ("largest_qfim_eigenvalue", "largest_qfim_eigenvalue", NP_REAL_DTYPE),
-        (
-            "smallest_active_eigenvalue",
-            "smallest_active_qfim_eigenvalue",
-            NP_REAL_DTYPE,
-        ),
-        (
-            "smallest_active_qfim_eigenvalue",
-            "smallest_active_qfim_eigenvalue",
-            NP_REAL_DTYPE,
-        ),
-        ("active_condition_number", "condition_number_active", NP_REAL_DTYPE),
-        ("condition_number_active", "condition_number_active", NP_REAL_DTYPE),
-        ("parseval_relative_error", "parseval_relative_error", NP_REAL_DTYPE),
-    )
-
-
-    def _qfim_spectral_summary_arrays_for_npz(summary_by_layer: dict) -> dict:
+    def _qfim_effective_rank_arrays_for_npz(
+        rank_history_by_layer: dict,
+        eigs_history_by_layer: dict,
+    ) -> dict:
         arrays = {}
 
-        for L, metrics in summary_by_layer.items():
+        for L, eigs in eigs_history_by_layer.items():
             L_tag = f"L{int(L)}"
+            eigs = np.clip(
+                np.asarray(eigs, dtype=NP_REAL_DTYPE),
+                0.0,
+                None,
+            )
+            threshold_rank = np.asarray(
+                rank_history_by_layer[L],
+                dtype=NP_INT_DTYPE,
+            )
+            trace = np.sum(eigs, axis=2)
+            frobenius_norm_sq = np.sum(eigs * eigs, axis=2)
+            participation_rank = np.zeros_like(trace)
+            np.divide(
+                trace * trace,
+                frobenius_norm_sq,
+                out=participation_rank,
+                where=(
+                    frobenius_norm_sq
+                    > float(PARTICIPATION_EFFECTIVE_RANK_EPS)
+                ),
+            )
+            active = eigs > float(QFIM_EFFECTIVE_RANK_THRESHOLD)
+            largest_eigenvalue = np.max(eigs, axis=2)
+            smallest_active_eigenvalue = np.min(
+                np.where(active, eigs, np.inf),
+                axis=2,
+            )
+            smallest_active_eigenvalue = np.where(
+                threshold_rank > 0,
+                smallest_active_eigenvalue,
+                np.nan,
+            )
+            active_condition_number = np.full_like(trace, np.nan)
+            np.divide(
+                largest_eigenvalue,
+                smallest_active_eigenvalue,
+                out=active_condition_number,
+                where=(threshold_rank > 0),
+            )
 
-            for output_name, metric_name, dtype in _QFIM_SPECTRAL_SUMMARY_FIELDS:
-                arrays[f"{L_tag}_{output_name}"] = np.asarray(
-                    metrics[metric_name],
-                    dtype=dtype,
-                )
-
-            for metric_name, values in metrics.items():
-                if metric_name.startswith("grad_weight_above_"):
-                    arrays[f"{L_tag}_{metric_name}"] = np.asarray(
-                        values,
-                        dtype=NP_REAL_DTYPE,
-                    )
+            arrays.update(
+                {
+                    f"{L_tag}_threshold_rank": threshold_rank,
+                    f"{L_tag}_qfim_threshold_rank": threshold_rank,
+                    f"{L_tag}_participation_rank": participation_rank,
+                    f"{L_tag}_qfim_participation_rank": participation_rank,
+                    f"{L_tag}_trace": trace,
+                    f"{L_tag}_qfim_trace": trace,
+                    f"{L_tag}_frobenius_norm_sq": frobenius_norm_sq,
+                    f"{L_tag}_qfim_frobenius_norm_sq": frobenius_norm_sq,
+                    f"{L_tag}_largest_eigenvalue": largest_eigenvalue,
+                    f"{L_tag}_largest_qfim_eigenvalue": largest_eigenvalue,
+                    f"{L_tag}_smallest_active_eigenvalue": (
+                        smallest_active_eigenvalue
+                    ),
+                    f"{L_tag}_smallest_active_qfim_eigenvalue": (
+                        smallest_active_eigenvalue
+                    ),
+                    f"{L_tag}_active_condition_number": (
+                        active_condition_number
+                    ),
+                    f"{L_tag}_condition_number_active": (
+                        active_condition_number
+                    ),
+                }
+            )
 
         return arrays
 
 
-    qfim_spectral_summary_npz_arrays = _qfim_spectral_summary_arrays_for_npz(
-        qfim_spectral_gradient_summary_by_layer
+    qfim_spectral_summary_npz_arrays = _qfim_effective_rank_arrays_for_npz(
+        qfim_rank_history_by_layer,
+        qfim_eigs_history_optimization_path_by_layer,
     )
     qfim_spectral_summary_keep01234_npz_arrays = (
-        _qfim_spectral_summary_arrays_for_npz(
-            qfim_spectral_gradient_summary_keep01234_by_layer
+        _qfim_effective_rank_arrays_for_npz(
+            qfim_rank_history_keep01234_by_layer,
+            qfim_eigs_history_optimization_path_keep01234_by_layer,
         )
-    )
-
-
-    # ============================================================
-    # Hamiltonian-direction QFIM-normalized sensitivity
-    # ============================================================
-    # This is evaluated along the already-computed VQE optimization path because
-    # those points provide the Hamiltonian gradient g without any extra gradient
-    # or QFIM evaluations.  The final sampled iteration is the default layer-axis
-    # summary used by the visualization script, while the full run/time arrays are
-    # retained for reproducibility and alternative plots.
-    hamiltonian_sensitivity_layers = np.asarray(
-        sorted(qfim_spectral_gradient_summary_by_layer),
-        dtype=NP_INT_DTYPE,
-    )
-    hamiltonian_sensitivity_npz_arrays = {}
-    final_chi_hamiltonian_mean = []
-    final_chi_hamiltonian_sem = []
-    final_chi_hamiltonian_count = []
-
-    for L in hamiltonian_sensitivity_layers:
-        L = int(L)
-        metrics = qfim_spectral_gradient_summary_by_layer[L]
-        chi_hamiltonian = np.asarray(
-            metrics["hamiltonian_qfim_sensitivity"],
-            dtype=NP_REAL_DTYPE,
-        )
-        residual_norm_sq = np.asarray(
-            metrics["gradient_image_residual_norm_sq"],
-            dtype=NP_REAL_DTYPE,
-        )
-        active_rank = np.asarray(
-            metrics["qfim_threshold_rank"],
-            dtype=NP_INT_DTYPE,
-        )
-        chi_mean, chi_sem, chi_count = _finite_mean_sem(
-            chi_hamiltonian,
-            axis=0,
-        )
-        residual_mean, residual_sem, residual_count = _finite_mean_sem(
-            residual_norm_sq,
-            axis=0,
-        )
-        active_rank_mean, active_rank_sem, active_rank_count = _finite_mean_sem(
-            active_rank,
-            axis=0,
-        )
-
-        L_tag = f"L{L}"
-        hamiltonian_sensitivity_npz_arrays.update(
-            {
-                f"{L_tag}_chi_hamiltonian": chi_hamiltonian,
-                f"{L_tag}_chi_hamiltonian_mean": chi_mean,
-                f"{L_tag}_chi_hamiltonian_sem": chi_sem,
-                f"{L_tag}_chi_hamiltonian_count": chi_count,
-                f"{L_tag}_gradient_image_residual_norm_sq": residual_norm_sq,
-                f"{L_tag}_gradient_image_residual_norm_sq_mean": residual_mean,
-                f"{L_tag}_gradient_image_residual_norm_sq_sem": residual_sem,
-                f"{L_tag}_gradient_image_residual_norm_sq_count": residual_count,
-                f"{L_tag}_active_rank": active_rank,
-                f"{L_tag}_active_rank_mean": active_rank_mean,
-                f"{L_tag}_active_rank_sem": active_rank_sem,
-                f"{L_tag}_active_rank_count": active_rank_count,
-            }
-        )
-        final_chi_hamiltonian_mean.append(chi_mean[-1])
-        final_chi_hamiltonian_sem.append(chi_sem[-1])
-        final_chi_hamiltonian_count.append(chi_count[-1])
-
-    hamiltonian_qfim_sensitivity_result_path = os.path.join(
-        qfim_results_dir,
-        (
-            "hamiltonian_qfim_normalized_sensitivity_optimization_path_"
-            f"{keep_key}.npz"
-        ),
-    )
-    save_npz_result(
-        hamiltonian_qfim_sensitivity_result_path,
-        h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-        layers=hamiltonian_sensitivity_layers,
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        num_runs=np.asarray(num_runs, dtype=NP_INT_DTYPE),
-        keep_wires=np.asarray((0, 1, 2, 3), dtype=NP_INT_DTYPE),
-        state_label=np.asarray(keep_label),
-        qfim_eigenvalue_threshold=np.asarray(
-            QFIM_EFFECTIVE_RANK_THRESHOLD,
-            dtype=NP_REAL_DTYPE,
-        ),
-        definition=np.asarray(
-            "chi_H^(tau) = sum_{lambda_i > tau} "
-            "|v_i^dagger g|^2 / lambda_i"
-        ),
-        gradient_image_residual_definition=np.asarray(
-            "sum_{lambda_i <= tau} |v_i^dagger g|^2"
-        ),
-        final_sample_iter=np.asarray(sample_iters[-1], dtype=NP_INT_DTYPE),
-        final_chi_hamiltonian_mean=np.asarray(
-            final_chi_hamiltonian_mean,
-            dtype=NP_REAL_DTYPE,
-        ),
-        final_chi_hamiltonian_sem=np.asarray(
-            final_chi_hamiltonian_sem,
-            dtype=NP_REAL_DTYPE,
-        ),
-        final_chi_hamiltonian_count=np.asarray(
-            final_chi_hamiltonian_count,
-            dtype=NP_INT_DTYPE,
-        ),
-        **hamiltonian_sensitivity_npz_arrays,
-    )
-
-
-    hamiltonian_sensitivity_layers_keep01234 = np.asarray(
-        sorted(qfim_spectral_gradient_summary_keep01234_by_layer),
-        dtype=NP_INT_DTYPE,
-    )
-    (
-        hamiltonian_sensitivity_keep01234_npz_arrays,
-        chi_hamiltonian_mean_keep01234_by_layer,
-        chi_hamiltonian_sem_keep01234_by_layer,
-        chi_hamiltonian_count_keep01234_by_layer,
-    ) = _build_hamiltonian_sensitivity_layer_statistics(
-        hamiltonian_sensitivity_layers_keep01234,
-        {
-            int(L): metrics["hamiltonian_qfim_sensitivity"]
-            for L, metrics
-            in qfim_spectral_gradient_summary_keep01234_by_layer.items()
-        },
-        {
-            int(L): metrics["gradient_image_residual_norm_sq"]
-            for L, metrics
-            in qfim_spectral_gradient_summary_keep01234_by_layer.items()
-        },
-        {
-            int(L): metrics["qfim_threshold_rank"]
-            for L, metrics
-            in qfim_spectral_gradient_summary_keep01234_by_layer.items()
-        },
-    )
-    final_chi_hamiltonian_mean_keep01234 = [
-        np.asarray(values, dtype=NP_REAL_DTYPE)[-1]
-        for values in chi_hamiltonian_mean_keep01234_by_layer
-    ]
-    final_chi_hamiltonian_sem_keep01234 = [
-        np.asarray(values, dtype=NP_REAL_DTYPE)[-1]
-        for values in chi_hamiltonian_sem_keep01234_by_layer
-    ]
-    final_chi_hamiltonian_count_keep01234 = [
-        np.asarray(values, dtype=NP_INT_DTYPE)[-1]
-        for values in chi_hamiltonian_count_keep01234_by_layer
-    ]
-
-    hamiltonian_qfim_sensitivity_keep01234_result_path = os.path.join(
-        qfim_results_dir,
-        (
-            "hamiltonian_qfim_normalized_sensitivity_optimization_path_"
-            f"{keep_key_5}.npz"
-        ),
-    )
-    save_npz_result(
-        hamiltonian_qfim_sensitivity_keep01234_result_path,
-        h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-        layers=hamiltonian_sensitivity_layers_keep01234,
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        num_runs=np.asarray(num_runs, dtype=NP_INT_DTYPE),
-        keep_wires=np.asarray((0, 1, 2, 3, 4), dtype=NP_INT_DTYPE),
-        state_label=np.asarray(keep_label_5),
-        qfim_eigenvalue_threshold=np.asarray(
-            QFIM_EFFECTIVE_RANK_THRESHOLD,
-            dtype=NP_REAL_DTYPE,
-        ),
-        definition=np.asarray(
-            "chi_H^(tau) = sum_{lambda_i > tau} "
-            "|v_i^dagger g|^2 / lambda_i"
-        ),
-        gradient_image_residual_definition=np.asarray(
-            "sum_{lambda_i <= tau} |v_i^dagger g|^2"
-        ),
-        final_sample_iter=np.asarray(sample_iters[-1], dtype=NP_INT_DTYPE),
-        final_chi_hamiltonian_mean=np.asarray(
-            final_chi_hamiltonian_mean_keep01234,
-            dtype=NP_REAL_DTYPE,
-        ),
-        final_chi_hamiltonian_sem=np.asarray(
-            final_chi_hamiltonian_sem_keep01234,
-            dtype=NP_REAL_DTYPE,
-        ),
-        final_chi_hamiltonian_count=np.asarray(
-            final_chi_hamiltonian_count_keep01234,
-            dtype=NP_INT_DTYPE,
-        ),
-        **hamiltonian_sensitivity_keep01234_npz_arrays,
     )
 
 
@@ -3383,16 +1733,7 @@ def run_qfim(*, include_optimization_path: bool = True):
                 PARTICIPATION_EFFECTIVE_RANK_EPS,
                 dtype=NP_REAL_DTYPE,
             ),
-            **{
-                key: value
-                for key, value in qfim_spectral_summary_npz_arrays.items()
-                if (
-                    key.endswith("_threshold_rank")
-                    or key.endswith("_participation_rank")
-                    or key.endswith("_trace")
-                    or key.endswith("_frobenius_norm_sq")
-                )
-            },
+            **qfim_spectral_summary_npz_arrays,
         )
         save_npz_result(
             qfim_effective_rank_optimization_path_keep01234_result_path,
@@ -3409,949 +1750,9 @@ def run_qfim(*, include_optimization_path: bool = True):
                 PARTICIPATION_EFFECTIVE_RANK_EPS,
                 dtype=NP_REAL_DTYPE,
             ),
-            **{
-                key: value
-                for key, value
-                in qfim_spectral_summary_keep01234_npz_arrays.items()
-                if (
-                    key.endswith("_threshold_rank")
-                    or key.endswith("_participation_rank")
-                    or key.endswith("_trace")
-                    or key.endswith("_frobenius_norm_sq")
-                )
-            },
-        )
-
-
-    qfim_spectral_gradient_summary_result_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_spectral_gradient_summary_optimization_path_{keep_key}.npz",
-    )
-    qfim_spectral_gradient_summary_keep01234_result_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_spectral_gradient_summary_optimization_path_{keep_key_5}.npz",
-    )
-    if RUN_QFIM_SPECTRAL_GRADIENT_SUMMARY:
-        save_npz_result(
-            qfim_spectral_gradient_summary_result_path,
-            h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-            layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-            sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-            qfim_effective_rank_threshold=np.asarray(
-                QFIM_EFFECTIVE_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            participation_effective_rank_eps=np.asarray(
-                PARTICIPATION_EFFECTIVE_RANK_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            qfim_grad_alignment_norm_eps=np.asarray(
-                QFIM_GRAD_ALIGNMENT_NORM_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            gradient_norm_eps=np.asarray(
-                QFIM_GRAD_ALIGNMENT_NORM_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            grad_sector_thresholds=np.asarray(
-                THRESHOLDS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            gradient_sector_thresholds=np.asarray(
-                THRESHOLDS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            threshold_rank_definition=np.asarray(
-                "number of QFIM eigenvalues strictly above "
-                "qfim_effective_rank_threshold"
-            ),
-            participation_rank_definition=np.asarray(
-                "(sum(lambda))^2 / sum(lambda^2), with zero-matrix value 0"
-            ),
-            gradient_weight_definition=np.asarray(
-                "|v_i^dagger g|^2 / ||g||_2^2; NaN when gradient norm is small"
-            ),
-            **qfim_spectral_summary_npz_arrays,
-        )
-        save_npz_result(
-            qfim_spectral_gradient_summary_keep01234_result_path,
-            h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-            layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-            sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-            keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
-            state_label=np.asarray(keep_label_5),
-            qfim_effective_rank_threshold=np.asarray(
-                QFIM_EFFECTIVE_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            participation_effective_rank_eps=np.asarray(
-                PARTICIPATION_EFFECTIVE_RANK_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            qfim_grad_alignment_norm_eps=np.asarray(
-                QFIM_GRAD_ALIGNMENT_NORM_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            gradient_norm_eps=np.asarray(
-                QFIM_GRAD_ALIGNMENT_NORM_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            grad_sector_thresholds=np.asarray(THRESHOLDS, dtype=NP_REAL_DTYPE),
-            gradient_sector_thresholds=np.asarray(
-                THRESHOLDS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            threshold_rank_definition=np.asarray(
-                "number of QFIM eigenvalues strictly above "
-                "qfim_effective_rank_threshold"
-            ),
-            participation_rank_definition=np.asarray(
-                "(sum(lambda))^2 / sum(lambda^2), with zero-matrix value 0"
-            ),
-            gradient_weight_definition=np.asarray(
-                "|v_i^dagger g|^2 / ||g||_2^2; NaN when gradient norm is small"
-            ),
             **qfim_spectral_summary_keep01234_npz_arrays,
         )
 
-    # ============================================================
-    # QFIM-gradient alignment: compute and save numerical results
-    # ============================================================
-    # QFIM eigenvalue vs gradient-direction weight scatter plots
-    #   x-axis: QFIM eigenvalue lambda_i
-    #   y-axis: w_i^grad = |v_i^T g|^2 / sum_j |v_j^T g|^2
-    #
-    # This section uses optimization-path samples already stored in
-    #   theta_sample_traces_by_layer[L]
-    #   grad_sample_traces_by_layer[L]
-    # and constructs one scatter plot per available VQE layer.
-    #
-    # Mathematical meaning of the diagnostic
-    # --------------------------------------
-    # Fix one optimization point theta and let
-    #
-    #     L(theta) : loss / energy objective,
-    #     g(theta) = grad_theta L(theta),
-    #     F(theta) : QFIM at theta.
-    #
-    # Since the QFIM is Hermitian positive semidefinite, we diagonalize it as
-    #
-    #     F(theta) v_i = lambda_i v_i,
-    #     v_i^dagger v_j = delta_ij,
-    #     lambda_i >= 0.
-    #
-    # The eigenvectors v_i give orthonormal directions in parameter space, while
-    # lambda_i measures how strongly an infinitesimal parameter displacement in
-    # that direction changes the quantum state. Large lambda_i are geometrically
-    # sensitive directions; very small lambda_i are nearly redundant / flat
-    # directions of the variational state manifold.
-    #
-    # The ordinary loss gradient is expanded in this QFIM eigenbasis:
-    #
-    #     g(theta) = sum_i c_i v_i,
-    #     c_i = v_i^dagger g(theta).
-    #
-    # We then plot the normalized squared component
-    #
-    #     w_i^grad = |c_i|^2 / sum_j |c_j|^2.
-    #
-    # Thus w_i^grad is the fraction of the Euclidean gradient norm carried by
-    # the i-th QFIM eigen-direction. The weights satisfy sum_i w_i^grad = 1
-    # whenever the gradient norm is nonzero.
-    #
-    # Each scatter point is one eigen-direction at one sampled optimization
-    # state: x = lambda_i, y = w_i^grad. If many high-weight points lie at large
-    # lambda_i, the loss gradient mainly points along directions that strongly
-    # change the quantum state. If high-weight points lie at tiny lambda_i, the
-    # gradient is dominated by directions that barely move the represented state,
-    # which can indicate overparameterization or geometric redundancy.
-    #
-    # This is a diagnostic projection of the ordinary gradient onto the QFIM
-    # eigenbasis. It is not the natural-gradient update F^{-1} g; no inverse QFIM
-    # is applied here. The small positive floors below are only for numerical
-    # safety in log-scale visualization.
-    # ============================================================
-
-    QFIM_GRAD_ALIGN_EIG_FLOOR = 1e-16
-    QFIM_GRAD_ALIGN_WEIGHT_FLOOR = 1e-16
-    QFIM_GRAD_ALIGN_NORM_EPS = QFIM_GRAD_ALIGNMENT_NORM_EPS
-
-    qfim_grad_align_dir = os.path.join(qfim_fig_dir, "qfim_grad_alignment")
-    qfim_grad_align_results_dir = os.path.join(qfim_results_dir, "qfim_grad_alignment")
-    os.makedirs(qfim_grad_align_dir, exist_ok=True)
-    os.makedirs(qfim_grad_align_results_dir, exist_ok=True)
-
-
-    def qfim_grad_alignment_dirs_for_key(result_key: str):
-        if result_key == keep_key:
-            return qfim_grad_align_dir, qfim_grad_align_results_dir
-
-        figure_dir = os.path.join(qfim_grad_align_dir, result_key)
-        result_dir = os.path.join(qfim_grad_align_results_dir, result_key)
-        os.makedirs(figure_dir, exist_ok=True)
-        os.makedirs(result_dir, exist_ok=True)
-        return figure_dir, result_dir
-
-
-    def _normalize_index_list(indices, n):
-        if indices is None:
-            return list(range(n))
-
-        normalized = []
-
-        for idx in indices:
-            idx = int(idx)
-
-            if idx < 0:
-                idx = n + idx
-
-            normalized.append(idx)
-
-        if any((idx < 0 or idx >= n) for idx in normalized):
-            raise IndexError("Index out of range.")
-
-        return normalized
-
-
-    def qfim_grad_alignment_at_point(
-        theta,
-        grad,
-        qfim_fn,
-        *,
-        sort_desc=True,
-        norm_eps=QFIM_GRAD_ALIGN_NORM_EPS,
-    ):
-        """Compute alignment data from one QFIM evaluation.
-
-        Individual gradient weights can be basis-dependent inside a degenerate
-        QFIM eigenspace. Aggregated weight over the full degenerate subspace is
-        basis-independent.
-        """
-        diagnostics = qfim_spectral_gradient_diagnostics_at_point(
-            theta,
-            grad,
-            qfim_fn,
-            grad_norm_eps=norm_eps,
-        )
-
-        if not sort_desc:
-            reverse = slice(None, None, -1)
-            for key in (
-                "evals",
-                "weights",
-                "coeffs",
-                "coeff_abs2",
-                "lambda_fraction",
-                "active_by_rank_threshold",
-            ):
-                diagnostics[key] = diagnostics[key][reverse]
-            diagnostics["cumulative_lambda_fraction"] = np.cumsum(
-                diagnostics["lambda_fraction"]
-            )
-            diagnostics["cumulative_gradient_weight"] = np.cumsum(
-                diagnostics["weights"]
-            )
-            diagnostics["eig_index"] = np.arange(
-                1,
-                diagnostics["evals"].size + 1,
-                dtype=NP_INT_DTYPE,
-            )
-
-        # Legacy name retained; unlike the old implementation, normalization uses
-        # the directly computed ||g||^2 as required by the definition.
-        diagnostics["grad_weight_denominator"] = diagnostics["gradient_norm_sq"]
-        return diagnostics
-
-
-    def qfim_grad_alignment_one_to_table(
-        alignment,
-        *,
-        layer=None,
-        run=None,
-        time_index=None,
-        iteration=None,
-    ):
-        """
-        Convert one-point alignment result into a table-like dictionary.
-        """
-        n = alignment["evals"].size
-
-        layer_value = -1 if layer is None else int(layer)
-        run_value = -1 if run is None else int(run)
-        time_value = -1 if time_index is None else int(time_index)
-        iter_value = -1 if iteration is None else int(iteration)
-
-        table = {
-            "lambda": np.asarray(
-                alignment["evals"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            "w_grad": np.asarray(
-                alignment["weights"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            "coeff_abs2": np.asarray(
-                alignment["coeff_abs2"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            "coeff": np.asarray(
-                alignment["coeffs"],
-                dtype=NP_COMPLEX_DTYPE,
-            ),
-            "lambda_fraction": np.asarray(
-                alignment["lambda_fraction"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            "cumulative_lambda_fraction": np.asarray(
-                alignment["cumulative_lambda_fraction"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            "cumulative_gradient_weight": np.asarray(
-                alignment["cumulative_gradient_weight"],
-                dtype=NP_REAL_DTYPE,
-            ),
-            "active_by_rank_threshold": np.asarray(
-                alignment["active_by_rank_threshold"],
-                dtype=np.bool_,
-            ),
-            "eig_index": np.asarray(
-                alignment["eig_index"],
-                dtype=NP_INT_DTYPE,
-            ),
-            "layer": np.full(n, layer_value, dtype=NP_INT_DTYPE),
-            "run": np.full(n, run_value, dtype=NP_INT_DTYPE),
-            "time_index": np.full(n, time_value, dtype=NP_INT_DTYPE),
-            "iteration": np.full(n, iter_value, dtype=NP_INT_DTYPE),
-        }
-        for threshold in THRESHOLDS:
-            metric_name = f"grad_weight_above_{_spectral_threshold_tag(threshold)}"
-            table[metric_name] = np.full(
-                n,
-                alignment.get(metric_name, np.nan),
-                dtype=NP_REAL_DTYPE,
-            )
-
-        return table
-
-
-    def compute_qfim_grad_alignment_table_for_layer(
-        L,
-        theta_samples_by_layer,
-        grad_samples_by_layer,
-        *,
-        run_indices=None,
-        time_indices=None,
-        sample_iters=None,
-        jvp_chunk=RED_JVP_CHUNK,
-        sort_desc=True,
-        diagnostics_cache=None,
-        qfim_matrix_fn_factory=(
-            make_reduced0123_qfim_matrix_fn_for_layer_sequential
-        ),
-    ):
-        """
-        Compute QFIM-gradient alignment scatter data for one layer L.
-
-        Expected shapes:
-            theta_samples_by_layer[L]: (num_runs, num_sample_times, num_params)
-            grad_samples_by_layer[L]:  (num_runs, num_sample_times, num_params)
-
-        A 2D shape (num_samples, num_params) is also accepted and treated as
-        one sampled time point.
-        """
-        theta_samples = np.asarray(
-            theta_samples_by_layer[L],
-            dtype=NP_REAL_DTYPE,
-        )
-
-        grad_samples = np.asarray(
-            grad_samples_by_layer[L],
-            dtype=NP_REAL_DTYPE,
-        )
-
-        if theta_samples.shape != grad_samples.shape:
-            raise ValueError(
-                f"theta and grad must have the same shape for L={L}. "
-                f"Got {theta_samples.shape} and {grad_samples.shape}."
-            )
-
-        if theta_samples.ndim == 2:
-            theta_samples = theta_samples[:, None, :]
-            grad_samples = grad_samples[:, None, :]
-        elif theta_samples.ndim != 3:
-            raise ValueError(
-                "theta and grad arrays must have shape "
-                "(num_runs, num_sample_times, num_params) or "
-                "(num_samples, num_params)."
-            )
-
-        n_runs, n_times, _ = theta_samples.shape
-
-        run_ids = _normalize_index_list(run_indices, n_runs)
-        time_ids = _normalize_index_list(time_indices, n_times)
-
-        if sample_iters is None:
-            sample_iters_arr = np.arange(n_times, dtype=NP_INT_DTYPE)
-        else:
-            sample_iters_arr = np.asarray(sample_iters, dtype=NP_INT_DTYPE)
-
-        qfim_fn = None
-        if diagnostics_cache is None:
-            qfim_fn = jax.jit(
-                qfim_matrix_fn_factory(
-                    n_layer=int(L),
-                    jvp_chunk=jvp_chunk,
-                )
-            )
-
-        rows = {
-            "lambda": [],
-            "w_grad": [],
-            "coeff_abs2": [],
-            "coeff": [],
-            "lambda_fraction": [],
-            "cumulative_lambda_fraction": [],
-            "cumulative_gradient_weight": [],
-            "active_by_rank_threshold": [],
-            "eig_index": [],
-            "layer": [],
-            "run": [],
-            "time_index": [],
-            "iteration": [],
-        }
-        for threshold in THRESHOLDS:
-            rows[
-                f"grad_weight_above_{_spectral_threshold_tag(threshold)}"
-            ] = []
-
-        for run_idx in tqdm(
-            run_ids,
-            desc=f"QFIM-gradient scatter data (L={L})",
-            unit="run",
-            leave=False,
-        ):
-            for time_idx in time_ids:
-                iteration = (
-                    int(sample_iters_arr[time_idx])
-                    if time_idx < sample_iters_arr.size
-                    else int(time_idx)
-                )
-
-                cache_key = (int(L), int(run_idx), int(time_idx))
-                if diagnostics_cache is not None:
-                    if not sort_desc:
-                        raise ValueError(
-                            "Cached alignment diagnostics are stored in descending "
-                            "eigenvalue order."
-                        )
-                    if cache_key not in diagnostics_cache:
-                        raise KeyError(
-                            f"No cached QFIM diagnostics for key {cache_key}."
-                        )
-                    alignment = diagnostics_cache[cache_key]
-                else:
-                    alignment = qfim_grad_alignment_at_point(
-                        theta_samples[run_idx, time_idx],
-                        grad_samples[run_idx, time_idx],
-                        qfim_fn,
-                        sort_desc=sort_desc,
-                    )
-
-                table_one = qfim_grad_alignment_one_to_table(
-                    alignment,
-                    layer=L,
-                    run=run_idx,
-                    time_index=time_idx,
-                    iteration=iteration,
-                )
-
-                for key in rows:
-                    rows[key].append(table_one[key])
-
-        table = {}
-
-        for key, values in rows.items():
-            if key == "coeff":
-                table[key] = np.concatenate(values).astype(NP_COMPLEX_DTYPE)
-            elif key == "active_by_rank_threshold":
-                table[key] = np.concatenate(values).astype(np.bool_)
-            elif key in (
-                "lambda",
-                "w_grad",
-                "coeff_abs2",
-                "lambda_fraction",
-                "cumulative_lambda_fraction",
-                "cumulative_gradient_weight",
-            ) or key.startswith("grad_weight_above_"):
-                table[key] = np.concatenate(values).astype(NP_REAL_DTYPE)
-            else:
-                table[key] = np.concatenate(values).astype(NP_INT_DTYPE)
-
-        return table
-
-
-    def _time_index_from_iteration(sample_iters_for_labels, target_iteration: int):
-        """
-        Return the sampled-time index corresponding to a requested optimization
-        iteration.
-        """
-        sample_iters_arr = np.asarray(sample_iters_for_labels, dtype=NP_INT_DTYPE)
-        target_iteration = int(target_iteration)
-
-        hit = np.where(sample_iters_arr == target_iteration)[0]
-
-        if hit.size == 0:
-            raise ValueError(
-                f"iteration {target_iteration} is not included in sample_iters. "
-                "Add it to sample_iters before running the VQE optimization loop."
-            )
-
-        return int(hit[0])
-
-
-    def run_qfim_grad_alignment_by_layer_iteration_folders(
-        *,
-        layers=None,
-        target_iterations=None,
-        run_indices=None,
-        sample_iters_for_labels=None,
-        jvp_chunk=RED_JVP_CHUNK,
-        log_x=True,
-        log_y=False,
-        save_npz=True,
-        make_plots=True,
-        diagnostics_cache=None,
-        result_key=keep_key,
-        state_label=keep_label,
-        qfim_matrix_fn_factory=(
-            make_reduced0123_qfim_matrix_fn_for_layer_sequential
-        ),
-    ):
-        """
-        Generate qfim_grad_weight_scatter plots layer by layer.
-
-        For each available layer L, this creates
-
-            qfim_grad_alignment/L{L}/
-
-        and saves one scatter plot for each requested optimization iteration.
-
-        The scatter plot uses
-            x = QFIM eigenvalue lambda_i,
-            y = gradient weight w_i^grad,
-        evaluated at the parameters sampled during optimization at that iteration.
-        """
-        if layers is None:
-            candidate_layers = vqe_layer_list
-        else:
-            candidate_layers = layers
-
-        if sample_iters_for_labels is None:
-            sample_iters_for_labels = sample_iters
-
-        if target_iterations is None:
-            target_iterations = tuple(int(t) for t in sample_iters_for_labels)
-        else:
-            target_iterations = tuple(int(t) for t in target_iterations)
-
-        alignment_figure_dir, alignment_result_dir = (
-            qfim_grad_alignment_dirs_for_key(result_key)
-        )
-        available_layers = []
-
-        for L in candidate_layers:
-            L = int(L)
-
-            if L in theta_sample_traces_by_layer and L in grad_sample_traces_by_layer:
-                available_layers.append(L)
-
-        if not available_layers:
-            raise ValueError(
-                "No layers are available in theta_sample_traces_by_layer and "
-                "grad_sample_traces_by_layer. Run the VQE optimization first."
-            )
-
-        table_by_layer_iteration = {}
-
-        for L in tqdm(
-            available_layers,
-            desc="QFIM eigenvalue-gradient scatter by layer/iteration",
-            unit="layer",
-        ):
-            layer_dir = os.path.join(alignment_figure_dir, f"L{L}")
-            os.makedirs(layer_dir, exist_ok=True)
-
-            table_by_layer_iteration[L] = {}
-
-            for iteration in tqdm(
-                target_iterations,
-                desc=f"Iterations (L={L})",
-                unit="iter",
-                leave=False,
-            ):
-                time_idx = _time_index_from_iteration(
-                    sample_iters_for_labels,
-                    iteration,
-                )
-
-                table_L_iter = compute_qfim_grad_alignment_table_for_layer(
-                    L,
-                    theta_sample_traces_by_layer,
-                    grad_sample_traces_by_layer,
-                    run_indices=run_indices,
-                    time_indices=[time_idx],
-                    sample_iters=sample_iters_for_labels,
-                    jvp_chunk=jvp_chunk,
-                    sort_desc=True,
-                    diagnostics_cache=diagnostics_cache,
-                    qfim_matrix_fn_factory=qfim_matrix_fn_factory,
-                )
-
-                table_by_layer_iteration[L][iteration] = table_L_iter
-
-                iter_tag = f"iter{iteration:06d}"
-                result_npz_path = os.path.join(
-                    alignment_result_dir,
-                    f"L{L}",
-                    f"qfim_grad_alignment_scatter_data_L{L}_{iter_tag}.npz",
-                )
-
-                if save_npz:
-                    np.savez(
-                        os.path.join(
-                            layer_dir,
-                            f"qfim_grad_alignment_scatter_data_L{L}_{iter_tag}.npz",
-                        ),
-                        **table_L_iter,
-                    )
-                    save_npz_result(
-                        result_npz_path,
-                        **table_L_iter,
-                    )
-
-                if make_plots:
-                    table_for_plot = (
-                        load_npz_result(result_npz_path)
-                        if save_npz
-                        else table_L_iter
-                    )
-                    plot_qfim_grad_alignment_table(
-                        table_for_plot,
-                        title=(
-                            rf"QFIM eigenvalue vs gradient weight, "
-                            rf"L={L}, iteration {iteration} ({state_label})"
-                        ),
-                        outpath=os.path.join(
-                            layer_dir,
-                            f"qfim_grad_weight_scatter_L{L}_{iter_tag}.pdf",
-                        ),
-                        log_x=log_x,
-                        log_y=log_y,
-                        color_by=None,
-                        point_size=14.0,
-                        alpha=0.45,
-                    )
-
-        return table_by_layer_iteration
-
-
-    def run_qfim_grad_alignment_by_layer(
-        *,
-        layers=None,
-        use_all_sampled_times=False,
-        run_indices=None,
-        sample_iters_for_labels=None,
-        jvp_chunk=RED_JVP_CHUNK,
-        log_x=True,
-        log_y=False,
-        save_npz=True,
-        make_per_layer_plots=True,
-        make_overlay_plot=True,
-        diagnostics_cache=None,
-        result_key=keep_key,
-        state_label=keep_label,
-        qfim_matrix_fn_factory=(
-            make_reduced0123_qfim_matrix_fn_for_layer_sequential
-        ),
-    ):
-        """
-        Run QFIM eigenvalue-gradient alignment analysis layer by layer.
-
-        Parameters
-        ----------
-        layers : iterable or None
-            Layers to analyze. If None, use vqe_layer_list.
-        use_all_sampled_times : bool
-            False: use final sampled iteration only.
-            True: use all sampled iterations.
-        run_indices : iterable or None
-            Runs to include. If None, use all runs.
-        sample_iters_for_labels : array or None
-            Iteration labels. Usually pass sample_iters.
-        jvp_chunk : int
-            JVP chunk size for QFIM construction.
-        log_x : bool
-            Use log scale on QFIM eigenvalue axis.
-        log_y : bool
-            Use log scale on gradient-weight axis.
-        save_npz : bool
-            Save table data for each layer.
-        make_per_layer_plots : bool
-            Save one scatter plot per layer.
-        make_overlay_plot : bool
-            Save one combined scatter plot across layers.
-
-        Returns
-        -------
-        dict
-            table_by_layer[L] = table dictionary.
-        """
-        if layers is None:
-            candidate_layers = vqe_layer_list
-        else:
-            candidate_layers = layers
-
-        alignment_figure_dir, alignment_result_dir = (
-            qfim_grad_alignment_dirs_for_key(result_key)
-        )
-        available_layers = []
-
-        for L in candidate_layers:
-            L = int(L)
-
-            if L in theta_sample_traces_by_layer and L in grad_sample_traces_by_layer:
-                available_layers.append(L)
-
-        if not available_layers:
-            raise ValueError(
-                "No layers are available in theta_sample_traces_by_layer and "
-                "grad_sample_traces_by_layer. Run the VQE optimization first."
-            )
-
-        table_by_layer = {}
-
-        for L in tqdm(
-            available_layers,
-            desc="QFIM eigenvalue-gradient scatter by layer",
-            unit="layer",
-        ):
-            theta_samples_L = np.asarray(theta_sample_traces_by_layer[L])
-            n_times_L = theta_samples_L.shape[1] if theta_samples_L.ndim == 3 else 1
-
-            if use_all_sampled_times:
-                time_indices = range(n_times_L)
-                time_tag = "all_times"
-                title_time = "all sampled iterations"
-                color_by = "iteration"
-                point_size = 12.0
-                scatter_alpha = 0.40
-            else:
-                time_indices = [-1]
-                time_tag = "final_iter"
-                color_by = None
-                point_size = 14.0
-                scatter_alpha = 0.45
-
-                if sample_iters_for_labels is not None:
-                    title_time = f"final iteration {int(np.asarray(sample_iters_for_labels)[-1])}"
-                else:
-                    title_time = "final iteration"
-
-            table_L = compute_qfim_grad_alignment_table_for_layer(
-                L,
-                theta_sample_traces_by_layer,
-                grad_sample_traces_by_layer,
-                run_indices=run_indices,
-                time_indices=time_indices,
-                sample_iters=sample_iters_for_labels,
-                jvp_chunk=jvp_chunk,
-                sort_desc=True,
-                diagnostics_cache=diagnostics_cache,
-                qfim_matrix_fn_factory=qfim_matrix_fn_factory,
-            )
-
-            result_npz_path = os.path.join(
-                alignment_result_dir,
-                f"qfim_grad_alignment_scatter_data_L{L}_{time_tag}.npz",
-            )
-
-            if save_npz:
-                np.savez(
-                    os.path.join(
-                        alignment_figure_dir,
-                        f"qfim_grad_alignment_scatter_data_L{L}_{time_tag}.npz",
-                    ),
-                    **table_L,
-                )
-                save_npz_result(
-                    result_npz_path,
-                    **table_L,
-                )
-
-            table_for_plot = (
-                load_npz_result(result_npz_path)
-                if save_npz
-                else table_L
-            )
-            table_by_layer[L] = table_for_plot
-
-            if make_per_layer_plots:
-                plot_qfim_grad_alignment_table(
-                    table_for_plot,
-                    title=(
-                        rf"QFIM eigenvalue vs gradient weight, "
-                        rf"L={L}, {title_time} ({state_label})"
-                    ),
-                    outpath=os.path.join(
-                        alignment_figure_dir,
-                        f"qfim_grad_weight_scatter_L{L}_{time_tag}.pdf",
-                    ),
-                    log_x=log_x,
-                    log_y=log_y,
-                    color_by=color_by,
-                    point_size=point_size,
-                    alpha=scatter_alpha,
-                )
-
-        if make_overlay_plot:
-            overlay_tag = "all_times" if use_all_sampled_times else "final_iter"
-
-            plot_qfim_grad_alignment_layer_overlay(
-                table_by_layer,
-                available_layers,
-                title=(
-                    rf"QFIM eigenvalue vs gradient weight "
-                    rf"across layers, {overlay_tag.replace('_', ' ')} "
-                    rf"({state_label})"
-                ),
-                outpath=os.path.join(
-                    alignment_figure_dir,
-                    f"qfim_grad_weight_scatter_overlay_layers_{overlay_tag}.pdf",
-                ),
-                log_x=log_x,
-                log_y=log_y,
-                point_size=12.0,
-                alpha=0.40,
-            )
-
-        return table_by_layer
-
-
-    # ------------------------------------------------------------
-
-    # ------------------------------------------------------------
-    # Execution settings for numerical alignment data
-    # ------------------------------------------------------------
-    RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER = cfg.RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER
-    RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES = cfg.RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES
-    RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION = cfg.RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION
-
-    LOG_X_QFIM_GRAD_ALIGNMENT = cfg.LOG_X_QFIM_GRAD_ALIGNMENT
-    LOG_Y_QFIM_GRAD_ALIGNMENT = cfg.LOG_Y_QFIM_GRAD_ALIGNMENT
-    QFIM_GRAD_ALIGNMENT_RUN_INDICES = cfg.QFIM_GRAD_ALIGNMENT_RUN_INDICES
-    if cfg.QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS is None:
-        QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS = tuple(int(t) for t in sample_iters)
-    else:
-        QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS = tuple(
-            int(t) for t in cfg.QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS
-        )
-
-    if RUN_QFIM_GRAD_ALIGNMENT_FINAL_ITER:
-        run_qfim_grad_alignment_by_layer(
-            layers=vqe_layer_list,
-            use_all_sampled_times=False,
-            run_indices=QFIM_GRAD_ALIGNMENT_RUN_INDICES,
-            sample_iters_for_labels=sample_iters,
-            jvp_chunk=RED_JVP_CHUNK,
-            log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-            log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-            save_npz=True,
-            make_per_layer_plots=False,
-            make_overlay_plot=False,
-            diagnostics_cache=qfim_spectral_gradient_diagnostics_cache,
-        )
-        run_qfim_grad_alignment_by_layer(
-            layers=vqe_layer_list,
-            use_all_sampled_times=False,
-            run_indices=QFIM_GRAD_ALIGNMENT_RUN_INDICES,
-            sample_iters_for_labels=sample_iters,
-            jvp_chunk=RED_JVP_CHUNK,
-            log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-            log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-            save_npz=True,
-            make_per_layer_plots=False,
-            make_overlay_plot=False,
-            diagnostics_cache=qfim_spectral_gradient_diagnostics_cache_keep01234,
-            result_key=keep_key_5,
-            state_label=keep_label_5,
-            qfim_matrix_fn_factory=(
-                make_reduced01234_qfim_matrix_fn_for_layer_sequential
-            ),
-        )
-
-    if RUN_QFIM_GRAD_ALIGNMENT_ALL_TIMES:
-        run_qfim_grad_alignment_by_layer(
-            layers=vqe_layer_list,
-            use_all_sampled_times=True,
-            run_indices=QFIM_GRAD_ALIGNMENT_RUN_INDICES,
-            sample_iters_for_labels=sample_iters,
-            jvp_chunk=RED_JVP_CHUNK,
-            log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-            log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-            save_npz=True,
-            make_per_layer_plots=False,
-            make_overlay_plot=False,
-            diagnostics_cache=qfim_spectral_gradient_diagnostics_cache,
-        )
-        run_qfim_grad_alignment_by_layer(
-            layers=vqe_layer_list,
-            use_all_sampled_times=True,
-            run_indices=QFIM_GRAD_ALIGNMENT_RUN_INDICES,
-            sample_iters_for_labels=sample_iters,
-            jvp_chunk=RED_JVP_CHUNK,
-            log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-            log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-            save_npz=True,
-            make_per_layer_plots=False,
-            make_overlay_plot=False,
-            diagnostics_cache=qfim_spectral_gradient_diagnostics_cache_keep01234,
-            result_key=keep_key_5,
-            state_label=keep_label_5,
-            qfim_matrix_fn_factory=(
-                make_reduced01234_qfim_matrix_fn_for_layer_sequential
-            ),
-        )
-
-    if RUN_QFIM_GRAD_ALIGNMENT_PER_ITERATION:
-        run_qfim_grad_alignment_by_layer_iteration_folders(
-            layers=vqe_layer_list,
-            target_iterations=QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS,
-            run_indices=QFIM_GRAD_ALIGNMENT_RUN_INDICES,
-            sample_iters_for_labels=sample_iters,
-            jvp_chunk=RED_JVP_CHUNK,
-            log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-            log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-            save_npz=True,
-            make_plots=False,
-            diagnostics_cache=qfim_spectral_gradient_diagnostics_cache,
-        )
-        run_qfim_grad_alignment_by_layer_iteration_folders(
-            layers=vqe_layer_list,
-            target_iterations=QFIM_GRAD_ALIGNMENT_TARGET_ITERATIONS,
-            run_indices=QFIM_GRAD_ALIGNMENT_RUN_INDICES,
-            sample_iters_for_labels=sample_iters,
-            jvp_chunk=RED_JVP_CHUNK,
-            log_x=LOG_X_QFIM_GRAD_ALIGNMENT,
-            log_y=LOG_Y_QFIM_GRAD_ALIGNMENT,
-            save_npz=True,
-            make_plots=False,
-            diagnostics_cache=qfim_spectral_gradient_diagnostics_cache_keep01234,
-            result_key=keep_key_5,
-            state_label=keep_label_5,
-            qfim_matrix_fn_factory=(
-                make_reduced01234_qfim_matrix_fn_for_layer_sequential
-            ),
-        )
 
     print(
         "Saved keep0123 and keep01234 numerical results to: "

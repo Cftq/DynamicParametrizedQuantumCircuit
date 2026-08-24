@@ -1,7 +1,6 @@
 """Dynamic parametrized quantum-circuit calculation stages."""
 
 __all__ = [
-    "DPQC_overparam_alignment",
     "DPQC_overparam_draw_circuits",
     "DPQC_overparam_hessian",
     "DPQC_overparam_hs",

@@ -372,7 +372,6 @@ final_theta_wrapped_rmsdist_by_layer = {}
 energy_traces_by_layer = {}
 grad_norm_traces_by_layer = {}
 theta_sample_traces_by_layer = {}
-grad_sample_traces_by_layer = {}
 
 qfim_rank_pure_by_layer = {}
 qfim_rank_reduced_by_layer = {}
@@ -2674,10 +2673,9 @@ def make_vqe_batch_runner(
             (num_samples, num_total_params),
             dtype=REAL_DTYPE,
         )
-        grad_samples = jnp.zeros_like(theta_samples)
 
         def one_step(carry, sample_slot):
-            theta_old, opt_state_old, theta_samples_old, grad_samples_old = carry
+            theta_old, opt_state_old, theta_samples_old = carry
             energy, grad = energy_and_grad(theta_old)
             grad_norm = jnp.linalg.norm(grad)
             updates, opt_state_new = optimizer.update(
@@ -2689,24 +2687,16 @@ def make_vqe_batch_runner(
                 optax.apply_updates(theta_old, updates)
             )
 
-            def record_sample(sample_buffers):
-                theta_buffer, grad_buffer = sample_buffers
-                return (
-                    theta_buffer.at[sample_slot].set(theta_old),
-                    grad_buffer.at[sample_slot].set(grad),
-                )
-
-            theta_samples_new, grad_samples_new = jax.lax.cond(
+            theta_samples_new = jax.lax.cond(
                 sample_slot >= 0,
-                record_sample,
-                lambda sample_buffers: sample_buffers,
-                (theta_samples_old, grad_samples_old),
+                lambda buffer: buffer.at[sample_slot].set(theta_old),
+                lambda buffer: buffer,
+                theta_samples_old,
             )
             new_carry = (
                 theta_new,
                 opt_state_new,
                 theta_samples_new,
-                grad_samples_new,
             )
             return new_carry, (energy, grad_norm)
 
@@ -2715,12 +2705,11 @@ def make_vqe_batch_runner(
                 theta_final,
                 _,
                 theta_samples_final,
-                grad_samples_final,
             ),
             (energy_trace, grad_norm_trace),
         ) = jax.lax.scan(
             one_step,
-            (theta, opt_state, theta_samples, grad_samples),
+            (theta, opt_state, theta_samples),
             scan_sample_slots,
         )
         return (
@@ -2728,7 +2717,6 @@ def make_vqe_batch_runner(
             energy_trace,
             grad_norm_trace,
             theta_samples_final,
-            grad_samples_final,
         )
 
     return jax.jit(jax.vmap(optimize_one_run))
@@ -2789,7 +2777,7 @@ def run_vqe_optimization(
     global hessian_rank_optimization_path_dir
     global hessian_rank_optimization_path_mean_dir, hessian_rank_optimization_path_min_dir
     global theta_history, best_theta_by_layer, final_theta_wrapped_rmsdist_by_layer, energy_traces_by_layer, grad_norm_traces_by_layer, sample_every
-    global sample_iters, sample_iter_set, theta_sample_traces_by_layer, grad_sample_traces_by_layer, cmap
+    global sample_iters, sample_iter_set, theta_sample_traces_by_layer, cmap
     global numerical_results_dir, energy_results_dir, qfim_results_dir, hs_results_dir, hessian_results_dir
     effective_batch_size = _resolve_vqe_batch_size(vqe_batch_size)
     if int(num_runs) <= 0:
@@ -2889,7 +2877,6 @@ def run_vqe_optimization(
     grad_norm_traces_by_layer = {}  # L -> (num_runs, steps) gradient-norm traces
     
     # Sampled optimization-time states feed the post-VQE matrix analyses.
-    # Sampled gradients remain in the VQE archive for schema compatibility.
     sample_every = cfg.SAMPLE_EVERY
     sample_iters = np.arange(0, steps, sample_every, dtype=NP_INT_DTYPE)
     if sample_iters.size == 0 or sample_iters[0] != 0:
@@ -2902,7 +2889,6 @@ def run_vqe_optimization(
     sample_iter_set = set(int(t) for t in sample_iters.tolist())
     
     theta_sample_traces_by_layer = {}
-    grad_sample_traces_by_layer = {}
     cmap = matplotlib.colormaps.get_cmap("viridis")
     
     # tqdm: Layers (VQE)
@@ -2934,7 +2920,7 @@ def run_vqe_optimization(
             axis=0,
         )
 
-        output_parts = tuple([] for _ in range(5))
+        output_parts = tuple([] for _ in range(4))
         batch_starts = range(0, num_runs, effective_batch_size)
         for batch_start in tqdm(
             batch_starts,
@@ -2965,7 +2951,6 @@ def run_vqe_optimization(
             energy_data,
             gradnorm_data,
             theta_sample_data,
-            grad_sample_data,
         ) = (
             np.concatenate(parts, axis=0)
             for parts in output_parts
@@ -2975,7 +2960,6 @@ def run_vqe_optimization(
             (num_runs, steps),
             (num_runs, steps),
             (num_runs, sample_iters.size, num_total_params),
-            (num_runs, sample_iters.size, num_total_params),
         )
         actual_shapes = tuple(
             array.shape
@@ -2984,7 +2968,6 @@ def run_vqe_optimization(
                 energy_data,
                 gradnorm_data,
                 theta_sample_data,
-                grad_sample_data,
             )
         )
         if actual_shapes != expected_shapes:
@@ -3019,7 +3002,6 @@ def run_vqe_optimization(
         energy_traces_by_layer[current_layer] = energy_data
         grad_norm_traces_by_layer[current_layer] = gradnorm_data
         theta_sample_traces_by_layer[current_layer] = theta_sample_data
-        grad_sample_traces_by_layer[current_layer] = grad_sample_data
     
         best_theta_by_layer[current_layer] = best_final_theta.copy()
     
@@ -3126,13 +3108,6 @@ def save_unitary_vqe_results() -> str:
             )
             for L in layer_list
         },
-        **{
-            f"L{int(L)}_grad_samples": np.asarray(
-                grad_sample_traces_by_layer[int(L)],
-                dtype=NP_REAL_DTYPE,
-            )
-            for L in layer_list
-        },
     )
 
     return outpath
@@ -3147,7 +3122,7 @@ def load_unitary_vqe_samples(inpath: Optional[str] = None) -> str:
     publishing any of its values as module globals.
     """
     global layer_list, sample_iters, sample_iter_set, steps, num_runs, cmap
-    global theta_sample_traces_by_layer, grad_sample_traces_by_layer
+    global theta_sample_traces_by_layer
 
     result_path = (
         os.path.join(energy_results_dir, "vqe_optimization_results.npz")
@@ -3293,53 +3268,39 @@ def load_unitary_vqe_samples(inpath: Optional[str] = None) -> str:
             raise ValueError("Saved sample_iters must be smaller than steps.")
 
         theta_samples = {}
-        grad_samples = {}
         expected_real_dtype = np.dtype(NP_REAL_DTYPE)
         for layer_value in archived_layers:
             layer = int(layer_value)
             theta_key = f"L{layer}_theta_samples"
-            grad_key = f"L{layer}_grad_samples"
-            missing_keys = [
-                key for key in (theta_key, grad_key) if key not in data
-            ]
-            if missing_keys:
+            if theta_key not in data:
                 raise KeyError(
-                    "VQE archive is missing required arrays: "
-                    + ", ".join(missing_keys)
+                    f"VQE archive is missing required array: {theta_key}"
                 )
 
             theta_raw = data[theta_key]
-            grad_raw = data[grad_key]
-            if (
-                theta_raw.dtype != expected_real_dtype
-                or grad_raw.dtype != expected_real_dtype
-            ):
+            if theta_raw.dtype != expected_real_dtype:
                 raise TypeError(
-                    f"Saved L={layer} theta/gradient samples must be "
-                    f"float64, got {theta_raw.dtype} and {grad_raw.dtype}."
+                    f"Saved L={layer} theta samples must be float64, "
+                    f"got {theta_raw.dtype}."
                 )
 
             theta = np.array(theta_raw, dtype=NP_REAL_DTYPE, copy=True)
-            grad = np.array(grad_raw, dtype=NP_REAL_DTYPE, copy=True)
             expected_shape = (
                 archived_num_runs_value,
                 archived_sample_iters.size,
                 num_params_per_layer * layer,
             )
-            if theta.shape != expected_shape or grad.shape != expected_shape:
+            if theta.shape != expected_shape:
                 raise ValueError(
-                    f"Saved L={layer} sample shape mismatch: "
-                    f"theta={theta.shape}, grad={grad.shape}, "
-                    f"expected={expected_shape}."
+                    f"Saved L={layer} theta sample shape mismatch: "
+                    f"{theta.shape} != {expected_shape}."
                 )
-            if not np.all(np.isfinite(theta)) or not np.all(np.isfinite(grad)):
+            if not np.all(np.isfinite(theta)):
                 raise ValueError(
-                    f"Saved L={layer} theta/gradient samples contain "
-                    "non-finite values."
+                    f"Saved L={layer} theta samples contain non-finite values."
                 )
 
             theta_samples[layer] = theta
-            grad_samples[layer] = grad
 
     # Publish the validated archive atomically at the Python-object level.
     layer_list = [int(layer) for layer in archived_layers.tolist()]
@@ -3348,7 +3309,6 @@ def load_unitary_vqe_samples(inpath: Optional[str] = None) -> str:
     steps = archived_steps_value
     num_runs = archived_num_runs_value
     theta_sample_traces_by_layer = theta_samples
-    grad_sample_traces_by_layer = grad_samples
     cmap = matplotlib.colormaps.get_cmap("viridis")
     return result_path
 
