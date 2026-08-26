@@ -19,7 +19,7 @@ import os
 import sys
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 _MODULE_DIR = Path(__file__).resolve().parent
 _SRC_DIR = _MODULE_DIR.parent
@@ -44,6 +44,13 @@ def _finite_float(value: str) -> float:
     return parsed
 
 
+def _positive_float(value: str) -> float:
+    parsed = _finite_float(value)
+    if parsed <= 0.0:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
 def _parse_cli_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
@@ -60,13 +67,29 @@ def _parse_cli_args(argv=None):
             "visualized (default: H_PARAM from config_overparam.py)."
         ),
     )
+    parser.add_argument(
+        "--convergence-tolerance",
+        dest="convergence_tolerances",
+        action="append",
+        type=_positive_float,
+        default=None,
+        metavar="DELTA",
+        help=(
+            "Positive absolute-energy tolerance used for first-passage "
+            "convergence figures. Repeat the option for multiple values "
+            "(default: 1.0)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     _CLI_ARGS = _parse_cli_args()
 else:
-    _CLI_ARGS = argparse.Namespace(h_param=float(cfg.H_PARAM))
+    _CLI_ARGS = argparse.Namespace(
+        h_param=float(cfg.H_PARAM),
+        convergence_tolerances=None,
+    )
 
 _SELECTED_H_PARAM = float(_CLI_ARGS.h_param)
 if not math.isfinite(_SELECTED_H_PARAM):
@@ -75,6 +98,7 @@ if not math.isfinite(_SELECTED_H_PARAM):
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from convergence_time import generate_convergence_time_outputs
 
 if __package__:
     from . import unitary_pqc_measured_1_overparam_compute as upqc
@@ -1291,6 +1315,7 @@ def _plot_optimization_path_results() -> None:
 def run_unitary_pqc_visualization(
     *,
     h_param: Optional[float] = None,
+    convergence_tolerances: Optional[Sequence[float]] = None,
 ) -> dict:
     selected_h_param = _finite_float(
         str(_SELECTED_H_PARAM if h_param is None else h_param)
@@ -1314,6 +1339,25 @@ def run_unitary_pqc_visualization(
 
     upqc.configure_unitary_pqc_overparam(h_value=selected_h_param)
     _load_unitary_vqe_results(vqe_result)
+    generate_convergence_time_outputs(
+        upqc.energy_traces_by_layer,
+        upqc.layer_list,
+        ground_energy=upqc.smallest_eigval,
+        tolerances=convergence_tolerances,
+        num_runs=upqc.num_runs,
+        optimizer_steps=upqc.steps,
+        figure_dir=upqc.energy_fig_dir,
+        statistics_outpath=os.path.join(
+            upqc.energy_results_dir,
+            "vqe_convergence_time_statistics.npz",
+        ),
+        metadata={
+            "h_param": selected_h_param,
+            "architecture": upqc.ANSATZ_NAME,
+            "measurement_outcome": upqc.MEASUREMENT_OUTCOME,
+            "source_archive": os.path.basename(vqe_result_path),
+        },
+    )
     upqc.plot_vqe_optimization_results()
     # Re-render the shared final-error filenames with the DPQC layout and add
     # its log-scale, threshold-detail, and multiple-tolerance figures.
@@ -1331,6 +1375,7 @@ def run_unitary_pqc_visualization(
 if __name__ == "__main__":
     visualization_result = run_unitary_pqc_visualization(
         h_param=_CLI_ARGS.h_param,
+        convergence_tolerances=_CLI_ARGS.convergence_tolerances,
     )
     print(
         "Visualized Hamiltonian parameter h: "

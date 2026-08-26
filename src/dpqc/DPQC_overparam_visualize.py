@@ -106,6 +106,19 @@ def _parse_cli_args(argv=None):
         ),
     )
     parser.add_argument(
+        "--convergence-tolerance",
+        dest="convergence_tolerances",
+        action="append",
+        type=_positive_float,
+        default=None,
+        metavar="DELTA",
+        help=(
+            "Positive absolute-energy tolerance used for first-passage "
+            "convergence figures. Repeat the option for multiple values "
+            "(default: 1.0)."
+        ),
+    )
+    parser.add_argument(
         "--output-family",
         choices=("dpqc", "dpqc_reset"),
         default="dpqc",
@@ -242,6 +255,7 @@ if __name__ == "__main__":
 else:
     _CLI_ARGS = argparse.Namespace(
         h_param=float(cfg.H_PARAM),
+        convergence_tolerances=None,
         output_family="dpqc",
         skip_optimization_path_qfim=False,
         skip_qfim_eigs_by_index_layers=False,
@@ -1712,6 +1726,7 @@ import matplotlib.ticker as mticker
 import numpy as np
 import tensorcircuit as tc
 from matplotlib.patches import Patch
+from convergence_time import generate_convergence_time_outputs
 from plot import (
     new_fig_ax,
     save_fig,
@@ -2971,8 +2986,8 @@ vqe_optimizer_title_suffix = f" ({vqe_optimizer_label})"
 print(f"Loaded VQE optimizer: {vqe_optimizer_label}")
 
 # Create output directories only after confirming that the selected h has a
-# valid VQE archive.  Numerical-result directories are inputs and are never
-# created by the visualization stage.
+# valid VQE archive.  Raw numerical archives are treated as inputs; the only
+# numerical file written below is the derived convergence-time statistics.
 _output_dirs = (
     save_dir,
     energy_fig_dir,
@@ -3072,6 +3087,26 @@ final_stats = {
     "mean_energy": np.asarray(vqe_optimization_results["final_stats_mean_energy"], dtype=NP_REAL_DTYPE),
     "std_energy": np.asarray(vqe_optimization_results["final_stats_std_energy"], dtype=NP_REAL_DTYPE),
 }
+
+convergence_time_statistics = generate_convergence_time_outputs(
+    energy_traces_by_layer,
+    vqe_layer_list,
+    ground_energy=smallest_eigval,
+    tolerances=getattr(_CLI_ARGS, "convergence_tolerances", None),
+    num_runs=num_runs,
+    optimizer_steps=steps,
+    figure_dir=energy_fig_dir,
+    statistics_outpath=os.path.join(
+        energy_results_dir,
+        "vqe_convergence_time_statistics.npz",
+    ),
+    metadata={
+        "h_param": h_param,
+        "architecture": output_family,
+        "optimizer_name": vqe_optimizer_name,
+        "source_archive": os.path.basename(vqe_optimization_result_path),
+    },
+)
 
 
 # ==============================

@@ -57,6 +57,13 @@ def _finite_float(value: str) -> float:
     return parsed
 
 
+def _positive_float(value: str) -> float:
+    parsed = _finite_float(value)
+    if parsed <= 0.0:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
 def _default_h_param() -> float:
     """Read the Hamiltonian default used by the reset compute program."""
     common_dir = str(_COMMON_DIR)
@@ -86,10 +93,26 @@ def _parse_cli_args(
             "(default: H_PARAM from config_overparam.py)."
         ),
     )
+    parser.add_argument(
+        "--convergence-tolerance",
+        dest="convergence_tolerances",
+        action="append",
+        type=_positive_float,
+        default=None,
+        metavar="DELTA",
+        help=(
+            "Positive absolute-energy tolerance used for first-passage "
+            "convergence figures. Repeat the option for multiple values "
+            "(default: 1.0)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
-def _build_visualizer_command(h_param: float) -> tuple[str, ...]:
+def _build_visualizer_command(
+    h_param: float,
+    convergence_tolerances: Sequence[float] | None = None,
+) -> tuple[str, ...]:
     """Return the fixed-family child-process command."""
     h_param = float(h_param)
     if not math.isfinite(h_param):
@@ -98,7 +121,7 @@ def _build_visualizer_command(h_param: float) -> tuple[str, ...]:
         raise FileNotFoundError(
             f"Base DPQC visualizer was not found: {_BASE_VISUALIZER}"
         )
-    return (
+    command = [
         sys.executable,
         str(_BASE_VISUALIZER),
         "--h-param",
@@ -108,15 +131,27 @@ def _build_visualizer_command(h_param: float) -> tuple[str, ...]:
         "--skip-optimization-path-qfim",
         "--skip-qfim-eigs-by-index-layers",
         "--skip-qfim-trace-figures",
+    ]
+    tolerance_values = (
+        () if convergence_tolerances is None else convergence_tolerances
     )
+    for tolerance in tolerance_values:
+        tolerance = float(tolerance)
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError("convergence tolerances must be finite and positive")
+        command.extend(("--convergence-tolerance", repr(tolerance)))
+    return tuple(command)
 
 
-def _run_visualizer(h_param: float) -> int:
+def _run_visualizer(
+    h_param: float,
+    convergence_tolerances: Sequence[float] | None = None,
+) -> int:
     """Run the canonical plotter and propagate its process status."""
     environment = os.environ.copy()
     environment["MPLBACKEND"] = "Agg"
     completed = subprocess.run(
-        _build_visualizer_command(h_param),
+        _build_visualizer_command(h_param, convergence_tolerances),
         check=False,
         env=environment,
         shell=False,
@@ -126,7 +161,7 @@ def _run_visualizer(h_param: float) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_cli_args(argv)
-    return _run_visualizer(args.h_param)
+    return _run_visualizer(args.h_param, args.convergence_tolerances)
 
 
 if __name__ == "__main__":

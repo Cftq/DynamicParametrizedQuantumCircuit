@@ -303,9 +303,9 @@ NUM_BLOCKS = 4
 PARAMS_PER_BLOCK = 3
 num_params_per_layer = NUM_BLOCKS * PARAMS_PER_BLOCK
 LAYER_PAIRS = (
+    (1, 3),
     (2, 3),
     (0, 2),
-    (1, 3),
     (0, ANCILLA_QUBIT),
 )
 
@@ -919,9 +919,9 @@ def create_unitary_pqc(theta: jnp.ndarray, num_layers: int, num_qubits: int):
       - Center ancilla: 4
 
     One layer consists of four qg_layer blocks:
-      1. (2,3)
-      2. (0,2)
-      3. (1,3)
+      1. (1,3)
+      2. (2,3)
+      3. (0,2)
       4. (0,4) = added system-ancilla block
 
     Each qg_layer(q0,q1) applies
@@ -2301,7 +2301,7 @@ def configure_unitary_pqc_overparam(
     #   - Original physical system qubits are (0,1,2,3).
     #   - A central ancilla qubit is added as qubit 4.
     #   - Each layer contains 4 two-qubit blocks (NUM_BLOCKS=4):
-    #       (2,3), (0,2), (1,3), (0,4)
+    #       (1,3), (2,3), (0,2), (0,4)
     #     where (0,4) is the added system-ancilla block.
     #   - Each block applies Rz on both qubits and Rxx between them.
     #   - Per-layer parameter count:
@@ -2466,16 +2466,16 @@ def configure_unitary_pqc_overparam(
     _ensure_unitary_result_dirs()
     
     # Block structure constants
-    # Existing lattice blocks: (2,3), (0,2), (1,3)
+    # Existing lattice blocks: (1,3), (2,3), (0,2)
     # Added center-ancilla block: (0, ANCILLA_QUBIT)
     NUM_BLOCKS = 4
     PARAMS_PER_BLOCK = 3
     num_params_per_layer = NUM_BLOCKS * PARAMS_PER_BLOCK  # 12
     
     LAYER_PAIRS = (
+        (1, 3),
         (2, 3),
         (0, 2),
-        (1, 3),
         (0, ANCILLA_QUBIT),
     )
     
@@ -2519,7 +2519,7 @@ def configure_unitary_pqc_overparam(
     #
     # Each layer applies the existing lattice blocks plus the added center-ancilla
     # block (0,4):
-    #     (2,3), (0,2), (1,3), (0,4).
+    #     (1,3), (2,3), (0,2), (0,4).
     #
     # The energy is evaluated directly as <psi|H_system tensor I|psi>.
     # For the reduced mixed-state QFIM on the original 4-qubit system,

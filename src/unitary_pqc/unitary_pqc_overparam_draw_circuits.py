@@ -56,9 +56,9 @@ PARAMS_PER_BLOCK = 3
 N_PARAM_PER_LAYER = NUM_BLOCKS * PARAMS_PER_BLOCK
 ANCILLA_QUBIT = 4
 LAYER_PAIRS = (
+    (1, 3),
     (2, 3),
     (0, 2),
-    (1, 3),
     (0, ANCILLA_QUBIT),
 )
 

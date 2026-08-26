@@ -62,9 +62,9 @@ ANCILLA_QUBIT = 4
 MEASUREMENT_OUTCOME = 1
 ANSATZ_NAME = "unitary_pqc_measured_1"
 LAYER_PAIRS = (
+    (1, 3),
     (2, 3),
     (0, 2),
-    (1, 3),
     (0, ANCILLA_QUBIT),
 )
 
