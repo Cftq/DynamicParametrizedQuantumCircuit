@@ -93,12 +93,20 @@ def effective_rank_from_eigvals(
 def participation_effective_rank_from_eigvals(
     evals: jnp.ndarray,
     *,
+    threshold: Optional[float] = None,
     eps: float = 1e-30,
     axis=None,
 ) -> jnp.ndarray:
-    """Return ``(sum lambda)^2 / sum(lambda^2)`` for a PSD spectrum."""
+    """Return participation rank for PSD eigenvalues above the rank threshold.
+
+    Eigenvalues are first clipped at zero, then only values strictly larger
+    than ``threshold`` contribute to ``(sum lambda)^2 / sum(lambda^2)``.  The
+    project QFIM rank threshold is used when ``threshold`` is omitted.
+    """
     evals = _precision_array(evals)
     evals = jnp.clip(jnp.real(evals), a_min=0.0)
+    threshold_jnp = rank_threshold_from_eigvals(evals, threshold=threshold)
+    evals = jnp.where(evals > threshold_jnp, evals, jnp.zeros_like(evals))
     eigsum = jnp.sum(evals, axis=axis)
     eigsq_sum = jnp.sum(evals**2, axis=axis)
     eps_jnp = jnp.asarray(eps, dtype=evals.dtype)
@@ -113,17 +121,27 @@ def participation_effective_rank_from_eigvals(
 def participation_effective_abs_rank_from_eigvals(
     evals: jnp.ndarray,
     *,
+    threshold: Optional[float] = None,
     eps: float = 1e-30,
     axis=None,
 ) -> jnp.ndarray:
-    """Return participation rank for a signed spectrum using ``abs(evals)``.
+    """Return thresholded participation rank using ``abs(evals)`` as weights.
 
     This is the non-cancelling extension used for indefinite Hessians:
 
         (sum |lambda|)^2 / sum |lambda|^2.
+
+    Only weights strictly larger than ``threshold`` contribute.  The project
+    QFIM rank threshold is used when ``threshold`` is omitted.
     """
     evals = _precision_array(evals)
     weights = jnp.abs(jnp.real(evals))
+    threshold_jnp = rank_threshold_from_eigvals(weights, threshold=threshold)
+    weights = jnp.where(
+        weights > threshold_jnp,
+        weights,
+        jnp.zeros_like(weights),
+    )
     weight_sum = jnp.sum(weights, axis=axis)
     weight_sq_sum = jnp.sum(weights**2, axis=axis)
     eps_jnp = jnp.asarray(eps, dtype=weights.dtype)

@@ -3645,7 +3645,7 @@ def plot_qfim_rank_vs_layers_random_points(
                 "rank_threshold is required when ylabel is not supplied."
             )
         threshold_label = f"{float(rank_threshold):.0e}"
-        ylabel = f"QFIM rank (eigenvalue >= {threshold_label})"
+        ylabel = f"QFIM rank (eigenvalue > {threshold_label})"
 
     ax.set_xlabel("Number of Layers")
     ax.set_ylabel(ylabel)
@@ -4801,8 +4801,53 @@ def _summary_sample_iters_or_none(result: dict, *, description: str):
 
 _QFIM_PARTICIPATION_RANK_LABEL = (
     r"Participation effective rank "
-    r"$r_{\mathrm{eff}}=(\sum_i\lambda_i)^2/\sum_i\lambda_i^2$"
+    r"$r_{\mathrm{eff}}="
+    r"(\sum_{\lambda_i>10^{-12}}\lambda_i)^2/"
+    r"\sum_{\lambda_i>10^{-12}}\lambda_i^2$"
 )
+
+
+def _has_expected_participation_rank_threshold(
+    result: dict,
+    *,
+    description: str,
+) -> bool:
+    """Reject legacy participation-rank archives without active-spectrum metadata."""
+    metadata_key = "participation_effective_rank_threshold"
+    recompute_command = (
+        "DPQC_overparam_reset_compute.py --stage qfim"
+        if output_family == "dpqc_reset"
+        else "DPQC_overparam_qfim.py"
+    )
+    if metadata_key not in result:
+        _warn_skip_new_figure(
+            f"{description} archive predates thresholded participation ranks; "
+            f"rerun {recompute_command}"
+        )
+        return False
+
+    try:
+        threshold = float(np.asarray(result[metadata_key]).item())
+    except (TypeError, ValueError) as exc:
+        _warn_skip_new_figure(
+            f"{description} archive has invalid {metadata_key!r}: {exc}"
+        )
+        return False
+
+    expected = float(cfg.QFIM_EFFECTIVE_RANK_THRESHOLD)
+    if not np.isfinite(threshold) or not np.isclose(
+        threshold,
+        expected,
+        rtol=0.0,
+        atol=0.0,
+    ):
+        _warn_skip_new_figure(
+            f"{description} archive uses participation-rank threshold "
+            f"{threshold!r}, expected {expected!r}; rerun {recompute_command}"
+        )
+        return False
+
+    return True
 
 
 def _finite_sample_mean_sem(samples):
@@ -4971,7 +5016,10 @@ def render_qfim_participation_effective_rank_figures(
         description=random_description,
     )
 
-    if random_summary is not None:
+    if random_summary is not None and _has_expected_participation_rank_threshold(
+        random_summary,
+        description=random_description,
+    ):
         random_layers = _summary_layers_or_none(
             random_summary,
             description=random_description,
@@ -5032,6 +5080,11 @@ def render_qfim_participation_effective_rank_figures(
     )
     if path_summary is None:
         return
+    if not _has_expected_participation_rank_threshold(
+        path_summary,
+        description=path_description,
+    ):
+        return
 
     path_layers = _summary_layers_or_none(
         path_summary,
@@ -5062,8 +5115,7 @@ def render_qfim_participation_effective_rank_figures(
             qfim_effective_rank_dir,
             f"qfim_participation_rank_history_{result_key}.pdf",
         ),
-        ylabel=r"Mean QFIM effective rank "
-        r"$r_{\mathrm{eff}}=(\sum_i\lambda_i)^2/\sum_i\lambda_i^2$",
+        ylabel=_QFIM_PARTICIPATION_RANK_LABEL,
         metric_name="QFIM participation effective rank",
         cmap=cmap,
         log_scale=False,

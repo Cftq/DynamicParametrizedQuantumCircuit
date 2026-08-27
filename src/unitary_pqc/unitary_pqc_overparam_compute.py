@@ -1857,6 +1857,7 @@ def make_ortk_rank_effective_eigvals_fn_for_layer(num_layers: int):
         )
         effective_rank_value = participation_effective_rank_from_eigvals(
             eigs_desc,
+            threshold=ORTK_RANK_THRESHOLD,
             eps=ORTK_PARTICIPATION_EPS,
         )
         return rank_value, effective_rank_value, eigs_desc
@@ -4660,6 +4661,10 @@ def run_random_qfim_analysis(
                 ORTK_PARTICIPATION_EPS,
                 dtype=NP_REAL_DTYPE,
             ),
+            ortk_participation_rank_threshold=np.asarray(
+                ORTK_RANK_THRESHOLD,
+                dtype=NP_REAL_DTYPE,
+            ),
             ortk_num_observables=np.asarray(
                 H_OBSERVABLE_MATRICES.shape[0],
                 dtype=NP_INT_DTYPE,
@@ -4755,7 +4760,7 @@ def run_random_qfim_analysis(
                 rf"Observable-Relevant Tangent Kernel participation effective "
                 rf"rank at {NUM_QFIM_SAMPLES} random points"
             ),
-            ylabel="ORTK participation effective rank",
+            ylabel=r"ORTK participation effective rank $(\lambda_k > 10^{-12})$",
             outpath=os.path.join(
                 ortk_effective_rank_random_dir,
                 "ortk_effective_rank_violinplot_random_points.pdf",
@@ -5297,6 +5302,10 @@ def run_optimization_path_qfim_analysis(
                 ORTK_PARTICIPATION_EPS,
                 dtype=NP_REAL_DTYPE,
             ),
+            ortk_participation_rank_threshold=np.asarray(
+                ORTK_RANK_THRESHOLD,
+                dtype=NP_REAL_DTYPE,
+            ),
             **{
                 f"L{int(L)}": arr
                 for L, arr in ortk_effective_rank_history_by_layer.items()
@@ -5492,7 +5501,10 @@ def run_optimization_path_qfim_analysis(
                 ortk_effective_rank_optimization_path_mean_dir,
                 "ortk_effective_rank_mean_history_optimization_path.pdf",
             ),
-            ylabel="Mean ORTK participation effective rank",
+            ylabel=(
+                r"Mean ORTK participation effective rank "
+                r"$(\lambda_k > 10^{-12})$"
+            ),
             cmap=cmap,
         )
         plot_qfim_rank_history_min_by_layer(
@@ -5507,7 +5519,10 @@ def run_optimization_path_qfim_analysis(
                 ortk_effective_rank_optimization_path_min_dir,
                 "ortk_effective_rank_min_history_optimization_path.pdf",
             ),
-            ylabel="Minimum ORTK participation effective rank",
+            ylabel=(
+                r"Minimum ORTK participation effective rank "
+                r"$(\lambda_k > 10^{-12})$"
+            ),
             cmap=cmap,
             integer_y_axis=False,
         )

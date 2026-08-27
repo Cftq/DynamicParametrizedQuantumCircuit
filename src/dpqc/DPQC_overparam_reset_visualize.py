@@ -7,7 +7,8 @@ should contain the ``figs`` output tree.  This entry point then renders the
 saved VQE and random-point QFIM results below
 ``figs/dpqc_reset/h_<h_param>`` without recomputing either quantity.
 The shared QFIM figures include the participation effective rank
-``(sum(lambda))**2 / sum(lambda**2)`` saved by the compute stage.
+``(sum(lambda[lambda > 1e-12]))**2 / sum(lambda[lambda > 1e-12]**2)``
+saved by the compute stage.
 
 The plotting implementation is shared with ``DPQC_overparam_visualize.py``.
 It is launched in a separate Python process with the result family fixed to

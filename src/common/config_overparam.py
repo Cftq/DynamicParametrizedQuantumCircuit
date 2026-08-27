@@ -90,8 +90,10 @@ RED_JVP_CHUNK = 16
 ANALYSIS_BATCH_SIZE = 1
 
 # Save trace-based / participation-rank QFIM diagnostics in addition to the
-# legacy threshold-rank outputs.  These switches do not trigger independent
-# QFIM evaluations: all metrics are derived from the same eigendecomposition.
+# legacy threshold-rank outputs.  Participation ranks use the same active
+# spectrum, lambda > QFIM_EFFECTIVE_RANK_THRESHOLD.  These switches do not
+# trigger independent QFIM evaluations: all metrics are derived from the same
+# eigendecomposition.
 RUN_QFIM_EFFECTIVE_RANK_RANDOM_POINTS = True
 RUN_QFIM_EFFECTIVE_RANK_OPTIMIZATION_PATH = True
 

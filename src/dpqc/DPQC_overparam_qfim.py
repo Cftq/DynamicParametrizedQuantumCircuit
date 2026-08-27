@@ -644,15 +644,22 @@ def run_qfim(*, include_optimization_path: bool = True):
     def participation_effective_rank_from_eigvals(
         eigvals,
         *,
+        threshold=QFIM_EFFECTIVE_RANK_THRESHOLD,
         eps=PARTICIPATION_EFFECTIVE_RANK_EPS,
     ):
-        """Return ``Tr(A)^2 / Tr(A^2)`` for a PSD spectrum.
+        """Return ``Tr(A)^2 / Tr(A^2)`` for the active PSD spectrum.
 
         The zero-matrix convention is participation rank 0.  Inputs are clipped
         at zero so that round-off-sized negative eigenvalues cannot inflate the
-        denominator.
+        denominator, then values not strictly larger than ``threshold`` are
+        discarded.
         """
         eigvals = np.clip(np.asarray(eigvals, dtype=NP_REAL_DTYPE), 0.0, None)
+        eigvals = np.where(
+            eigvals > float(threshold),
+            eigvals,
+            NP_REAL_DTYPE(0.0),
+        )
         trace = NP_REAL_DTYPE(np.sum(eigvals))
         frobenius_norm_sq = NP_REAL_DTYPE(np.sum(eigvals * eigvals))
 
@@ -679,6 +686,7 @@ def run_qfim(*, include_optimization_path: bool = True):
         )
         participation_rank = participation_effective_rank_from_eigvals(
             eigvals_desc,
+            threshold=rank_threshold,
             eps=participation_eps,
         )
         largest = (
@@ -1160,6 +1168,14 @@ def run_qfim(*, include_optimization_path: bool = True):
         num_qfim_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
         qfim_sample_seed_base=np.asarray(QFIM_SAMPLE_SEED_BASE, dtype=NP_INT_DTYPE),
         qfim_effective_rank_threshold=np.asarray(QFIM_EFFECTIVE_RANK_THRESHOLD, dtype=NP_REAL_DTYPE),
+        participation_effective_rank_threshold=np.asarray(
+            QFIM_EFFECTIVE_RANK_THRESHOLD,
+            dtype=NP_REAL_DTYPE,
+        ),
+        participation_effective_rank_eps=np.asarray(
+            PARTICIPATION_EFFECTIVE_RANK_EPS,
+            dtype=NP_REAL_DTYPE,
+        ),
         eig_sum_eps=np.asarray(EIG_SUM_EPS, dtype=NP_REAL_DTYPE),
         qfim_eig_plot_eps=np.asarray(QFIM_EIG_PLOT_EPS, dtype=NP_REAL_DTYPE),
         red_jvp_chunk=np.asarray(RED_JVP_CHUNK, dtype=NP_INT_DTYPE),
@@ -1204,6 +1220,14 @@ def run_qfim(*, include_optimization_path: bool = True):
         qfim_sample_seed_base=np.asarray(QFIM_SAMPLE_SEED_BASE, dtype=NP_INT_DTYPE),
         qfim_effective_rank_threshold=np.asarray(
             QFIM_EFFECTIVE_RANK_THRESHOLD,
+            dtype=NP_REAL_DTYPE,
+        ),
+        participation_effective_rank_threshold=np.asarray(
+            QFIM_EFFECTIVE_RANK_THRESHOLD,
+            dtype=NP_REAL_DTYPE,
+        ),
+        participation_effective_rank_eps=np.asarray(
+            PARTICIPATION_EFFECTIVE_RANK_EPS,
             dtype=NP_REAL_DTYPE,
         ),
         eig_sum_eps=np.asarray(EIG_SUM_EPS, dtype=NP_REAL_DTYPE),
@@ -1276,6 +1300,10 @@ def run_qfim(*, include_optimization_path: bool = True):
                 QFIM_EFFECTIVE_RANK_THRESHOLD,
                 dtype=NP_REAL_DTYPE,
             ),
+            participation_effective_rank_threshold=np.asarray(
+                QFIM_EFFECTIVE_RANK_THRESHOLD,
+                dtype=NP_REAL_DTYPE,
+            ),
             participation_effective_rank_eps=np.asarray(
                 PARTICIPATION_EFFECTIVE_RANK_EPS,
                 dtype=NP_REAL_DTYPE,
@@ -1319,6 +1347,10 @@ def run_qfim(*, include_optimization_path: bool = True):
                 dtype=NP_INT_DTYPE,
             ),
             qfim_effective_rank_threshold=np.asarray(
+                QFIM_EFFECTIVE_RANK_THRESHOLD,
+                dtype=NP_REAL_DTYPE,
+            ),
+            participation_effective_rank_threshold=np.asarray(
                 QFIM_EFFECTIVE_RANK_THRESHOLD,
                 dtype=NP_REAL_DTYPE,
             ),
@@ -1640,17 +1672,27 @@ def run_qfim(*, include_optimization_path: bool = True):
             )
             trace = np.sum(eigs, axis=2)
             frobenius_norm_sq = np.sum(eigs * eigs, axis=2)
+            active = eigs > float(QFIM_EFFECTIVE_RANK_THRESHOLD)
+            participation_eigs = np.where(
+                active,
+                eigs,
+                NP_REAL_DTYPE(0.0),
+            )
+            participation_trace = np.sum(participation_eigs, axis=2)
+            participation_frobenius_norm_sq = np.sum(
+                participation_eigs * participation_eigs,
+                axis=2,
+            )
             participation_rank = np.zeros_like(trace)
             np.divide(
-                trace * trace,
-                frobenius_norm_sq,
+                participation_trace * participation_trace,
+                participation_frobenius_norm_sq,
                 out=participation_rank,
                 where=(
-                    frobenius_norm_sq
+                    participation_frobenius_norm_sq
                     > float(PARTICIPATION_EFFECTIVE_RANK_EPS)
                 ),
             )
-            active = eigs > float(QFIM_EFFECTIVE_RANK_THRESHOLD)
             largest_eigenvalue = np.max(eigs, axis=2)
             smallest_active_eigenvalue = np.min(
                 np.where(active, eigs, np.inf),
@@ -1729,6 +1771,10 @@ def run_qfim(*, include_optimization_path: bool = True):
                 QFIM_EFFECTIVE_RANK_THRESHOLD,
                 dtype=NP_REAL_DTYPE,
             ),
+            participation_effective_rank_threshold=np.asarray(
+                QFIM_EFFECTIVE_RANK_THRESHOLD,
+                dtype=NP_REAL_DTYPE,
+            ),
             participation_effective_rank_eps=np.asarray(
                 PARTICIPATION_EFFECTIVE_RANK_EPS,
                 dtype=NP_REAL_DTYPE,
@@ -1743,6 +1789,10 @@ def run_qfim(*, include_optimization_path: bool = True):
             keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
             state_label=np.asarray(keep_label_5),
             qfim_effective_rank_threshold=np.asarray(
+                QFIM_EFFECTIVE_RANK_THRESHOLD,
+                dtype=NP_REAL_DTYPE,
+            ),
+            participation_effective_rank_threshold=np.asarray(
                 QFIM_EFFECTIVE_RANK_THRESHOLD,
                 dtype=NP_REAL_DTYPE,
             ),
