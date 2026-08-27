@@ -3544,119 +3544,6 @@ def save_qfim_eigs_by_index_colored_by_layer(
     save_fig(fig, ax, outpath, outside_legend=True)
 
 
-def plot_qfim_rank_vs_layers_random_points(
-    rank_by_layer: dict,
-    layers,
-    *,
-    title: str,
-    outpath: str,
-    rank_threshold: Optional[float] = None,
-    ylabel: Optional[str] = None,
-    upper_bound: Optional[int] = None,
-) -> None:
-    """Plot random-point QFIM rank-like samples and their summary."""
-    valid_layers = [
-        int(L)
-        for L in layers
-        if rank_by_layer.get(int(L)) is not None
-    ]
-    if not valid_layers:
-        return
-
-    samples_by_layer = []
-    for L in valid_layers:
-        values = np.asarray(
-            rank_by_layer[L],
-            dtype=NP_REAL_DTYPE,
-        ).reshape(-1)
-        values = values[np.isfinite(values)]
-        if values.size == 0:
-            raise ValueError(f"QFIM rank samples are empty for L={L}.")
-        samples_by_layer.append(values)
-
-    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
-    means = np.asarray(
-        [np.mean(values) for values in samples_by_layer],
-        dtype=NP_REAL_DTYPE,
-    )
-    sems = np.asarray(
-        [
-            0.0
-            if values.size <= 1
-            else np.std(values, ddof=1) / np.sqrt(values.size)
-            for values in samples_by_layer
-        ],
-        dtype=NP_REAL_DTYPE,
-    )
-    minima = np.asarray(
-        [np.min(values) for values in samples_by_layer],
-        dtype=NP_REAL_DTYPE,
-    )
-    maxima = np.asarray(
-        [np.max(values) for values in samples_by_layer],
-        dtype=NP_REAL_DTYPE,
-    )
-
-    fig, ax = new_fig_ax()
-    for L, values in zip(valid_layers, samples_by_layer):
-        ax.scatter(
-            np.full(values.shape, L, dtype=NP_REAL_DTYPE),
-            values,
-            s=16.0,
-            facecolors="none",
-            edgecolors="C0",
-            linewidths=0.7,
-            alpha=0.35,
-            rasterized=True,
-        )
-    ax.fill_between(
-        x,
-        minima,
-        maxima,
-        color="C1",
-        alpha=0.15,
-        label="Min-max range",
-    )
-    ax.errorbar(
-        x,
-        means,
-        yerr=sems,
-        color="C0",
-        marker="o",
-        linestyle="-",
-        linewidth=1.5,
-        markersize=4.8,
-        capsize=3.0,
-        label=r"Mean $\pm$ SEM",
-    )
-    if upper_bound is not None:
-        ax.axhline(
-            int(upper_bound),
-            color="black",
-            linestyle="--",
-            linewidth=1.2,
-            alpha=0.70,
-            label=f"Upper bound ({int(upper_bound)})",
-        )
-
-    if ylabel is None:
-        if rank_threshold is None:
-            raise ValueError(
-                "rank_threshold is required when ylabel is not supplied."
-            )
-        threshold_label = f"{float(rank_threshold):.0e}"
-        ylabel = f"QFIM rank (eigenvalue > {threshold_label})"
-
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(L) for L in valid_layers])
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(frameon=True, framealpha=0.85)
-    save_fig(fig, ax, outpath)
-
-
 qfim_random_points_result_path = os.path.join(
     qfim_results_dir,
     f"qfim_random_points_{keep_key}.npz",
@@ -3673,12 +3560,6 @@ qfim_eigs_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     "eigs_desc",
     dtype=NP_REAL_DTYPE,
 )
-qfim_rank_reduced_0123_by_layer = _load_layer_arrays_from_npz(
-    qfim_random_points_results,
-    qfim_layer_list,
-    "rank",
-    dtype=NP_REAL_DTYPE,
-)
 qfim_eigsum_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     qfim_random_points_results,
     qfim_layer_list,
@@ -3691,28 +3572,6 @@ qfim_abs_entry_sum_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     "abs_entry_sum",
     dtype=NP_REAL_DTYPE,
 )
-
-if output_family == "dpqc_reset":
-    plot_qfim_rank_vs_layers_random_points(
-        qfim_rank_reduced_0123_by_layer,
-        qfim_layer_list,
-        title=(
-            f"QFIM rank at {NUM_QFIM_SAMPLES} random points "
-            f"({keep_label})"
-        ),
-        outpath=os.path.join(
-            qfim_fig_dir,
-            "qfim_rank_vs_layers_random_points_keep0123.pdf",
-        ),
-        rank_threshold=float(
-            np.asarray(
-                qfim_random_points_results[
-                    "qfim_effective_rank_threshold"
-                ]
-            ).item()
-        ),
-        upper_bound=28,
-    )
 
 for L in qfim_layer_list:
     save_qfim_eigs_by_index(
@@ -4850,91 +4709,111 @@ def _has_expected_participation_rank_threshold(
     return True
 
 
-def _finite_sample_mean_sem(samples):
+def _finite_sample_effective_rank_statistics(samples):
+    """Return mean, minimum, maximum, and SEM for finite sample values."""
     samples = np.asarray(samples, dtype=NP_REAL_DTYPE).reshape(-1)
     samples = samples[np.isfinite(samples)]
     sample_count = int(samples.size)
 
     if sample_count == 0:
-        return NP_REAL_DTYPE(np.nan), NP_REAL_DTYPE(np.nan)
+        nan = NP_REAL_DTYPE(np.nan)
+        return nan, nan, nan, nan
 
     mean = NP_REAL_DTYPE(np.mean(samples))
+    minimum = NP_REAL_DTYPE(np.min(samples))
+    maximum = NP_REAL_DTYPE(np.max(samples))
     sem = (
         NP_REAL_DTYPE(np.std(samples, ddof=1) / np.sqrt(sample_count))
         if sample_count > 1
         else NP_REAL_DTYPE(0.0)
     )
-    return mean, sem
+    return mean, minimum, maximum, sem
 
 
-def plot_qfim_threshold_vs_participation_random_points(
-    threshold_rank_by_layer: dict,
+def plot_qfim_participation_effective_rank_by_layer(
     participation_rank_by_layer: dict,
     layers,
     *,
     state_label: str,
     outpath: str,
 ) -> bool:
-    """Compare threshold rank with participation effective rank by layer."""
+    """Plot layerwise mean, extrema, and SEM of participation ranks."""
     valid_layers = [
         int(L)
         for L in layers
-        if int(L) in threshold_rank_by_layer
-        and int(L) in participation_rank_by_layer
+        if int(L) in participation_rank_by_layer
     ]
 
     if not valid_layers:
         _warn_skip_new_figure(
             "random-point effective-rank summary has no layer containing "
-            "both 'threshold_rank' and 'participation_rank'"
+            "'participation_rank'"
         )
         return False
 
     x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
-    threshold_stats = [
-        _finite_sample_mean_sem(threshold_rank_by_layer[L])
+    statistics = [
+        _finite_sample_effective_rank_statistics(participation_rank_by_layer[L])
         for L in valid_layers
     ]
-    participation_stats = [
-        _finite_sample_mean_sem(participation_rank_by_layer[L])
-        for L in valid_layers
-    ]
+    means = np.asarray([item[0] for item in statistics], dtype=NP_REAL_DTYPE)
+    minima = np.asarray([item[1] for item in statistics], dtype=NP_REAL_DTYPE)
+    maxima = np.asarray([item[2] for item in statistics], dtype=NP_REAL_DTYPE)
+    sems = np.asarray([item[3] for item in statistics], dtype=NP_REAL_DTYPE)
+    finite = (
+        np.isfinite(means)
+        & np.isfinite(minima)
+        & np.isfinite(maxima)
+        & np.isfinite(sems)
+    )
+
+    if not np.any(finite):
+        _warn_skip_new_figure(
+            "random-point participation-effective-rank summary has no "
+            "finite layer statistics"
+        )
+        return False
 
     fig, ax = new_fig_ax(outside_legend=False)
-    for stats, color, marker, label in (
-        (threshold_stats, "C0", "o", "Threshold rank"),
-        (
-            participation_stats,
-            "C1",
-            "s",
-            _QFIM_PARTICIPATION_RANK_LABEL,
-        ),
-    ):
-        means = np.asarray([item[0] for item in stats], dtype=NP_REAL_DTYPE)
-        sems = np.asarray([item[1] for item in stats], dtype=NP_REAL_DTYPE)
-        finite = np.isfinite(means) & np.isfinite(sems)
-
-        if not np.any(finite):
-            continue
-
-        ax.errorbar(
-            x[finite],
-            means[finite],
-            yerr=sems[finite],
-            marker=marker,
-            linestyle="-",
-            linewidth=1.2,
-            markersize=5.5,
-            capsize=3.0,
-            elinewidth=0.8,
-            color=color,
-            label=label,
-        )
+    ax.errorbar(
+        x[finite],
+        means[finite],
+        yerr=sems[finite],
+        marker="o",
+        linestyle="-",
+        linewidth=1.5,
+        markersize=5.5,
+        capsize=3.0,
+        elinewidth=0.9,
+        color="C0",
+        label=r"Mean $\pm$ SEM",
+        zorder=3,
+    )
+    ax.plot(
+        x[finite],
+        minima[finite],
+        marker="v",
+        linestyle="--",
+        linewidth=1.2,
+        markersize=5.0,
+        color="C2",
+        label="Minimum",
+    )
+    ax.plot(
+        x[finite],
+        maxima[finite],
+        marker="^",
+        linestyle="--",
+        linewidth=1.2,
+        markersize=5.0,
+        color="C3",
+        label="Maximum",
+    )
 
     ax.set_xlabel("Number of Layers")
-    ax.set_ylabel("QFIM rank / effective rank")
+    ax.set_ylabel(_QFIM_PARTICIPATION_RANK_LABEL)
     ax.set_title(
-        f"Threshold and participation QFIM ranks at random points "
+        f"QFIM participation effective rank over random parameter points "
         f"({state_label})"
     )
     ax.set_xticks(x)
@@ -5003,7 +4882,7 @@ def render_qfim_participation_effective_rank_figures(
     result_key: str,
     state_label: str,
 ) -> None:
-    """Load saved participation ranks and render random/path PDF figures."""
+    """Render layerwise participation-rank statistics at random points."""
     random_description = (
         f"{result_key} random-point participation-effective-rank summary"
     )
@@ -5025,101 +4904,21 @@ def render_qfim_participation_effective_rank_figures(
             description=random_description,
         )
         if random_layers is not None:
-            threshold_rank_by_layer = _load_layer_arrays_from_npz(
-                random_summary,
-                random_layers,
-                "threshold_rank",
-                dtype=NP_REAL_DTYPE,
-            )
             participation_rank_by_layer = _valid_participation_rank_arrays(
                 random_summary,
                 random_layers,
                 expected_ndim=1,
                 description=random_description,
             )
-            plot_qfim_threshold_vs_participation_random_points(
-                threshold_rank_by_layer,
+            plot_qfim_participation_effective_rank_by_layer(
                 participation_rank_by_layer,
                 random_layers,
                 state_label=state_label,
                 outpath=os.path.join(
                     qfim_effective_rank_dir,
-                    (
-                        "qfim_threshold_vs_participation_rank_"
-                        f"random_points_{result_key}.pdf"
-                    ),
-                ),
-            )
-            plot_qfim_rank_vs_layers_random_points(
-                participation_rank_by_layer,
-                random_layers,
-                title=(
-                    "QFIM participation effective rank at random points "
-                    f"({state_label})"
-                ),
-                outpath=os.path.join(
-                    qfim_effective_rank_dir,
                     f"qfim_participation_rank_random_points_{result_key}.pdf",
                 ),
-                ylabel=_QFIM_PARTICIPATION_RANK_LABEL,
             )
-
-    if not INCLUDE_OPTIMIZATION_PATH_QFIM:
-        return
-
-    path_description = (
-        f"{result_key} optimization-path participation-effective-rank summary"
-    )
-    path_summary_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_effective_rank_optimization_path_{result_key}.npz",
-    )
-    path_summary = _load_optional_npz_result(
-        path_summary_path,
-        description=path_description,
-    )
-    if path_summary is None:
-        return
-    if not _has_expected_participation_rank_threshold(
-        path_summary,
-        description=path_description,
-    ):
-        return
-
-    path_layers = _summary_layers_or_none(
-        path_summary,
-        description=path_description,
-    )
-    path_sample_iters = _summary_sample_iters_or_none(
-        path_summary,
-        description=path_description,
-    )
-    if path_layers is None or path_sample_iters is None:
-        return
-
-    participation_rank_history_by_layer = _valid_participation_rank_arrays(
-        path_summary,
-        path_layers,
-        expected_ndim=2,
-        description=path_description,
-    )
-    plot_qfim_trace_history_mean_by_layer(
-        participation_rank_history_by_layer,
-        path_layers,
-        path_sample_iters,
-        title=(
-            "QFIM participation effective rank along optimization path "
-            f"({state_label})"
-        ),
-        outpath=os.path.join(
-            qfim_effective_rank_dir,
-            f"qfim_participation_rank_history_{result_key}.pdf",
-        ),
-        ylabel=_QFIM_PARTICIPATION_RANK_LABEL,
-        metric_name="QFIM participation effective rank",
-        cmap=cmap,
-        log_scale=False,
-    )
 
 
 def render_qfim_keep01234_core_figures() -> None:
@@ -5166,38 +4965,6 @@ def render_qfim_keep01234_core_figures() -> None:
                 "abs_entry_sum",
                 dtype=NP_REAL_DTYPE,
             )
-            rank_by_layer = _load_layer_arrays_from_npz(
-                random_result,
-                random_layers,
-                "rank",
-                dtype=NP_REAL_DTYPE,
-            )
-
-            if output_family == "dpqc_reset":
-                plot_qfim_rank_vs_layers_random_points(
-                    rank_by_layer,
-                    random_layers,
-                    title=(
-                        f"QFIM rank at {num_random_samples} random points "
-                        f"({keep_label_5})"
-                    ),
-                    outpath=os.path.join(
-                        qfim_fig_dir,
-                        (
-                            "qfim_rank_vs_layers_random_points_"
-                            "keep01234.pdf"
-                        ),
-                    ),
-                    rank_threshold=float(
-                        np.asarray(
-                            random_result[
-                                "qfim_effective_rank_threshold"
-                            ]
-                        ).item()
-                    ),
-                    upper_bound=28,
-                )
-
             for L in random_layers:
                 if int(L) not in eigs_by_layer:
                     continue

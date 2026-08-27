@@ -8,7 +8,11 @@ saved VQE and random-point QFIM results below
 ``figs/dpqc_reset/h_<h_param>`` without recomputing either quantity.
 The shared QFIM figures include the participation effective rank
 ``(sum(lambda[lambda > 1e-12]))**2 / sum(lambda[lambda > 1e-12]**2)``
-saved by the compute stage.
+saved by the compute stage.  For each retained subsystem, the random-parameter
+figure uses the number of layers on the x-axis and shows the effective-rank
+mean with SEM error bars together with explicit minimum and maximum curves.
+Threshold rank and optimization-iteration effective-rank figures are not
+rendered.
 
 The plotting implementation is shared with ``DPQC_overparam_visualize.py``.
 It is launched in a separate Python process with the result family fixed to
@@ -82,7 +86,8 @@ def _parse_cli_args(
     parser = argparse.ArgumentParser(
         description=(
             "Visualize saved fixed-Rx(pi) reset-DPQC VQE and random-point "
-            "QFIM results without recomputation."
+            "QFIM results without recomputation, including layerwise "
+            "participation-effective-rank mean/min/max/SEM summaries."
         )
     )
     parser.add_argument(
