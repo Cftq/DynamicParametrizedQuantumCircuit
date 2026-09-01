@@ -8,6 +8,10 @@ saved .npz results under
 numerical figures without recomputing VQE or QFIM quantities. Circuit drawings
 are handled independently by
 ``unitary_pqc_measured_0_overparam_draw_circuits.py``.
+QFIM eigenvalue and Trace figures use the canonical unmasked spectra; Trace
+sums finite eigenvalues satisfying the inclusive fixed rank cutoff.
+Hessian output is limited to random-point rank and active-spectrum condition
+number summaries at that same fixed cutoff.
 
     python src/unitary_pqc/unitary_pqc_measured_0_overparam_visualize.py --h-param 0.1
 """
@@ -125,6 +129,22 @@ METRIC_COLORS = {
     "energy": "#E69F00",
 }
 STATISTIC_LINESTYLES = {"mean": "-"}
+
+QFIM_TRACE_EIGENVALUE_THRESHOLD = NP_REAL_DTYPE(
+    cfg.QFIM_EFFECTIVE_RANK_THRESHOLD
+)
+QFIM_EIGENVALUE_PLOT_EPS = NP_REAL_DTYPE(cfg.QFIM_EIG_PLOT_EPS)
+QFIM_KEEP_KEYS = ("keep0123", "keep01234")
+QFIM_KEEP_LABELS = {
+    "keep0123": "reduced keep=(0,1,2,3)",
+    "keep01234": "pure full state keep=(0,1,2,3,4)",
+}
+HESSIAN_RANDOM_SCHEMA_VERSION = int(upqc.HESSIAN_RANDOM_SCHEMA_VERSION)
+HESSIAN_RANK_THRESHOLD = NP_REAL_DTYPE(upqc.QFIM_EFFECTIVE_RANK_THRESHOLD)
+HESSIAN_RANK_DEFINITION = str(upqc.HESSIAN_RANK_DEFINITION)
+HESSIAN_CONDITION_NUMBER_DEFINITION = str(
+    upqc.HESSIAN_CONDITION_NUMBER_DEFINITION
+)
 
 
 def _load_npz_result_unchecked(inpath: str) -> dict:
@@ -748,12 +768,6 @@ def _plot_vqe_ground_truth_error_results() -> dict:
         outpath=os.path.join(energy_dir, "final_energy_error.pdf"),
         log_scale=False,
     )
-    _plot_final_energy_error_violin(
-        final_absolute_errors_by_layer,
-        layers,
-        outpath=os.path.join(energy_dir, "final_energy_error_logscale.pdf"),
-        log_scale=True,
-    )
     _plot_final_energy_error_beeswarm(
         final_absolute_errors_by_layer,
         layers,
@@ -831,6 +845,900 @@ def _plot_vqe_ground_truth_error_results() -> dict:
         only_threshold=1.0,
     )
     return success_statistics
+
+
+def _qfim_threshold_tex(threshold: float) -> str:
+    threshold = float(threshold)
+    if threshold <= 0.0:
+        return f"{threshold:g}"
+    exponent = int(np.floor(np.log10(threshold)))
+    mantissa = threshold / (10.0 ** exponent)
+    if np.isclose(mantissa, 1.0):
+        return rf"10^{{{exponent}}}"
+    return rf"{mantissa:g}\times 10^{{{exponent}}}"
+
+
+QFIM_TRACE_THRESHOLD_TEX = _qfim_threshold_tex(
+    QFIM_TRACE_EIGENVALUE_THRESHOLD
+)
+QFIM_TRACE_THRESHOLD_FILE_TAG = (
+    f"ge_{float(QFIM_TRACE_EIGENVALUE_THRESHOLD):.12g}".replace("+", "")
+)
+QFIM_TRACE_YLABEL = (
+    rf"QFIM trace "
+    rf"($\sum_{{\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}}}\lambda_i$)"
+)
+
+
+def _required_archive_scalar(result: dict, key: str, result_path):
+    if key not in result:
+        raise KeyError(f"Missing {key!r} in {Path(result_path).resolve()}")
+    value = np.asarray(result[key])
+    if value.size != 1:
+        raise ValueError(
+            f"{key!r} must be scalar in {Path(result_path).resolve()}, "
+            f"got shape {value.shape}."
+        )
+    return value.reshape(-1)[0]
+
+
+def _validated_archive_layers(result: dict, result_path) -> list[int]:
+    if "layers" not in result:
+        raise KeyError(f"Missing 'layers' in {Path(result_path).resolve()}")
+    raw_layers = np.asarray(result["layers"])
+    if (
+        raw_layers.ndim != 1
+        or raw_layers.size == 0
+        or not np.issubdtype(raw_layers.dtype, np.integer)
+    ):
+        raise ValueError(
+            "QFIM archive layers must be a non-empty integer vector in "
+            f"{Path(result_path).resolve()}, got {raw_layers.shape} / "
+            f"{raw_layers.dtype}."
+        )
+    layers = [int(L) for L in raw_layers.tolist()]
+    if any(L <= 0 for L in layers) or len(set(layers)) != len(layers):
+        raise ValueError(
+            "QFIM archive layers must be positive and unique in "
+            f"{Path(result_path).resolve()}: {layers}."
+        )
+    return layers
+
+
+def _validated_real_qfim_array(value, *, key: str, result_path) -> np.ndarray:
+    raw = np.asarray(value)
+    if not np.issubdtype(raw.dtype, np.number) or np.iscomplexobj(raw):
+        raise TypeError(
+            f"{key!r} must be real numeric data in "
+            f"{Path(result_path).resolve()}, got dtype={raw.dtype}."
+        )
+    return np.asarray(raw, dtype=NP_REAL_DTYPE)
+
+
+def _validate_canonical_qfim_metadata(
+    result: dict,
+    result_path,
+    *,
+    keep_key: str,
+    analysis_kind: str,
+) -> tuple[list[int], int]:
+    archived_keep = str(
+        _required_archive_scalar(result, "keep_key", result_path)
+    )
+    if archived_keep != keep_key:
+        raise ValueError(
+            f"QFIM keep_key mismatch in {Path(result_path).resolve()}: "
+            f"{archived_keep!r} != {keep_key!r}."
+        )
+    archived_kind = str(
+        _required_archive_scalar(result, "analysis_kind", result_path)
+    )
+    if archived_kind != analysis_kind:
+        raise ValueError(
+            f"QFIM analysis_kind mismatch in {Path(result_path).resolve()}: "
+            f"{archived_kind!r} != {analysis_kind!r}."
+        )
+    eigenvalue_order = str(
+        _required_archive_scalar(result, "eigenvalue_order", result_path)
+    )
+    if eigenvalue_order != "descending":
+        raise ValueError(
+            "Canonical QFIM eigenvalues must be stored in descending order "
+            f"in {Path(result_path).resolve()}."
+        )
+    threshold_masked = bool(
+        _required_archive_scalar(
+            result,
+            "eigenvalues_threshold_masked",
+            result_path,
+        )
+    )
+    if threshold_masked:
+        raise ValueError(
+            "Canonical raw QFIM eigenvalues are required, but the archive "
+            f"is threshold-masked: {Path(result_path).resolve()}."
+        )
+    archived_threshold = float(
+        _required_archive_scalar(
+            result,
+            "qfim_effective_rank_threshold",
+            result_path,
+        )
+    )
+    if not math.isclose(
+        archived_threshold,
+        float(QFIM_TRACE_EIGENVALUE_THRESHOLD),
+        rel_tol=1e-12,
+        abs_tol=0.0,
+    ):
+        raise ValueError(
+            "QFIM rank-threshold mismatch in "
+            f"{Path(result_path).resolve()}: {archived_threshold} != "
+            f"{float(QFIM_TRACE_EIGENVALUE_THRESHOLD)}."
+        )
+    params_per_layer = int(
+        _required_archive_scalar(
+            result,
+            "num_params_per_layer",
+            result_path,
+        )
+    )
+    if params_per_layer <= 0 or params_per_layer != int(upqc.num_params_per_layer):
+        raise ValueError(
+            "QFIM num_params_per_layer mismatch in "
+            f"{Path(result_path).resolve()}: {params_per_layer} != "
+            f"{int(upqc.num_params_per_layer)}."
+        )
+    return _validated_archive_layers(result, result_path), params_per_layer
+
+
+def _qfim_trace_at_or_above_rank_threshold(
+    eigenvalues: np.ndarray,
+) -> np.ndarray:
+    """Threshold-sum a raw spectrum, returning NaN unless it is all finite."""
+    eigs = _validated_real_qfim_array(
+        eigenvalues,
+        key="QFIM eigenvalues",
+        result_path="<in-memory>",
+    )
+    if eigs.ndim == 0:
+        raise ValueError("QFIM eigenvalues must have an eigenvalue axis.")
+    finite_spectrum = np.all(np.isfinite(eigs), axis=-1)
+    selected = eigs >= QFIM_TRACE_EIGENVALUE_THRESHOLD
+    trace = np.sum(
+        np.where(selected, eigs, NP_REAL_DTYPE(0.0)),
+        axis=-1,
+        dtype=NP_REAL_DTYPE,
+    )
+    return np.where(
+        finite_spectrum,
+        trace,
+        NP_REAL_DTYPE(np.nan),
+    )
+
+
+def _load_canonical_random_qfim_eigenvalues(
+    keep_key: str,
+    *,
+    expected_layers,
+    expected_num_samples: int,
+) -> dict[int, np.ndarray]:
+    result_path = os.path.join(
+        upqc.qfim_results_dir,
+        f"qfim_random_points_{keep_key}.npz",
+    )
+    result = _load_required_result(
+        result_path,
+        require_h_param=True,
+        require_variant=True,
+    )
+    layers, params_per_layer = _validate_canonical_qfim_metadata(
+        result,
+        result_path,
+        keep_key=keep_key,
+        analysis_kind="random_points",
+    )
+    expected_layers = [int(L) for L in expected_layers]
+    if layers != expected_layers:
+        raise ValueError(
+            f"Canonical random-point QFIM layers differ for {keep_key}: "
+            f"{layers} != {expected_layers}."
+        )
+    num_samples = int(
+        _required_archive_scalar(result, "num_qfim_samples", result_path)
+    )
+    if num_samples != int(expected_num_samples):
+        raise ValueError(
+            f"Canonical random-point QFIM sample count differs for "
+            f"{keep_key}: {num_samples} != {int(expected_num_samples)}."
+        )
+
+    eigs_by_layer = {}
+    for L in layers:
+        key = f"L{L}_eigs_desc"
+        if key not in result:
+            raise KeyError(f"Missing {key!r} in {Path(result_path).resolve()}")
+        eigs = _validated_real_qfim_array(
+            result[key],
+            key=key,
+            result_path=result_path,
+        )
+        expected_shape = (num_samples, params_per_layer * L)
+        if eigs.ndim != 2 or eigs.shape != expected_shape:
+            raise ValueError(
+                f"Canonical random-point QFIM shape mismatch for {key}: "
+                f"expected {expected_shape}, got {eigs.shape}."
+            )
+        if not np.all(np.isfinite(eigs)):
+            raise ValueError(
+                f"Canonical random-point QFIM eigenvalues are not all "
+                f"finite for {key} in {Path(result_path).resolve()}."
+            )
+        eigs_by_layer[L] = eigs
+    return eigs_by_layer
+
+
+def _load_canonical_qfim_eigenvalue_history(
+    keep_key: str,
+    *,
+    expected_layers,
+    expected_sample_iters,
+    expected_num_runs: int,
+) -> tuple[dict[int, np.ndarray], np.ndarray]:
+    result_path = os.path.join(
+        upqc.qfim_results_dir,
+        f"qfim_eigs_history_optimization_path_{keep_key}.npz",
+    )
+    result = _load_required_result(
+        result_path,
+        require_h_param=True,
+        require_variant=True,
+    )
+    layers, params_per_layer = _validate_canonical_qfim_metadata(
+        result,
+        result_path,
+        keep_key=keep_key,
+        analysis_kind="optimization_path",
+    )
+    expected_layers = [int(L) for L in expected_layers]
+    if layers != expected_layers:
+        raise ValueError(
+            f"Canonical optimization-path QFIM layers differ for {keep_key}: "
+            f"{layers} != {expected_layers}."
+        )
+
+    if "sample_iters" not in result:
+        raise KeyError(f"Missing 'sample_iters' in {Path(result_path).resolve()}")
+    raw_sample_iters = np.asarray(result["sample_iters"])
+    if raw_sample_iters.ndim != 1 or not np.issubdtype(
+        raw_sample_iters.dtype,
+        np.integer,
+    ):
+        raise ValueError(
+            "Canonical QFIM sample_iters must be a one-dimensional integer "
+            f"array in {Path(result_path).resolve()}."
+        )
+    sample_iters = np.asarray(raw_sample_iters, dtype=NP_INT_DTYPE)
+    expected_sample_iters = np.asarray(
+        expected_sample_iters,
+        dtype=NP_INT_DTYPE,
+    )
+    if not np.array_equal(sample_iters, expected_sample_iters):
+        raise ValueError(
+            f"Canonical optimization-path sample_iters differ for {keep_key}: "
+            f"{sample_iters.tolist()} != {expected_sample_iters.tolist()}."
+        )
+    num_runs = int(_required_archive_scalar(result, "num_runs", result_path))
+    if num_runs != int(expected_num_runs):
+        raise ValueError(
+            f"Canonical optimization-path run count differs for {keep_key}: "
+            f"{num_runs} != {int(expected_num_runs)}."
+        )
+
+    eigs_by_layer = {}
+    for L in layers:
+        key = f"L{L}"
+        if key not in result:
+            raise KeyError(f"Missing {key!r} in {Path(result_path).resolve()}")
+        eigs = _validated_real_qfim_array(
+            result[key],
+            key=key,
+            result_path=result_path,
+        )
+        expected_shape = (
+            num_runs,
+            sample_iters.size,
+            params_per_layer * L,
+        )
+        if eigs.ndim != 3 or eigs.shape != expected_shape:
+            raise ValueError(
+                f"Canonical optimization-path QFIM shape mismatch for {key}: "
+                f"expected {expected_shape}, got {eigs.shape}."
+            )
+        if not np.all(np.isfinite(eigs)):
+            raise ValueError(
+                f"Canonical optimization-path QFIM eigenvalues are not all "
+                f"finite for {key} in {Path(result_path).resolve()}."
+            )
+        eigs_by_layer[L] = eigs
+    return eigs_by_layer, sample_iters
+
+
+def _eigenvalue_index_ticks(n_params: int, max_ticks: int = 11) -> np.ndarray:
+    n_params = int(n_params)
+    if n_params <= 0:
+        return np.asarray([], dtype=NP_INT_DTYPE)
+    if n_params <= int(max_ticks):
+        return np.arange(1, n_params + 1, dtype=NP_INT_DTYPE)
+    ticks = np.rint(
+        np.linspace(1, n_params, num=int(max_ticks))
+    ).astype(NP_INT_DTYPE)
+    ticks[0], ticks[-1] = 1, n_params
+    return np.unique(ticks)
+
+
+def _qfim_eigenvalues_for_log_plot(eigs: np.ndarray) -> np.ndarray:
+    eigs = np.asarray(eigs, dtype=NP_REAL_DTYPE)
+    return np.where(
+        np.isfinite(eigs) & (eigs > 0.0),
+        eigs,
+        QFIM_EIGENVALUE_PLOT_EPS,
+    )
+
+
+def _plot_qfim_eigenvalues_by_index(
+    eigs: np.ndarray,
+    *,
+    title: str,
+    outpath: str,
+    color=METRIC_COLORS["qfim"],
+) -> None:
+    eigs = np.asarray(eigs, dtype=NP_REAL_DTYPE)
+    if eigs.ndim != 2 or eigs.shape[0] == 0 or eigs.shape[1] == 0:
+        raise ValueError(
+            "Random-point QFIM eigenvalues must have shape "
+            "(num_samples, num_params>0)."
+        )
+    eigs_plot = _qfim_eigenvalues_for_log_plot(eigs)
+    num_params = int(eigs.shape[-1])
+    indices = np.broadcast_to(
+        np.arange(1, num_params + 1, dtype=NP_REAL_DTYPE),
+        eigs.shape,
+    )
+
+    upqc.new_prx_figure(width="double")
+    ax = plt.gca()
+    ax.scatter(
+        indices.reshape(-1),
+        eigs_plot.reshape(-1),
+        s=12.0,
+        color=color,
+        alpha=0.50,
+        edgecolors="black",
+        linewidths=0.15,
+        rasterized=True,
+    )
+    ax.axhline(
+        float(QFIM_TRACE_EIGENVALUE_THRESHOLD),
+        color="C3",
+        linestyle="--",
+        linewidth=1.0,
+        label=rf"rank threshold $\lambda_i={QFIM_TRACE_THRESHOLD_TEX}$",
+    )
+    ticks = _eigenvalue_index_ticks(num_params)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([str(int(tick)) for tick in ticks])
+    ax.set_xlim(0.5, num_params + 0.5)
+    ax.set_yscale("log")
+    ax.set_xlabel("Eigenvalue index")
+    ax.set_ylabel("QFIM eigenvalue")
+    ax.set_title(title)
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="best", frameon=True, framealpha=0.9)
+    Path(outpath).parent.mkdir(parents=True, exist_ok=True)
+    upqc.save_current_figure(outpath, outside_legend=False)
+
+
+def _plot_qfim_eigenvalues_by_index_all_layers(
+    eigs_by_layer: dict,
+    layers,
+    *,
+    title: str,
+    outpath: str,
+) -> None:
+    valid_layers = [
+        int(L) for L in layers if eigs_by_layer.get(int(L)) is not None
+    ]
+    if not valid_layers:
+        return
+    max_num_params = max(
+        int(np.asarray(eigs_by_layer[L]).shape[-1]) for L in valid_layers
+    )
+    cmap = matplotlib.colormaps.get_cmap("viridis")
+    upqc.new_prx_figure(width="double")
+    ax = plt.gca()
+    for layer_index, L in enumerate(valid_layers):
+        eigs = np.asarray(eigs_by_layer[L], dtype=NP_REAL_DTYPE)
+        if eigs.ndim != 2 or eigs.shape[-1] == 0:
+            raise ValueError(
+                f"Random-point QFIM eigenvalues for L={L} must be 2D."
+            )
+        eigs_plot = _qfim_eigenvalues_for_log_plot(eigs)
+        num_params = int(eigs.shape[-1])
+        indices = np.broadcast_to(
+            np.arange(1, num_params + 1, dtype=NP_REAL_DTYPE),
+            eigs.shape,
+        )
+        color = cmap(layer_index / max(len(valid_layers) - 1, 1))
+        ax.scatter(
+            indices.reshape(-1),
+            eigs_plot.reshape(-1),
+            s=9.0,
+            color=color,
+            alpha=0.42,
+            edgecolors="black",
+            linewidths=0.12,
+            rasterized=True,
+            label=f"L={L}",
+        )
+    ax.axhline(
+        float(QFIM_TRACE_EIGENVALUE_THRESHOLD),
+        color="C3",
+        linestyle="--",
+        linewidth=1.0,
+        label=rf"rank threshold $\lambda_i={QFIM_TRACE_THRESHOLD_TEX}$",
+    )
+    ticks = _eigenvalue_index_ticks(max_num_params)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([str(int(tick)) for tick in ticks])
+    ax.set_xlim(0.5, max_num_params + 0.5)
+    ax.set_yscale("log")
+    ax.set_xlabel("Eigenvalue index")
+    ax.set_ylabel("QFIM eigenvalue")
+    ax.set_title(title)
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    Path(outpath).parent.mkdir(parents=True, exist_ok=True)
+    upqc.save_current_figure(outpath, outside_legend=True)
+
+
+def _finite_mean_sem(values) -> tuple[float, float]:
+    values = np.asarray(values, dtype=NP_REAL_DTYPE).reshape(-1)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return float("nan"), float("nan")
+    mean = float(np.mean(values))
+    sem = (
+        0.0
+        if values.size < 2
+        else float(np.std(values, ddof=1) / np.sqrt(values.size))
+    )
+    return mean, sem
+
+
+def _load_hessian_random_metrics(
+    result_path,
+    *,
+    expected_layers,
+    expected_num_samples: int,
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
+    """Validate and load only the two canonical random-point metrics."""
+    result = _load_required_result(
+        result_path,
+        require_h_param=True,
+        require_variant=True,
+    )
+    required_metadata = {
+        "schema_version",
+        "analysis_kind",
+        "ansatz",
+        "measurement_outcome",
+        "h_param",
+        "layers",
+        "num_hessian_samples",
+        "hessian_sample_seed_base",
+        "hessian_rank_threshold",
+        "hessian_rank_definition",
+        "hessian_condition_number_definition",
+        "num_params_per_layer",
+        "analysis_batch_size",
+    }
+    missing = sorted(required_metadata.difference(result))
+    if missing:
+        raise KeyError(
+            f"Hessian archive {Path(result_path).resolve()} is missing: "
+            + ", ".join(missing)
+        )
+    schema_version = int(
+        _required_archive_scalar(result, "schema_version", result_path)
+    )
+    if schema_version != HESSIAN_RANDOM_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported Hessian schema_version={schema_version}; expected "
+            f"{HESSIAN_RANDOM_SCHEMA_VERSION} in {Path(result_path).resolve()}."
+        )
+    analysis_kind = str(
+        _required_archive_scalar(result, "analysis_kind", result_path)
+    )
+    if analysis_kind != "random_points":
+        raise ValueError(
+            f"Hessian analysis_kind must be 'random_points' in "
+            f"{Path(result_path).resolve()}."
+        )
+    rank_definition = str(
+        _required_archive_scalar(
+            result,
+            "hessian_rank_definition",
+            result_path,
+        )
+    )
+    if rank_definition != HESSIAN_RANK_DEFINITION:
+        raise ValueError(
+            f"Unexpected Hessian rank definition: {rank_definition!r}."
+        )
+    condition_definition = str(
+        _required_archive_scalar(
+            result,
+            "hessian_condition_number_definition",
+            result_path,
+        )
+    )
+    if condition_definition != HESSIAN_CONDITION_NUMBER_DEFINITION:
+        raise ValueError(
+            "Unexpected Hessian condition-number definition: "
+            f"{condition_definition!r}."
+        )
+    layers = _validated_archive_layers(result, result_path)
+    expected_layers = [int(L) for L in expected_layers]
+    if layers != expected_layers:
+        raise ValueError(
+            f"Hessian layers differ from QFIM layers: {layers} != "
+            f"{expected_layers}."
+        )
+    num_samples = int(
+        _required_archive_scalar(
+            result,
+            "num_hessian_samples",
+            result_path,
+        )
+    )
+    if num_samples != int(expected_num_samples):
+        raise ValueError(
+            f"Hessian sample count differs from QFIM: {num_samples} != "
+            f"{int(expected_num_samples)}."
+        )
+    seed_base = int(
+        _required_archive_scalar(
+            result,
+            "hessian_sample_seed_base",
+            result_path,
+        )
+    )
+    if seed_base != int(upqc.QFIM_SAMPLE_SEED_BASE):
+        raise ValueError(
+            f"Hessian sample seed differs from QFIM: {seed_base} != "
+            f"{int(upqc.QFIM_SAMPLE_SEED_BASE)}."
+        )
+    threshold = float(
+        _required_archive_scalar(
+            result,
+            "hessian_rank_threshold",
+            result_path,
+        )
+    )
+    if not math.isclose(
+        threshold,
+        float(HESSIAN_RANK_THRESHOLD),
+        rel_tol=1e-12,
+        abs_tol=0.0,
+    ):
+        raise ValueError(
+            f"Hessian rank threshold mismatch: {threshold} != "
+            f"{float(HESSIAN_RANK_THRESHOLD)}."
+        )
+    analysis_batch_size = int(
+        _required_archive_scalar(
+            result,
+            "analysis_batch_size",
+            result_path,
+        )
+    )
+    if analysis_batch_size <= 0:
+        raise ValueError("Hessian analysis_batch_size must be positive.")
+
+    rank_by_layer = {}
+    condition_by_layer = {}
+    for L in layers:
+        rank_key = f"L{L}_rank"
+        condition_key = f"L{L}_condition_number"
+        if rank_key not in result or condition_key not in result:
+            raise KeyError(
+                f"Missing {rank_key!r} or {condition_key!r} in "
+                f"{Path(result_path).resolve()}."
+            )
+        raw_rank = np.asarray(result[rank_key])
+        if not np.issubdtype(raw_rank.dtype, np.integer):
+            raise TypeError(f"{rank_key!r} must contain integer ranks.")
+        ranks = np.asarray(raw_rank, dtype=NP_INT_DTYPE)
+        conditions = _validated_real_qfim_array(
+            result[condition_key],
+            key=condition_key,
+            result_path=result_path,
+        )
+        expected_shape = (num_samples,)
+        if ranks.shape != expected_shape or conditions.shape != expected_shape:
+            raise ValueError(
+                f"Hessian metric shape mismatch for L={L}: "
+                f"rank={ranks.shape}, condition={conditions.shape}, "
+                f"expected={expected_shape}."
+            )
+        max_rank = int(upqc.num_params_per_layer) * int(L)
+        if np.any((ranks < 0) | (ranks > max_rank)):
+            raise ValueError(f"Hessian ranks are out of range for L={L}.")
+        rank_zero = ranks == 0
+        if np.any(~np.isnan(conditions[rank_zero])):
+            raise ValueError(
+                f"Hessian condition number must be NaN when rank is zero "
+                f"for L={L}."
+            )
+        active_conditions = conditions[~rank_zero]
+        if np.any(~np.isfinite(active_conditions)) or np.any(
+            active_conditions < NP_REAL_DTYPE(1.0 - 1e-12)
+        ):
+            raise ValueError(
+                f"Hessian condition numbers must be finite and >= 1 when "
+                f"rank is positive for L={L}."
+            )
+        rank_by_layer[L] = ranks
+        condition_by_layer[L] = conditions
+    return rank_by_layer, condition_by_layer
+
+
+def _plot_hessian_random_summary_by_layer(
+    values_by_layer: dict,
+    layers,
+    *,
+    ylabel: str,
+    title: str,
+    outpath: str,
+) -> None:
+    """Plot maximum, mean +/- SEM, and minimum across random points."""
+    valid_layers, maxima, means, sems, minima = [], [], [], [], []
+    for L in layers:
+        L = int(L)
+        if L not in values_by_layer:
+            continue
+        values = np.asarray(values_by_layer[L], dtype=NP_REAL_DTYPE)
+        finite = values[np.isfinite(values)]
+        mean, sem = _finite_mean_sem(finite)
+        valid_layers.append(L)
+        maxima.append(
+            float(np.max(finite)) if finite.size else float("nan")
+        )
+        means.append(mean)
+        sems.append(sem)
+        minima.append(
+            float(np.min(finite)) if finite.size else float("nan")
+        )
+    if not valid_layers:
+        raise ValueError("No Hessian layers are available to plot.")
+
+    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
+    upqc.new_prx_figure(width="double")
+    ax = plt.gca()
+    color = METRIC_COLORS["hessian"]
+    ax.plot(
+        x,
+        maxima,
+        marker="^",
+        linestyle="--",
+        linewidth=1.2,
+        color=color,
+        label="Maximum",
+    )
+    ax.errorbar(
+        x,
+        means,
+        yerr=sems,
+        marker="o",
+        linestyle="-",
+        linewidth=1.5,
+        capsize=3.0,
+        color=color,
+        label=r"Mean $\pm$ SEM",
+        zorder=3,
+    )
+    ax.plot(
+        x,
+        minima,
+        marker="v",
+        linestyle=":",
+        linewidth=1.2,
+        color=color,
+        label="Minimum",
+    )
+    ax.set_xlabel("Number of Layers")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(L) for L in valid_layers])
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="best", frameon=True, framealpha=0.9)
+    Path(outpath).parent.mkdir(parents=True, exist_ok=True)
+    upqc.save_current_figure(outpath, outside_legend=False)
+
+
+def _finite_mean_sem_by_column(values) -> tuple[np.ndarray, np.ndarray]:
+    values = np.asarray(values, dtype=NP_REAL_DTYPE)
+    if values.ndim != 2:
+        raise ValueError("QFIM Trace histories must be two-dimensional.")
+    means = np.full(values.shape[1], np.nan, dtype=NP_REAL_DTYPE)
+    sems = np.full(values.shape[1], np.nan, dtype=NP_REAL_DTYPE)
+    for column in range(values.shape[1]):
+        means[column], sems[column] = _finite_mean_sem(values[:, column])
+    return means, sems
+
+
+def _plot_random_qfim_trace_by_layer(
+    trace_by_layer: dict,
+    layers,
+    *,
+    keep_label: str,
+    num_samples: int,
+    outpath: str,
+) -> None:
+    valid_layers, maxima, means, sems = [], [], [], []
+    for L in layers:
+        values = np.asarray(trace_by_layer[int(L)], dtype=NP_REAL_DTYPE)
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size == 0:
+            continue
+        mean, sem = _finite_mean_sem(finite_values)
+        valid_layers.append(int(L))
+        maxima.append(float(np.max(finite_values)))
+        means.append(mean)
+        sems.append(sem)
+    if not valid_layers:
+        return
+
+    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
+    upqc.new_prx_figure(width="double")
+    ax = plt.gca()
+    ax.plot(
+        x,
+        maxima,
+        marker="o",
+        linewidth=1.3,
+        color="C0",
+        label="Maximum",
+    )
+    ax.errorbar(
+        x,
+        means,
+        yerr=sems,
+        marker="s",
+        linewidth=1.3,
+        capsize=3.0,
+        color="C1",
+        label=r"Mean $\pm$ SEM",
+    )
+    ax.set_xlabel("Number of Layers")
+    ax.set_ylabel(QFIM_TRACE_YLABEL)
+    ax.set_title(
+        f"QFIM trace at {int(num_samples)} random parameter points "
+        rf"($\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}$, {keep_label})"
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(L) for L in valid_layers])
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="best", frameon=True, framealpha=0.9)
+    Path(outpath).parent.mkdir(parents=True, exist_ok=True)
+    upqc.save_current_figure(outpath, outside_legend=False)
+
+
+def _plot_qfim_trace_history_by_iteration(
+    trace_by_layer: dict,
+    layers,
+    sample_iters,
+    *,
+    keep_label: str,
+    outpath: str,
+) -> None:
+    sample_iters = np.asarray(sample_iters, dtype=NP_INT_DTYPE)
+    cmap = matplotlib.colormaps.get_cmap("viridis")
+    valid_layers = [
+        int(L) for L in layers if trace_by_layer.get(int(L)) is not None
+    ]
+    if not valid_layers:
+        return
+    upqc.new_prx_figure(width="double")
+    ax = plt.gca()
+    for layer_index, L in enumerate(valid_layers):
+        values = np.asarray(trace_by_layer[L], dtype=NP_REAL_DTYPE)
+        if values.ndim != 2 or values.shape[1] != sample_iters.size:
+            raise ValueError(
+                f"QFIM Trace history shape mismatch for L={L}: "
+                f"{values.shape} vs {sample_iters.size} iterations."
+            )
+        means, sems = _finite_mean_sem_by_column(values)
+        finite = np.isfinite(means)
+        if not np.any(finite):
+            continue
+        color = cmap(layer_index / max(len(valid_layers) - 1, 1))
+        ax.errorbar(
+            sample_iters[finite],
+            means[finite],
+            yerr=sems[finite],
+            marker="o",
+            linewidth=1.2,
+            markersize=4.2,
+            capsize=2.5,
+            color=color,
+            label=f"L={L}",
+        )
+    ax.set_xlabel("Iterations")
+    ax.set_ylabel(rf"Mean {QFIM_TRACE_YLABEL}")
+    ax.set_title(
+        "Mean QFIM trace along the optimization path "
+        rf"($\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}$, {keep_label})"
+    )
+    ax.set_xticks(sample_iters)
+    ax.set_xticklabels(
+        [str(int(iteration)) for iteration in sample_iters],
+        rotation=45,
+        ha="right",
+    )
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    Path(outpath).parent.mkdir(parents=True, exist_ok=True)
+    upqc.save_current_figure(outpath, outside_legend=True)
+
+
+def _plot_flattened_qfim_trace_by_layer(
+    trace_by_layer: dict,
+    layers,
+    *,
+    keep_label: str,
+    outpath: str,
+) -> None:
+    valid_layers, means, sems = [], [], []
+    for L in layers:
+        values = trace_by_layer.get(int(L))
+        if values is None:
+            continue
+        mean, sem = _finite_mean_sem(values)
+        if not np.isfinite(mean):
+            continue
+        valid_layers.append(int(L))
+        means.append(mean)
+        sems.append(sem)
+    if not valid_layers:
+        return
+    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
+    upqc.new_prx_figure(width="double")
+    ax = plt.gca()
+    ax.errorbar(
+        x,
+        means,
+        yerr=sems,
+        marker="o",
+        linewidth=1.3,
+        capsize=3.0,
+        color=METRIC_COLORS["qfim"],
+        label=r"Flattened mean $\pm$ SEM",
+    )
+    ax.set_xlabel("Number of Layers")
+    ax.set_ylabel(rf"Mean {QFIM_TRACE_YLABEL}")
+    ax.set_title(
+        "Flattened optimization-path QFIM trace by layer "
+        rf"($\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}$, {keep_label})"
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(L) for L in valid_layers])
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="best", frameon=True, framealpha=0.9)
+    Path(outpath).parent.mkdir(parents=True, exist_ok=True)
+    upqc.save_current_figure(outpath, outside_legend=False)
 
 
 def _plot_spectral_count_by_layer(
@@ -989,28 +1897,34 @@ def _load_random_qfim_results() -> None:
         np.asarray(qfim_result["pure_qfim_layer_threshold"]).item()
     )
 
+    # Keep the historical combined archive only for metadata and theta
+    # samples.  Its spectra are threshold-masked and therefore cannot support
+    # the inclusive Trace definition at the exact threshold boundary.
     upqc.qfim_random_thetas_by_layer = {}
-    upqc.qfim_eigs_reduced_by_layer = {}
-    upqc.qfim_eigs_pure_by_layer = {}
 
     for L in layers:
         upqc.qfim_random_thetas_by_layer[L] = np.asarray(
             qfim_result[f"L{L}_theta"],
             dtype=NP_REAL_DTYPE,
         )
-        upqc.qfim_eigs_reduced_by_layer[L] = np.asarray(
-            qfim_result[f"L{L}_eigs_reduced_desc"],
-            dtype=NP_REAL_DTYPE,
-        )
 
-        pure_eigs_key = f"L{L}_eigs_pure_desc"
-        if pure_eigs_key in qfim_result:
-            upqc.qfim_eigs_pure_by_layer[L] = np.asarray(
-                qfim_result[pure_eigs_key],
-                dtype=NP_REAL_DTYPE,
-            )
-        else:
-            upqc.qfim_eigs_pure_by_layer[L] = None
+    upqc.qfim_eigs_by_keep = {
+        keep_key: _load_canonical_random_qfim_eigenvalues(
+            keep_key,
+            expected_layers=layers,
+            expected_num_samples=upqc.NUM_QFIM_SAMPLES,
+        )
+        for keep_key in QFIM_KEEP_KEYS
+    }
+    upqc.qfim_eigs_reduced_by_layer = upqc.qfim_eigs_by_keep["keep0123"]
+    upqc.qfim_eigs_pure_by_layer = upqc.qfim_eigs_by_keep["keep01234"]
+    upqc.qfim_trace_random_by_keep = {
+        keep_key: {
+            L: _qfim_trace_at_or_above_rank_threshold(eigs)
+            for L, eigs in eigs_by_layer.items()
+        }
+        for keep_key, eigs_by_layer in upqc.qfim_eigs_by_keep.items()
+    }
 
     hs_path = os.path.join(
         upqc.hs_results_dir,
@@ -1038,46 +1952,78 @@ def _load_random_qfim_results() -> None:
         upqc.hessian_results_dir,
         "hessian_random_points.npz",
     )
-    upqc.hessian_rank_by_layer = {}
-    upqc.hessian_eigs_by_layer = {}
-    upqc.hessian_thresh_by_layer = {}
-    upqc.hessian_trace_by_layer = {}
-    upqc.hessian_abs_eigsum_by_layer = {}
-
-    if os.path.exists(hessian_path):
-        hessian_result = _load_required_result(hessian_path)
-
-        for L in layers:
-            upqc.hessian_rank_by_layer[L] = np.asarray(
-                hessian_result[f"L{L}_rank"],
-                dtype=NP_INT_DTYPE,
-            )
-            upqc.hessian_eigs_by_layer[L] = np.asarray(
-                hessian_result[f"L{L}_eigs_desc"],
-                dtype=NP_REAL_DTYPE,
-            )
-            upqc.hessian_thresh_by_layer[L] = np.asarray(
-                hessian_result[f"L{L}_rank_threshold"],
-                dtype=NP_REAL_DTYPE,
-            )
-            upqc.hessian_trace_by_layer[L] = np.asarray(
-                hessian_result[f"L{L}_trace"],
-                dtype=NP_REAL_DTYPE,
-            )
-            upqc.hessian_abs_eigsum_by_layer[L] = np.asarray(
-                hessian_result[f"L{L}_abs_eigsum"],
-                dtype=NP_REAL_DTYPE,
-            )
+    (
+        upqc.hessian_rank_by_layer,
+        upqc.hessian_condition_by_layer,
+    ) = _load_hessian_random_metrics(
+        hessian_path,
+        expected_layers=layers,
+        expected_num_samples=upqc.NUM_QFIM_SAMPLES,
+    )
+    upqc.HESSIAN_RANK_THRESHOLD = float(HESSIAN_RANK_THRESHOLD)
 
 
 def _plot_random_qfim_results() -> None:
     hs_eigs_reduced_0123_dir = upqc.hs_eigs_reduced_0123_dir
-    hessian_eigs_dir = upqc.hessian_eigs_dir
-    hessian_rank_random_dir = upqc.hessian_rank_random_dir
+    qfim_trace_dir = os.path.join(upqc.qfim_fig_dir, "trace")
 
     os.makedirs(hs_eigs_reduced_0123_dir, exist_ok=True)
-    os.makedirs(hessian_eigs_dir, exist_ok=True)
-    os.makedirs(hessian_rank_random_dir, exist_ok=True)
+    os.makedirs(upqc.qfim_eigs_reduced_0123_dir, exist_ok=True)
+    os.makedirs(upqc.qfim_eigs_pure_dir, exist_ok=True)
+    os.makedirs(qfim_trace_dir, exist_ok=True)
+
+    qfim_keep_specs = (
+        (
+            "keep0123",
+            upqc.qfim_eigs_reduced_0123_dir,
+            "reduced_0123",
+        ),
+        (
+            "keep01234",
+            upqc.qfim_eigs_pure_dir,
+            "pure_full",
+        ),
+    )
+    for keep_key, eigs_dir, per_layer_tag in qfim_keep_specs:
+        eigs_by_layer = upqc.qfim_eigs_by_keep[keep_key]
+        keep_label = QFIM_KEEP_LABELS[keep_key]
+        for L in upqc.qfim_layer_list:
+            _plot_qfim_eigenvalues_by_index(
+                eigs_by_layer[L],
+                title=(
+                    f"QFIM eigenvalues at {upqc.NUM_QFIM_SAMPLES} random "
+                    f"points (L={L}, {keep_label})"
+                ),
+                outpath=os.path.join(
+                    eigs_dir,
+                    f"L{L}_{per_layer_tag}.pdf",
+                ),
+            )
+        _plot_qfim_eigenvalues_by_index_all_layers(
+            eigs_by_layer,
+            upqc.qfim_layer_list,
+            title=(
+                f"QFIM eigenvalues at {upqc.NUM_QFIM_SAMPLES} random "
+                f"points ({keep_label})"
+            ),
+            outpath=os.path.join(
+                upqc.qfim_eigs_dir,
+                f"qfim_eigs_by_index_layers_{keep_key}.pdf",
+            ),
+        )
+        _plot_random_qfim_trace_by_layer(
+            upqc.qfim_trace_random_by_keep[keep_key],
+            upqc.qfim_layer_list,
+            keep_label=keep_label,
+            num_samples=upqc.NUM_QFIM_SAMPLES,
+            outpath=os.path.join(
+                qfim_trace_dir,
+                (
+                    "qfim_trace_max_mean_sem_random_points_"
+                    f"{QFIM_TRACE_THRESHOLD_FILE_TAG}_{keep_key}.pdf"
+                ),
+            ),
+        )
 
     for L in upqc.qfim_layer_list:
         upqc.plot_style.save_eigenvalue_histograms_by_trial(
@@ -1111,40 +2057,34 @@ def _plot_random_qfim_results() -> None:
             condition_label="pure full state",
             color=METRIC_COLORS["hs"],
         )
-        if upqc.hessian_eigs_by_layer.get(L) is not None:
-            upqc._save_signed_eigs_scatterplot_by_index(
-                upqc.hessian_eigs_by_layer[L],
-                title=rf"Energy Hessian eigenvalues at {upqc.NUM_QFIM_SAMPLES} random points (L={L})",
-                outpath=os.path.join(hessian_eigs_dir, f"L{L}.pdf"),
-                rank_thresholds=upqc.hessian_thresh_by_layer[L],
-                ylabel="Energy Hessian eigenvalue",
-            )
-            upqc.plot_style.save_eigenvalue_histograms_by_trial(
-                upqc.hessian_eigs_by_layer[L],
-                outdir=os.path.join(
-                    hessian_eigs_dir,
-                    "histograms",
-                    "random_points",
-                    f"L{L}",
-                ),
-                matrix_tag="unitary_pqc_energy_hessian",
-                matrix_label="Energy Hessian",
-                num_layers=L,
-                context_tag="random",
-                context_label="random point",
-                color=METRIC_COLORS["hessian"],
-            )
-    if upqc.hessian_rank_by_layer:
-        upqc.plot_qfim_rank_max_by_layer(
-            upqc.hessian_rank_by_layer,
-            upqc.qfim_layer_list,
-            color=METRIC_COLORS["hessian"],
-            title=rf"Maximum energy Hessian rank at {upqc.NUM_QFIM_SAMPLES} random points",
-            ylabel=r"Maximum Hessian rank $(|\eta_k| > 10^{-12})$",
-            outpath=os.path.join(hessian_rank_random_dir, "hessian_rank_max_random_points.pdf"),
-            marker="P",
-            lw=1.0,
-        )
+
+    threshold_tex = _qfim_threshold_tex(upqc.HESSIAN_RANK_THRESHOLD)
+    _plot_hessian_random_summary_by_layer(
+        upqc.hessian_rank_by_layer,
+        upqc.qfim_layer_list,
+        ylabel=rf"Hessian rank $(|\eta_i| \geq {threshold_tex})$",
+        title=(
+            f"Energy Hessian rank at {upqc.NUM_QFIM_SAMPLES} random "
+            "parameter points"
+        ),
+        outpath=os.path.join(
+            upqc.hessian_fig_dir,
+            "hessian_rank_random_points.pdf",
+        ),
+    )
+    _plot_hessian_random_summary_by_layer(
+        upqc.hessian_condition_by_layer,
+        upqc.qfim_layer_list,
+        ylabel=rf"Hessian condition number $(|\eta_i| \geq {threshold_tex})$",
+        title=(
+            f"Energy Hessian condition number at {upqc.NUM_QFIM_SAMPLES} "
+            "random parameter points"
+        ),
+        outpath=os.path.join(
+            upqc.hessian_fig_dir,
+            "hessian_condition_number_random_points.pdf",
+        ),
+    )
 
     spectral_random_summaries = (
         (upqc.qfim_eigs_reduced_by_layer, upqc.qfim_eigs_reduced_0123_dir,
@@ -1155,10 +2095,6 @@ def _plot_random_qfim_results() -> None:
          "HS tangent Gram", "hs", False),
         (upqc.hs_eigs_pure_by_layer, os.path.join(upqc.hs_eigs_dir, "pure_full"),
          "Pure-full HS tangent Gram", "hs_pure", False),
-        (upqc.hessian_eigs_by_layer, upqc.hessian_eigs_dir,
-         "Absolute Hessian", "hessian_abs", True),
-        (upqc.hessian_eigs_by_layer, os.path.join(upqc.hessian_eigs_dir, "pure_full"),
-         "Pure-full absolute Hessian (identical to reduced)", "hessian_abs_pure", True),
     )
     for eigs, directory, label, tag, use_abs in spectral_random_summaries:
         if not eigs or not any(value is not None for value in eigs.values()):
@@ -1173,27 +2109,42 @@ def _plot_random_qfim_results() -> None:
 
 
 def _load_optimization_path_results() -> None:
-    qfim_rank_path = os.path.join(
-        upqc.qfim_results_dir,
-        "qfim_rank_history_optimization_path_reduced_0123.npz",
-    )
-    qfim_result = _load_required_result(qfim_rank_path)
-    layers = [int(L) for L in np.asarray(qfim_result["layers"], dtype=NP_INT_DTYPE)]
-    upqc.sample_iters = np.asarray(qfim_result["sample_iters"], dtype=NP_INT_DTYPE)
-    upqc.layer_list = layers
-    upqc.qfim_eigs_history_by_layer = {
-        L: np.asarray(qfim_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
-        for L in layers
-    }
-    qfim_pure_result = _load_required_result(
-        os.path.join(
-            upqc.qfim_results_dir,
-            "qfim_rank_history_optimization_path_pure_full.npz",
+    layers = [int(L) for L in upqc.layer_list]
+    sample_iters = np.asarray(upqc.sample_iters, dtype=NP_INT_DTYPE)
+    upqc.qfim_eigs_history_by_keep = {}
+    canonical_sample_iters = {}
+    for keep_key in QFIM_KEEP_KEYS:
+        (
+            upqc.qfim_eigs_history_by_keep[keep_key],
+            canonical_sample_iters[keep_key],
+        ) = _load_canonical_qfim_eigenvalue_history(
+            keep_key,
+            expected_layers=layers,
+            expected_sample_iters=sample_iters,
+            expected_num_runs=upqc.num_runs,
         )
+    if not np.array_equal(
+        canonical_sample_iters["keep0123"],
+        canonical_sample_iters["keep01234"],
+    ):
+        raise ValueError(
+            "Canonical QFIM optimization-path archives have inconsistent "
+            "sample_iters."
+        )
+    upqc.sample_iters = canonical_sample_iters["keep0123"]
+    upqc.layer_list = layers
+    upqc.qfim_eigs_history_by_layer = (
+        upqc.qfim_eigs_history_by_keep["keep0123"]
     )
-    upqc.qfim_eigs_history_pure_by_layer = {
-        L: np.asarray(qfim_pure_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
-        for L in layers
+    upqc.qfim_eigs_history_pure_by_layer = (
+        upqc.qfim_eigs_history_by_keep["keep01234"]
+    )
+    upqc.qfim_trace_history_by_keep = {
+        keep_key: {
+            L: _qfim_trace_at_or_above_rank_threshold(eigs)
+            for L, eigs in eigs_by_layer.items()
+        }
+        for keep_key, eigs_by_layer in upqc.qfim_eigs_history_by_keep.items()
     }
 
     hs_rank_path = os.path.join(
@@ -1216,26 +2167,38 @@ def _load_optimization_path_results() -> None:
         for L in layers
     }
 
-    hessian_rank_path = os.path.join(
-        upqc.hessian_results_dir,
-        "hessian_rank_history_optimization_path.npz",
-    )
-    upqc.hessian_rank_history_by_layer = {}
-    upqc.hessian_eigs_history_by_layer = {}
-
-    if os.path.exists(hessian_rank_path):
-        hessian_result = _load_required_result(hessian_rank_path)
-        upqc.hessian_rank_history_by_layer = {
-            L: np.asarray(hessian_result[f"L{L}_rank"], dtype=NP_REAL_DTYPE)
-            for L in layers
-        }
-        upqc.hessian_eigs_history_by_layer = {
-            L: np.asarray(hessian_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
-            for L in layers
-        }
-
-
 def _plot_optimization_path_results() -> None:
+    qfim_trace_dir = os.path.join(upqc.qfim_fig_dir, "trace")
+    os.makedirs(qfim_trace_dir, exist_ok=True)
+    for keep_key in QFIM_KEEP_KEYS:
+        keep_label = QFIM_KEEP_LABELS[keep_key]
+        trace_by_layer = upqc.qfim_trace_history_by_keep[keep_key]
+        _plot_qfim_trace_history_by_iteration(
+            trace_by_layer,
+            upqc.layer_list,
+            upqc.sample_iters,
+            keep_label=keep_label,
+            outpath=os.path.join(
+                qfim_trace_dir,
+                (
+                    "qfim_trace_mean_sem_optimization_path_by_iteration_"
+                    f"{QFIM_TRACE_THRESHOLD_FILE_TAG}_{keep_key}.pdf"
+                ),
+            ),
+        )
+        _plot_flattened_qfim_trace_by_layer(
+            trace_by_layer,
+            upqc.layer_list,
+            keep_label=keep_label,
+            outpath=os.path.join(
+                qfim_trace_dir,
+                (
+                    "qfim_trace_flattened_mean_sem_optimization_path_by_layer_"
+                    f"{QFIM_TRACE_THRESHOLD_FILE_TAG}_{keep_key}.pdf"
+                ),
+            ),
+        )
+
     spectral_path_summaries = (
         (upqc.qfim_eigs_history_by_layer, upqc.qfim_eigs_dir, "QFIM", "qfim", False),
         (upqc.qfim_eigs_history_pure_by_layer, os.path.join(upqc.qfim_eigs_dir, "pure_full"),
@@ -1243,10 +2206,6 @@ def _plot_optimization_path_results() -> None:
         (upqc.hs_eigs_history_by_layer, upqc.hs_eigs_dir, "HS tangent Gram", "hs", False),
         (upqc.hs_eigs_history_pure_by_layer, os.path.join(upqc.hs_eigs_dir, "pure_full"),
          "Pure-full HS tangent Gram", "hs_pure", False),
-        (upqc.hessian_eigs_history_by_layer, upqc.hessian_eigs_dir,
-         "Absolute Hessian", "hessian_abs", True),
-        (upqc.hessian_eigs_history_by_layer, os.path.join(upqc.hessian_eigs_dir, "pure_full"),
-         "Pure-full absolute Hessian (identical to reduced)", "hessian_abs_pure", True),
     )
     for eigs, directory, label, tag, use_abs in spectral_path_summaries:
         if not eigs:
@@ -1262,56 +2221,6 @@ def _plot_optimization_path_results() -> None:
             use_absolute_values=use_abs,
         )
 
-    if upqc.hessian_rank_history_by_layer:
-        upqc.plot_qfim_rank_history_mean_by_layer(
-            upqc.hessian_rank_history_by_layer,
-            upqc.layer_list,
-            upqc.sample_iters,
-            title="Mean energy Hessian rank along optimization path",
-            outpath=os.path.join(
-                upqc.hessian_rank_optimization_path_mean_dir,
-                "hessian_rank_mean_history_optimization_path.pdf",
-            ),
-            ylabel=r"Mean Hessian rank $(|\eta_k| > 10^{-12})$",
-            cmap=upqc.cmap,
-        )
-        upqc.plot_qfim_rank_history_min_by_layer(
-            upqc.hessian_rank_history_by_layer,
-            upqc.layer_list,
-            upqc.sample_iters,
-            title="Minimum energy Hessian rank along optimization path",
-            outpath=os.path.join(
-                upqc.hessian_rank_optimization_path_min_dir,
-                "hessian_rank_min_history_optimization_path.pdf",
-            ),
-            ylabel=r"Minimum Hessian rank $(|\eta_k| > 10^{-12})$",
-            cmap=upqc.cmap,
-        )
-
-    # The energy Hessian is invariant under tracing out qubit 4 for the current
-    # system-only observables. Emit an explicitly labelled pure-full view.
-    equivalent_histories = (
-        ("hessian_rank", "Energy Hessian rank",
-         upqc.hessian_rank_history_by_layer, True),
-    )
-    for tag, label, histories, integer_axis in equivalent_histories:
-        if not histories:
-            continue
-        output_dir = os.path.join(upqc.figures_dir, tag.split("_")[0], "pure_full")
-        os.makedirs(output_dir, exist_ok=True)
-        upqc.plot_qfim_rank_history_mean_by_layer(
-            histories, upqc.layer_list, upqc.sample_iters,
-            title=f"Mean pure-full {label} along optimization path",
-            outpath=os.path.join(output_dir, f"{tag}_mean_optimization_path_pure_full.pdf"),
-            ylabel=f"Mean {label}", cmap=upqc.cmap,
-        )
-        upqc.plot_qfim_rank_history_min_by_layer(
-            histories, upqc.layer_list, upqc.sample_iters,
-            title=f"Minimum pure-full {label} along optimization path",
-            outpath=os.path.join(output_dir, f"{tag}_min_optimization_path_pure_full.pdf"),
-            ylabel=f"Minimum {label}", cmap=upqc.cmap,
-            integer_y_axis=integer_axis,
-        )
 def run_unitary_pqc_visualization(
     *,
     h_param: Optional[float] = None,

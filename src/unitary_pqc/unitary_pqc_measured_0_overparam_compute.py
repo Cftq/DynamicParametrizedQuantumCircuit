@@ -200,7 +200,6 @@ from hamiltonian import (
 )
 from qfim import (
     effective_rank_from_eigvals,
-    effective_abs_rank_from_eigvals,
     hermitian as _hermitian,
     hermitian_eigvals_desc,
     make_hilbert_schmidt_metric_fn,
@@ -209,7 +208,6 @@ from qfim import (
     mask_psd_eigvals_for_rank,
     matrix_rank_psd,
     psd_eigvals_desc,
-    rank_threshold_from_eigvals,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -343,6 +341,13 @@ sample_iter_set = set()
 
 KEEP_WIRES = KEEP_WIRES_4
 QFIM_EFFECTIVE_RANK_THRESHOLD = cfg.QFIM_EFFECTIVE_RANK_THRESHOLD
+HESSIAN_RANDOM_SCHEMA_VERSION = 1
+HESSIAN_RANK_DEFINITION = (
+    "count(abs(eigenvalue) >= hessian_rank_threshold)"
+)
+HESSIAN_CONDITION_NUMBER_DEFINITION = (
+    "max(abs(active eigenvalue)) / min(abs(active eigenvalue)); NaN if rank == 0"
+)
 EIG_SUM_EPS = cfg.EIG_SUM_EPS
 QFIM_EIG_PLOT_EPS = cfg.QFIM_EIG_PLOT_EPS
 NUM_QFIM_SAMPLES = cfg.NUM_QFIM_SAMPLES
@@ -389,15 +394,7 @@ hs_rank_history_by_layer = {}
 hs_eigs_history_by_layer = {}
 hs_thresh_history_by_layer = {}
 hessian_rank_by_layer = {}
-hessian_eigs_by_layer = {}
-hessian_thresh_by_layer = {}
-hessian_trace_by_layer = {}
-hessian_abs_eigsum_by_layer = {}
-hessian_rank_history_by_layer = {}
-hessian_eigs_history_by_layer = {}
-hessian_thresh_history_by_layer = {}
-hessian_trace_history_by_layer = {}
-hessian_abs_eigsum_history_by_layer = {}
+hessian_condition_by_layer = {}
 
 # Path attributes are retained for the separate visualizer's import API. This
 # compute module does not create these directories or write QFIM eigenspectrum
@@ -429,21 +426,6 @@ hs_rank_optimization_path_min_dir = os.path.join(
     hs_rank_optimization_path_dir,
     "min",
 )
-hessian_eigs_dir = os.path.join(hessian_fig_dir, "eigs")
-hessian_rank_dir = os.path.join(hessian_fig_dir, "rank")
-hessian_rank_random_dir = os.path.join(hessian_rank_dir, "random_points")
-hessian_rank_optimization_path_dir = os.path.join(
-    hessian_rank_dir,
-    "optimization_path",
-)
-hessian_rank_optimization_path_mean_dir = os.path.join(
-    hessian_rank_optimization_path_dir,
-    "mean",
-)
-hessian_rank_optimization_path_min_dir = os.path.join(
-    hessian_rank_optimization_path_dir,
-    "min",
-)
 _figsize_from_width = plot_style._figsize_from_width
 new_prx_figure = plot_style.new_prx_figure
 set_prx_title = plot_style.set_prx_title
@@ -471,12 +453,6 @@ def _ensure_unitary_result_dirs() -> None:
     os.makedirs(hs_rank_optimization_path_dir, exist_ok=True)
     os.makedirs(hs_rank_optimization_path_mean_dir, exist_ok=True)
     os.makedirs(hs_rank_optimization_path_min_dir, exist_ok=True)
-    os.makedirs(hessian_eigs_dir, exist_ok=True)
-    os.makedirs(hessian_rank_dir, exist_ok=True)
-    os.makedirs(hessian_rank_random_dir, exist_ok=True)
-    os.makedirs(hessian_rank_optimization_path_dir, exist_ok=True)
-    os.makedirs(hessian_rank_optimization_path_mean_dir, exist_ok=True)
-    os.makedirs(hessian_rank_optimization_path_min_dir, exist_ok=True)
     os.makedirs(circuit_dir, exist_ok=True)
     os.makedirs(numerical_results_dir, exist_ok=True)
     os.makedirs(energy_results_dir, exist_ok=True)
@@ -1474,83 +1450,6 @@ def _save_qfim_eigs_violinplot_by_index(
 
     save_current_figure(outpath, outside_legend=False)
 
-def _save_signed_eigs_scatterplot_by_index(
-    eigs_sorted_desc: np.ndarray,
-    *,
-    title: str,
-    outpath: str,
-    rank_thresholds: Optional[np.ndarray] = None,
-    eps: float = QFIM_EIG_PLOT_EPS,
-    ylabel: str = "Hessian eigenvalue",
-    point_size: float = 12.0,
-    alpha: float = 0.55,
-) -> None:
-    os.makedirs(os.path.dirname(outpath), exist_ok=True)
-
-    eigs = np.asarray(eigs_sorted_desc, dtype=NP_REAL_DTYPE)
-    if eigs.ndim == 1:
-        eigs = eigs[None, :]
-
-    num_params = int(eigs.shape[1])
-    thresholds = np.asarray(
-        [] if rank_thresholds is None else rank_thresholds,
-        dtype=NP_REAL_DTYPE,
-    ).reshape(-1)
-    thresholds = thresholds[np.isfinite(thresholds) & (thresholds > 0.0)]
-    threshold = (
-        float(np.max(thresholds))
-        if thresholds.size > 0
-        else float(QFIM_EFFECTIVE_RANK_THRESHOLD)
-    )
-    linthresh = max(float(eps), threshold)
-
-    new_prx_figure(width="double")
-    ax = plt.gca()
-
-    positions = np.arange(1, num_params + 1, dtype=NP_REAL_DTYPE)
-    for i, x0 in enumerate(positions):
-        y = eigs[:, i]
-        finite = np.isfinite(y)
-        if not np.any(finite):
-            continue
-        ax.scatter(
-            np.full(np.sum(finite), x0, dtype=NP_REAL_DTYPE),
-            y[finite],
-            s=point_size,
-            color="C6",
-            alpha=alpha,
-            edgecolors="black",
-            linewidths=0.20,
-            rasterized=True,
-        )
-
-    step = max(1, num_params // 10)
-    ticks = np.arange(1, num_params + 1, step, dtype=int)
-    if ticks.size == 0 or ticks[0] != 1:
-        ticks = np.concatenate([[1], ticks])
-    if ticks[-1] != num_params:
-        ticks = np.concatenate([ticks, [num_params]])
-    plt.xticks(ticks=ticks, labels=[str(t) for t in ticks])
-
-    ax.set_yscale("symlog", linthresh=linthresh)
-    ax.axhline(0.0, linestyle="-", linewidth=0.8, color="black", alpha=0.45)
-
-    if threshold > 0.0:
-        ax.axhline(threshold, linestyle="-", linewidth=1.2, color="red", alpha=0.75)
-        ax.axhline(-threshold, linestyle="-", linewidth=1.2, color="red", alpha=0.75)
-
-    finite_vals = eigs[np.isfinite(eigs)]
-    if finite_vals.size > 0:
-        max_abs = max(float(np.max(np.abs(finite_vals))), threshold, linthresh)
-        ax.set_ylim(-1.5 * max_abs, 1.5 * max_abs)
-
-    plt.xlabel("Eigenvalue index")
-    plt.ylabel(ylabel)
-    set_prx_title(title)
-    plt.grid(True, which="both", alpha=0.3)
-
-    save_current_figure(outpath, outside_legend=False)
-
 def _qfim_rank_max_xy(rank_by_layer: dict, layers):
     valid_items = []
 
@@ -1848,21 +1747,33 @@ def make_hs_analysis_batch_runner(
     return _make_psd_analysis_batch_runner(matrix_fn)
 
 
+def hessian_rank_and_condition_from_eigvals(eigenvalues: jnp.ndarray):
+    """Reduce a signed Hessian spectrum to the two requested metrics."""
+    abs_eigs = jnp.abs(jnp.asarray(eigenvalues, dtype=REAL_DTYPE))
+    if abs_eigs.ndim != 1:
+        raise ValueError("Hessian eigenvalues must be one-dimensional.")
+    threshold = jnp.asarray(
+        QFIM_EFFECTIVE_RANK_THRESHOLD,
+        dtype=abs_eigs.dtype,
+    )
+    active = abs_eigs >= threshold
+    rank_value = jnp.sum(active, dtype=jnp.int64)
+    max_active = jnp.max(jnp.where(active, abs_eigs, 0.0))
+    min_active = jnp.min(jnp.where(active, abs_eigs, jnp.inf))
+    condition_number = jnp.where(
+        rank_value > 0,
+        max_active / min_active,
+        jnp.asarray(jnp.nan, dtype=abs_eigs.dtype),
+    )
+    return rank_value, condition_number
+
+
 def make_hessian_analysis_batch_runner(num_layers: int):
-    """Create a fixed-shape energy-Hessian ``jit(vmap(...))`` runner."""
+    """Return fixed-cutoff rank and active-spectrum condition number."""
     eigvals_fn = make_energy_hessian_eigvals_fn_for_layer(int(num_layers))
 
     def metrics_one(theta: jnp.ndarray):
-        eigs_desc = eigvals_fn(theta)
-        threshold = rank_threshold_from_eigvals(eigs_desc)
-        rank_value = effective_abs_rank_from_eigvals(eigs_desc)
-        return (
-            rank_value,
-            eigs_desc,
-            threshold,
-            jnp.sum(eigs_desc),
-            jnp.sum(jnp.abs(eigs_desc)),
-        )
+        return hessian_rank_and_condition_from_eigvals(eigvals_fn(theta))
 
     return jax.jit(jax.vmap(metrics_one))
 
@@ -1986,69 +1897,6 @@ def compute_hs_rank_history_by_layer(
                 batch_size=batch_size,
                 description=(
                     f"HS batches ({representation}, L={L_int}, "
-                    f"batch={_resolve_analysis_batch_size(batch_size)})"
-                ),
-            )
-        )
-        ranks_L = np.asarray(ranks_flat, dtype=NP_REAL_DTYPE).reshape(
-            (num_runs, num_times)
-        )
-        eigs_L = np.asarray(eigs_flat, dtype=NP_REAL_DTYPE).reshape(
-            (num_runs, num_times, num_params)
-        )
-        thresh_L = np.asarray(
-            thresholds_flat,
-            dtype=NP_REAL_DTYPE,
-        ).reshape((num_runs, num_times))
-
-        rank_history_by_layer[L_int] = ranks_L
-        eigs_history_by_layer[L_int] = eigs_L
-        thresh_history_by_layer[L_int] = thresh_L
-
-        del batch_runner
-        _release_jax_compilation_cache()
-
-    return rank_history_by_layer, eigs_history_by_layer, thresh_history_by_layer
-
-def compute_hessian_rank_history_by_layer(
-    theta_samples_by_layer: dict,
-    layers,
-    *,
-    batch_size: Optional[int] = None,
-):
-    rank_history_by_layer = {}
-    eigs_history_by_layer = {}
-    thresh_history_by_layer = {}
-
-    for L in tqdm(
-        layers,
-        desc="Energy Hessian rank history along optimization path",
-        unit="layer",
-    ):
-        L_int = int(L)
-        if theta_samples_by_layer.get(L_int) is None:
-            continue
-
-        theta_samples = np.asarray(
-            theta_samples_by_layer[L_int],
-            dtype=NP_REAL_DTYPE,
-        )
-
-        if theta_samples.ndim != 3:
-            raise ValueError(
-                "theta_samples must have shape "
-                "(num_runs, num_sample_iters, num_params)."
-            )
-
-        num_runs, num_times, num_params = theta_samples.shape
-        batch_runner = make_hessian_analysis_batch_runner(L_int)
-        ranks_flat, eigs_flat, thresholds_flat, _, _ = (
-            _evaluate_analysis_in_batches(
-                theta_samples.reshape((-1, num_params)),
-                batch_runner,
-                batch_size=batch_size,
-                description=(
-                    f"Hessian batches (L={L_int}, "
                     f"batch={_resolve_analysis_batch_size(batch_size)})"
                 ),
             )
@@ -2291,9 +2139,6 @@ def configure_unitary_pqc_overparam(
     global hs_eigs_dir, hs_eigs_reduced_0123_dir
     global hs_rank_dir, hs_rank_random_dir, hs_rank_optimization_path_dir
     global hs_rank_optimization_path_mean_dir, hs_rank_optimization_path_min_dir
-    global hessian_eigs_dir, hessian_rank_dir, hessian_rank_random_dir
-    global hessian_rank_optimization_path_dir
-    global hessian_rank_optimization_path_mean_dir, hessian_rank_optimization_path_min_dir
     # ============================================================
     # DPQC optimization + plots + QFIM rank (pure + reduced)
     #
@@ -2446,21 +2291,6 @@ def configure_unitary_pqc_overparam(
     )
     hs_rank_optimization_path_min_dir = os.path.join(
         hs_rank_optimization_path_dir,
-        "min",
-    )
-    hessian_eigs_dir = os.path.join(hessian_fig_dir, "eigs")
-    hessian_rank_dir = os.path.join(hessian_fig_dir, "rank")
-    hessian_rank_random_dir = os.path.join(hessian_rank_dir, "random_points")
-    hessian_rank_optimization_path_dir = os.path.join(
-        hessian_rank_dir,
-        "optimization_path",
-    )
-    hessian_rank_optimization_path_mean_dir = os.path.join(
-        hessian_rank_optimization_path_dir,
-        "mean",
-    )
-    hessian_rank_optimization_path_min_dir = os.path.join(
-        hessian_rank_optimization_path_dir,
         "min",
     )
     _ensure_unitary_result_dirs()
@@ -2727,9 +2557,6 @@ def run_vqe_optimization(
     global hs_eigs_dir, hs_eigs_reduced_0123_dir
     global hs_rank_dir, hs_rank_random_dir, hs_rank_optimization_path_dir
     global hs_rank_optimization_path_mean_dir, hs_rank_optimization_path_min_dir
-    global hessian_eigs_dir, hessian_rank_dir, hessian_rank_random_dir
-    global hessian_rank_optimization_path_dir
-    global hessian_rank_optimization_path_mean_dir, hessian_rank_optimization_path_min_dir
     global theta_history, best_theta_by_layer, final_theta_wrapped_rmsdist_by_layer, energy_traces_by_layer, grad_norm_traces_by_layer, sample_every
     global sample_iters, sample_iter_set, theta_sample_traces_by_layer, cmap
     global numerical_results_dir, energy_results_dir, qfim_results_dir, hs_results_dir, hessian_results_dir
@@ -2799,21 +2626,6 @@ def run_vqe_optimization(
     )
     hs_rank_optimization_path_min_dir = os.path.join(
         hs_rank_optimization_path_dir,
-        "min",
-    )
-    hessian_eigs_dir = os.path.join(hessian_fig_dir, "eigs")
-    hessian_rank_dir = os.path.join(hessian_fig_dir, "rank")
-    hessian_rank_random_dir = os.path.join(hessian_rank_dir, "random_points")
-    hessian_rank_optimization_path_dir = os.path.join(
-        hessian_rank_dir,
-        "optimization_path",
-    )
-    hessian_rank_optimization_path_mean_dir = os.path.join(
-        hessian_rank_optimization_path_dir,
-        "mean",
-    )
-    hessian_rank_optimization_path_min_dir = os.path.join(
-        hessian_rank_optimization_path_dir,
         "min",
     )
     _ensure_unitary_result_dirs()
@@ -3705,8 +3517,7 @@ def run_random_qfim_analysis(
     global qfim_rank_dir, qfim_rank_random_dir
     global hs_rank_reduced_by_layer, hs_eigs_reduced_by_layer, hs_thresh_reduced_by_layer, hs_eigs_dir, hs_eigs_reduced_0123_dir
     global hs_rank_dir, hs_rank_random_dir
-    global hessian_rank_by_layer, hessian_eigs_by_layer, hessian_thresh_by_layer, hessian_trace_by_layer, hessian_abs_eigsum_by_layer, hessian_eigs_dir
-    global hessian_rank_dir, hessian_rank_random_dir
+    global hessian_rank_by_layer, hessian_condition_by_layer
     global qfim_random_result_paths_by_keep
     global qfim_dense_until_layer, qfim_max_layer, qfim_sparse_step
     global qfim_layer_list
@@ -3822,11 +3633,8 @@ def run_random_qfim_analysis(
     hs_rank_pure_by_layer = {}
     hs_eigs_pure_by_layer = {}
     hs_thresh_pure_by_layer = {}
-    hessian_rank_by_layer = {}          # L -> (NUM_QFIM_SAMPLES,)
-    hessian_eigs_by_layer = {}          # L -> (NUM_QFIM_SAMPLES, num_params)
-    hessian_thresh_by_layer = {}        # L -> (NUM_QFIM_SAMPLES,)
-    hessian_trace_by_layer = {}         # L -> (NUM_QFIM_SAMPLES,)
-    hessian_abs_eigsum_by_layer = {}    # L -> (NUM_QFIM_SAMPLES,)
+    hessian_rank_by_layer = {}             # L -> (NUM_QFIM_SAMPLES,)
+    hessian_condition_by_layer = {}        # L -> (NUM_QFIM_SAMPLES,)
     
     qfim_eigs_dir = os.path.join(qfim_fig_dir, "eigs")
     qfim_eigs_pure_dir = os.path.join(qfim_eigs_dir, "pure_full")
@@ -3837,16 +3645,11 @@ def run_random_qfim_analysis(
     hs_eigs_reduced_0123_dir = os.path.join(hs_eigs_dir, "reduced_keep_0123")
     hs_rank_dir = os.path.join(hs_fig_dir, "rank")
     hs_rank_random_dir = os.path.join(hs_rank_dir, "random_points")
-    hessian_eigs_dir = os.path.join(hessian_fig_dir, "eigs")
-    hessian_rank_dir = os.path.join(hessian_fig_dir, "rank")
-    hessian_rank_random_dir = os.path.join(hessian_rank_dir, "random_points")
     
     os.makedirs(qfim_rank_random_dir, exist_ok=True)
     os.makedirs(hs_eigs_dir, exist_ok=True)
     os.makedirs(hs_eigs_reduced_0123_dir, exist_ok=True)
     os.makedirs(hs_rank_random_dir, exist_ok=True)
-    os.makedirs(hessian_eigs_dir, exist_ok=True)
-    os.makedirs(hessian_rank_random_dir, exist_ok=True)
     _ensure_unitary_result_dirs()
     
     # tqdm: Layers (QFIM)
@@ -4054,16 +3857,11 @@ def run_random_qfim_analysis(
         # --------------------------
         # Energy Hessian
         #   H_ij = partial_i partial_j E(theta)
-        #   Hessian eigenvalues are signed; rank counts |eta_i| > threshold.
+        #   Signed eigenvalues are reduced immediately to the two requested
+        #   random-point metrics using the fixed inclusive QFIM cutoff.
         # --------------------------
         hessian_batch_runner = make_hessian_analysis_batch_runner(L)
-        (
-            hessian_ranks,
-            hessian_eigs,
-            hessian_thresholds,
-            hessian_traces,
-            hessian_abs_eigsums,
-        ) = _evaluate_analysis_in_batches(
+        hessian_ranks, hessian_condition_numbers = _evaluate_analysis_in_batches(
             qfim_random_thetas_by_layer[L],
             hessian_batch_runner,
             batch_size=effective_analysis_batch_size,
@@ -4076,49 +3874,14 @@ def run_random_qfim_analysis(
             hessian_ranks,
             dtype=NP_INT_DTYPE,
         )
-        hessian_eigs_by_layer[L] = np.asarray(
-            hessian_eigs,
-            dtype=NP_REAL_DTYPE,
-        )
-        hessian_thresh_by_layer[L] = np.asarray(
-            hessian_thresholds,
-            dtype=NP_REAL_DTYPE,
-        )
-        hessian_trace_by_layer[L] = np.asarray(
-            hessian_traces,
-            dtype=NP_REAL_DTYPE,
-        )
-        hessian_abs_eigsum_by_layer[L] = np.asarray(
-            hessian_abs_eigsums,
+        hessian_condition_by_layer[L] = np.asarray(
+            hessian_condition_numbers,
             dtype=NP_REAL_DTYPE,
         )
 
         del hessian_batch_runner
         _release_jax_compilation_cache()
 
-        if make_plots:
-            _save_signed_eigs_scatterplot_by_index(
-                hessian_eigs_by_layer[L],
-                title=rf"Energy Hessian eigenvalues at {NUM_QFIM_SAMPLES} random points (L={L})",
-                outpath=os.path.join(hessian_eigs_dir, f"L{L}.pdf"),
-                rank_thresholds=hessian_thresh_by_layer[L],
-                ylabel="Energy Hessian eigenvalue",
-            )
-            plot_style.save_eigenvalue_histograms_by_trial(
-                hessian_eigs_by_layer[L],
-                outdir=os.path.join(
-                    hessian_eigs_dir,
-                    "histograms",
-                    "random_points",
-                    f"L{L}",
-                ),
-                matrix_tag="unitary_pqc_energy_hessian",
-                matrix_label="Energy Hessian",
-                num_layers=L,
-                context_tag="random",
-                context_label="random point",
-                color="C6",
-            )
     
     save_npz_result(
         os.path.join(qfim_results_dir, "qfim_random_points.npz"),
@@ -4239,44 +4002,43 @@ def run_random_qfim_analysis(
 
     save_npz_result(
         os.path.join(hessian_results_dir, "hessian_random_points.npz"),
-        representation_equivalence=np.asarray(
-            "pure_full == reduced_keep_0123 for E=Tr[(H_system tensor I) rho_full]"
+        schema_version=np.asarray(
+            HESSIAN_RANDOM_SCHEMA_VERSION,
+            dtype=NP_INT_DTYPE,
+        ),
+        analysis_kind=np.asarray("random_points"),
+        ansatz=np.asarray(ANSATZ_NAME),
+        measurement_outcome=np.asarray(
+            MEASUREMENT_OUTCOME,
+            dtype=NP_INT_DTYPE,
         ),
         h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
+        layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
         num_hessian_samples=np.asarray(NUM_QFIM_SAMPLES, dtype=NP_INT_DTYPE),
         hessian_sample_seed_base=np.asarray(QFIM_SAMPLE_SEED_BASE, dtype=NP_INT_DTYPE),
-        hessian_effective_rank_threshold=np.asarray(
+        hessian_rank_threshold=np.asarray(
             QFIM_EFFECTIVE_RANK_THRESHOLD,
             dtype=NP_REAL_DTYPE,
         ),
-        layers=np.asarray(qfim_layer_list, dtype=NP_INT_DTYPE),
+        hessian_rank_definition=np.asarray(HESSIAN_RANK_DEFINITION),
+        hessian_condition_number_definition=np.asarray(
+            HESSIAN_CONDITION_NUMBER_DEFINITION
+        ),
+        num_params_per_layer=np.asarray(
+            num_params_per_layer,
+            dtype=NP_INT_DTYPE,
+        ),
         analysis_batch_size=np.asarray(
             effective_analysis_batch_size,
             dtype=NP_INT_DTYPE,
         ),
         **{
-            f"L{int(L)}_theta": arr
-            for L, arr in qfim_random_thetas_by_layer.items()
-        },
-        **{
             f"L{int(L)}_rank": arr
             for L, arr in hessian_rank_by_layer.items()
         },
         **{
-            f"L{int(L)}_eigs_desc": arr
-            for L, arr in hessian_eigs_by_layer.items()
-        },
-        **{
-            f"L{int(L)}_rank_threshold": arr
-            for L, arr in hessian_thresh_by_layer.items()
-        },
-        **{
-            f"L{int(L)}_trace": arr
-            for L, arr in hessian_trace_by_layer.items()
-        },
-        **{
-            f"L{int(L)}_abs_eigsum": arr
-            for L, arr in hessian_abs_eigsum_by_layer.items()
+            f"L{int(L)}_condition_number": arr
+            for L, arr in hessian_condition_by_layer.items()
         },
     )
 
@@ -4506,62 +4268,6 @@ def run_random_qfim_analysis(
         lw=1.0,
     )
 
-    new_prx_figure(width="double")
-    ax = plt.gca()
-
-    for idx, L in enumerate(qfim_layer_list):
-        color = cmap(idx / num_layers)
-        hessian_dataset = _make_violin_ready(
-            hessian_rank_by_layer[L],
-            ensure_positive=False,
-            tiny=1e-12,
-        )
-
-        vp_hessian = plt.violinplot(
-            [hessian_dataset],
-            positions=[float(L)],
-            widths=violin_w_rank,
-            showmeans=False,
-            showmedians=True,
-            showextrema=True,
-        )
-        _style_violin(
-            vp_hessian,
-            facecolor=color,
-            edgecolor=color,
-            alpha=0.18,
-            linewidth=1.0,
-            linecolor=color,
-            linealpha=0.7,
-        )
-
-    ax.set_xticks(x_all)
-    ax.set_xticklabels(x_labels)
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(r"Hessian rank $(|\eta_k| > 10^{-12})$")
-    set_prx_title(
-        rf"Energy Hessian rank at {NUM_QFIM_SAMPLES} random points",
-        ax=ax,
-    )
-    ax.grid(True, axis="y", alpha=0.3)
-
-    save_current_figure(
-        os.path.join(hessian_rank_random_dir, "hessian_rank_violinplot_random_points.pdf"),
-        outside_legend=False,
-    )
-
-    plot_qfim_rank_max_by_layer(
-        hessian_rank_by_layer,
-        qfim_layer_list,
-        color="C6",
-        title=rf"Maximum energy Hessian rank at {NUM_QFIM_SAMPLES} random points",
-        ylabel=r"Maximum Hessian rank $(|\eta_k| > 10^{-12})$",
-        outpath=os.path.join(hessian_rank_random_dir, "hessian_rank_max_random_points.pdf"),
-        marker="P",
-        lw=1.0,
-    )
-    
-    
     # ============================================================
 
 def run_optimization_path_qfim_analysis(
@@ -4572,7 +4278,6 @@ def run_optimization_path_qfim_analysis(
     """Compute trajectory matrix metrics with fixed-size JAX batches."""
     global qfim_rank_history_by_layer, qfim_eigs_history_by_layer, qfim_thresh_history_by_layer, qfim_rank_history_npz
     global hs_rank_history_by_layer, hs_eigs_history_by_layer, hs_thresh_history_by_layer, hs_rank_history_npz
-    global hessian_rank_history_by_layer, hessian_eigs_history_by_layer, hessian_thresh_history_by_layer, hessian_trace_history_by_layer, hessian_abs_eigsum_history_by_layer, hessian_rank_history_npz
     global qfim_optimization_path_result_paths_by_keep
     effective_analysis_batch_size = _resolve_analysis_batch_size(
         analysis_batch_size
@@ -4761,74 +4466,6 @@ def run_optimization_path_qfim_analysis(
         **{f"L{int(L)}_rank_threshold": arr for L, arr in hs_thresh_history_pure.items()},
     )
 
-    (
-        hessian_rank_history_by_layer,
-        hessian_eigs_history_by_layer,
-        hessian_thresh_history_by_layer,
-    ) = compute_hessian_rank_history_by_layer(
-        theta_sample_traces_by_layer,
-        layer_list,
-        batch_size=effective_analysis_batch_size,
-    )
-
-    hessian_trace_history_by_layer = {
-        int(L): np.sum(np.asarray(arr, dtype=NP_REAL_DTYPE), axis=2)
-        for L, arr in hessian_eigs_history_by_layer.items()
-    }
-    hessian_abs_eigsum_history_by_layer = {
-        int(L): np.sum(np.abs(np.asarray(arr, dtype=NP_REAL_DTYPE)), axis=2)
-        for L, arr in hessian_eigs_history_by_layer.items()
-    }
-
-    hessian_rank_history_npz = {
-        "sample_iters": np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        "plot_iters": _qfim_history_plot_iterations(sample_iters),
-        "layers": np.asarray(layer_list, dtype=NP_INT_DTYPE),
-        "analysis_batch_size": np.asarray(
-            effective_analysis_batch_size,
-            dtype=NP_INT_DTYPE,
-        ),
-        "hessian_effective_rank_threshold": np.asarray(
-            QFIM_EFFECTIVE_RANK_THRESHOLD,
-            dtype=NP_REAL_DTYPE,
-        ),
-    }
-    hessian_rank_history_npz.update(
-        {
-            f"L{int(L)}_rank": arr
-            for L, arr in hessian_rank_history_by_layer.items()
-        }
-    )
-    hessian_rank_history_npz.update(
-        {
-            f"L{int(L)}_eigs": arr
-            for L, arr in hessian_eigs_history_by_layer.items()
-        }
-    )
-    hessian_rank_history_npz.update(
-        {
-            f"L{int(L)}_rank_threshold": arr
-            for L, arr in hessian_thresh_history_by_layer.items()
-        }
-    )
-    hessian_rank_history_npz.update(
-        {
-            f"L{int(L)}_trace": arr
-            for L, arr in hessian_trace_history_by_layer.items()
-        }
-    )
-    hessian_rank_history_npz.update(
-        {
-            f"L{int(L)}_abs_eigsum": arr
-            for L, arr in hessian_abs_eigsum_history_by_layer.items()
-        }
-    )
-
-    save_npz_result(
-        os.path.join(hessian_results_dir, "hessian_rank_history_optimization_path.npz"),
-        **hessian_rank_history_npz,
-    )
-
     if not make_plots:
         return
 
@@ -4882,33 +4519,6 @@ def run_optimization_path_qfim_analysis(
         cmap=cmap,
     )
 
-    plot_qfim_rank_history_mean_by_layer(
-        hessian_rank_history_by_layer,
-        layer_list,
-        sample_iters,
-        title="Mean energy Hessian rank along optimization path",
-        outpath=os.path.join(
-            hessian_rank_optimization_path_mean_dir,
-            "hessian_rank_mean_history_optimization_path.pdf",
-        ),
-        ylabel=r"Mean Hessian rank $(|\eta_k| > 10^{-12})$",
-        cmap=cmap,
-    )
-
-    plot_qfim_rank_history_min_by_layer(
-        hessian_rank_history_by_layer,
-        layer_list,
-        sample_iters,
-        title="Minimum energy Hessian rank along optimization path",
-        outpath=os.path.join(
-            hessian_rank_optimization_path_min_dir,
-            "hessian_rank_min_history_optimization_path.pdf",
-        ),
-        ylabel=r"Minimum Hessian rank $(|\eta_k| > 10^{-12})$",
-        cmap=cmap,
-    )
-    
-    
     # ============================================================
 
 def collect_unitary_pqc_result() -> dict:

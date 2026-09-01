@@ -5,6 +5,8 @@
 Run DPQC_overparam_vqe.py followed by DPQC_overparam_qfim.py to create the
 .npz files under figs/dpqc/h_<h_param>/numerical_results. This script loads
 those saved results and generates figures without recomputing VQE/QFIM.
+QFIM trace figures sum only eigenvalues at or above the configured QFIM rank
+threshold (1e-12 by default).
 
 Example::
 
@@ -18,7 +20,6 @@ import argparse
 import json
 import math
 import os
-import re
 import sys
 import warnings
 from pathlib import Path
@@ -58,17 +59,17 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
-def _nonnegative_float(value: str) -> float:
-    parsed = _finite_float(value)
-    if parsed < 0.0:
-        raise argparse.ArgumentTypeError("value must be nonnegative")
-    return parsed
-
-
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be a nonnegative integer")
     return parsed
 
 
@@ -154,7 +155,8 @@ def _parse_cli_args(argv=None):
         "--hessian-only",
         action="store_true",
         help=(
-            "Compute/load endpoint Hessians and render Hessian figures only. "
+            "Compute/load random-point Hessians and render the rank and "
+            "condition-number figures only. "
             "This path does not require TensorCircuit."
         ),
     )
@@ -166,17 +168,7 @@ def _parse_cli_args(argv=None):
     parser.add_argument(
         "--reuse-hessian-results",
         action="store_true",
-        help=(
-            "Do not recompute Hessians; render the existing files in "
-            "numerical_results/hessian. Saved analysis settings are "
-            "authoritative in this mode."
-        ),
-    )
-    parser.add_argument(
-        "--hessian-input",
-        type=Path,
-        default=None,
-        help="Optional path to vqe_optimization_histories.npz.",
+        help="Render the existing random-point Hessian result without recomputing.",
     )
     parser.add_argument(
         "--hessian-results-dir",
@@ -194,52 +186,25 @@ def _parse_cli_args(argv=None):
         "--hessian-layers",
         type=_comma_separated_ints,
         default=None,
-        help="Comma-separated archive layers to analyze (default: all).",
+        help="Comma-separated layers to analyze (default: QFIM layer schedule).",
     )
     parser.add_argument(
-        "--hessian-runs",
-        type=_comma_separated_ints,
-        default=None,
-        help="Comma-separated run indices used for endpoint clustering.",
+        "--hessian-num-samples",
+        type=_positive_int,
+        default=int(cfg.NUM_QFIM_SAMPLES),
+        help=(
+            "Number of random parameter points per layer "
+            f"(default: {int(cfg.NUM_QFIM_SAMPLES)})."
+        ),
     )
     parser.add_argument(
-        "--hessian-epsilon",
-        type=_positive_float,
-        default=1e-8,
-        help="Absolute eigenvalue threshold epsilon (default: 1e-8).",
-    )
-    parser.add_argument(
-        "--hessian-stationarity-tolerance",
-        type=_positive_float,
-        default=1e-6,
-        help="Gradient-norm threshold for stationary labels (default: 1e-6).",
-    )
-    parser.add_argument(
-        "--hessian-basin-energy-tolerance",
-        type=_nonnegative_float,
-        default=1e-3,
-        help="Endpoint-cluster energy tolerance (default: 1e-3).",
-    )
-    parser.add_argument(
-        "--hessian-basin-state-tolerance",
-        type=_nonnegative_float,
-        default=5e-2,
-        help="Endpoint-cluster reduced-state tolerance (default: 5e-2).",
-    )
-    parser.add_argument(
-        "--hessian-energy-only-basins",
-        action="store_true",
-        help="Cluster endpoints using energy only.",
-    )
-    parser.add_argument(
-        "--hessian-all-endpoints",
-        action="store_true",
-        help="Compute every selected endpoint Hessian, not only representatives.",
-    )
-    parser.add_argument(
-        "--hessian-save-matrices",
-        action="store_true",
-        help="Also store the dense Hessian matrices.",
+        "--hessian-seed-base",
+        type=_nonnegative_int,
+        default=int(cfg.QFIM_SAMPLE_SEED_BASE),
+        help=(
+            "Base PRNG seed; layer L uses seed base + L "
+            f"(default: {int(cfg.QFIM_SAMPLE_SEED_BASE)})."
+        ),
     )
     parser.add_argument(
         "--hessian-hvp-chunk-size",
@@ -283,17 +248,21 @@ if output_family == "dpqc_reset" and (
     or getattr(_CLI_ARGS, "with_hessian", False)
 ):
     raise ValueError(
-        "Reset-DPQC Hessian visualization is not supported by the original "
-        "14L-parameter Hessian workflow. Run without --hessian-only or "
+        "Reset-DPQC Hessian visualization is not supported by the "
+        "14L-parameter dynamic-channel Hessian workflow. Run without "
+        "--hessian-only or "
         "--with-hessian."
     )
 
 
 # ============================================================
-# Saved-endpoint Hessian analysis and visualization
+# Random-parameter Hessian rank and condition-number analysis
 # ============================================================
 
-_HESSIAN_LAYER_FILE_RE = re.compile(r"^hessian_final_points_L([1-9][0-9]*)\.npz$")
+_HESSIAN_RANDOM_RESULT_NAME = "hessian_random_points.npz"
+_HESSIAN_RANDOM_SCHEMA_VERSION = 1
+_HESSIAN_PARAMETERS_PER_LAYER = 14
+_HESSIAN_RANK_THRESHOLD = float(cfg.QFIM_EFFECTIVE_RANK_THRESHOLD)
 
 
 def _hessian_h_tag(value: float) -> str:
@@ -301,30 +270,17 @@ def _hessian_h_tag(value: float) -> str:
 
 
 def _resolve_hessian_paths(args):
-    """Resolve the VQE input, numerical output, and figure directories."""
-    if args.hessian_input is None:
-        h_tags = list(
-            dict.fromkeys((str(float(args.h_param)), _hessian_h_tag(args.h_param)))
-        )
-        candidates = [
-            Path.cwd()
-            / "figs"
-            / str(args.output_family)
-            / f"h_{tag}"
-            / "numerical_results"
-            / "energy"
-            / "vqe_optimization_histories.npz"
-            for tag in h_tags
-        ]
-        input_path = next((path for path in candidates if path.is_file()), candidates[0])
-    else:
-        input_path = Path(args.hessian_input)
-
-    input_path = input_path.expanduser().resolve()
-    numerical_root = input_path.parent.parent
-    h_root = numerical_root.parent
+    """Resolve the random-point Hessian result and two-figure output dirs."""
+    h_tags = list(
+        dict.fromkeys((str(float(args.h_param)), _hessian_h_tag(args.h_param)))
+    )
+    h_roots = [
+        Path.cwd() / "figs" / str(args.output_family) / f"h_{tag}"
+        for tag in h_tags
+    ]
+    h_root = next((path for path in h_roots if path.is_dir()), h_roots[0])
     results_dir = (
-        numerical_root / "hessian"
+        h_root / "numerical_results" / "hessian"
         if args.hessian_results_dir is None
         else Path(args.hessian_results_dir).expanduser().resolve()
     )
@@ -333,117 +289,56 @@ def _resolve_hessian_paths(args):
         if args.hessian_figures_dir is None
         else Path(args.hessian_figures_dir).expanduser().resolve()
     )
-    return input_path, results_dir, figures_dir
+    return results_dir, figures_dir
 
 
-def _hessian_result_paths(results_dir: Path, requested_layers=None):
-    """Find layer archives, preferring the completed-run metadata manifest."""
-    results_dir = Path(results_dir).expanduser().resolve()
-    metadata_path = results_dir / "hessian_analysis_metadata.json"
-    paths = []
-    if metadata_path.is_file():
-        with metadata_path.open("r", encoding="utf-8") as handle:
-            metadata = json.load(handle)
-        metadata_layers = [int(layer) for layer in metadata.get("layers", [])]
-        if not metadata_layers:
-            raise ValueError(f"Hessian metadata contains no layers: {metadata_path}")
-        missing_manifest_files = []
-        for layer in metadata_layers:
-            path = results_dir / f"hessian_final_points_L{int(layer)}.npz"
-            if path.is_file():
-                paths.append(path)
-            else:
-                missing_manifest_files.append(path)
-        if missing_manifest_files:
-            missing_text = ", ".join(str(path) for path in missing_manifest_files)
-            raise FileNotFoundError(
-                "Hessian metadata refers to missing layer archives: "
-                f"{missing_text}"
-            )
-    if not paths:
-        paths = sorted(
-            (
-                path
-                for path in results_dir.glob("hessian_final_points_L*.npz")
-                if _HESSIAN_LAYER_FILE_RE.fullmatch(path.name)
-            ),
-            key=lambda path: int(_HESSIAN_LAYER_FILE_RE.fullmatch(path.name).group(1)),
-        )
-    if requested_layers is not None:
-        requested = {int(layer) for layer in requested_layers}
-        paths = [
-            path
-            for path in paths
-            if int(_HESSIAN_LAYER_FILE_RE.fullmatch(path.name).group(1))
-            in requested
-        ]
-        found = {
-            int(_HESSIAN_LAYER_FILE_RE.fullmatch(path.name).group(1))
-            for path in paths
-        }
-        missing = sorted(requested - found)
-        if missing:
-            raise FileNotFoundError(
-                f"Missing Hessian result archives for layers: {missing} in "
-                f"{results_dir}"
-            )
-    if not paths:
-        raise FileNotFoundError(
-            f"No hessian_final_points_L*.npz files found in {results_dir}"
-        )
-    return paths
-
-
-def _load_validated_hessian_layer(path: Path, expected_h_param: float):
-    """Load one Hessian archive and verify its saved spectral summaries."""
-    required = {
-        "schema_version",
-        "h_param",
-        "layer",
-        "epsilon",
-        "stationarity_tolerance",
-        "basin_energy_tolerance",
-        "basin_state_tolerance",
-        "structural_null_count",
-        "hessian_method",
-        "hvp_chunk_size",
-        "analysis_mode",
-        "basin_member_counts",
-        "analyzed_run_indices",
-        "analyzed_basin_ids",
-        "analyzed_is_representative",
-        "recomputed_energies",
-        "recomputed_gradient_norms",
-        "stationary",
-        "negative_eigenvalue_counts",
-        "zero_eigenvalue_counts",
-        "positive_eigenvalue_counts",
-        "minimum_eigenvalues",
-        "maximum_eigenvalues",
-        "minimum_positive_eigenvalues",
-        "positive_spectrum_condition_numbers",
-        "condition_number_defined",
-        "zero_fractions",
-        "excess_zero_eigenvalue_counts",
-        "hessian_eigenvalues",
-        "classifications",
-        "quotient_negative_eigenvalue_counts",
-        "quotient_zero_eigenvalue_counts",
-        "quotient_positive_eigenvalue_counts",
-        "quotient_minimum_eigenvalues",
-        "quotient_minimum_positive_eigenvalues",
-        "quotient_positive_spectrum_condition_numbers",
-        "quotient_hessian_eigenvalues",
-    }
+def _load_random_hessian_result(
+    results_dir: Path,
+    *,
+    expected_h_param: float,
+    requested_layers=None,
+):
+    """Load and validate the minimal random-point Hessian archive."""
     import numpy as hnp
 
-    with hnp.load(path, allow_pickle=False) as archive:
-        missing = sorted(required - set(archive.files))
-        if missing:
-            raise KeyError(f"Missing Hessian arrays in {path}: {missing}")
-        data = {key: hnp.asarray(archive[key]) for key in archive.files}
+    path = Path(results_dir) / _HESSIAN_RANDOM_RESULT_NAME
+    if not path.is_file():
+        raise FileNotFoundError(
+            "Random-point Hessian result was not found: "
+            f"{path}. Run without --reuse-hessian-results first."
+        )
 
-    archived_h = float(data["h_param"])
+    required_metadata = {
+        "schema_version",
+        "h_param",
+        "layers",
+        "num_hessian_samples",
+        "hessian_sample_seed_base",
+        "hessian_rank_threshold",
+        "hessian_rank_definition",
+        "hessian_condition_number_definition",
+        "parameter_distribution",
+        "parameters_per_layer",
+        "hessian_method",
+        "hvp_chunk_size",
+    }
+    with hnp.load(path, allow_pickle=False) as archive:
+        missing = sorted(required_metadata.difference(archive.files))
+        if missing:
+            raise KeyError(
+                f"Random-point Hessian archive {path} is missing: "
+                + ", ".join(missing)
+            )
+        data = {key: archive[key] for key in archive.files}
+
+    schema_version = int(hnp.asarray(data["schema_version"]).item())
+    if schema_version != _HESSIAN_RANDOM_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported Hessian schema version {schema_version}; "
+            f"expected {_HESSIAN_RANDOM_SCHEMA_VERSION}."
+        )
+
+    archived_h = float(hnp.asarray(data["h_param"]).item())
     if not math.isclose(
         archived_h,
         float(expected_h_param),
@@ -451,1106 +346,221 @@ def _load_validated_hessian_layer(path: Path, expected_h_param: float):
         abs_tol=1e-12,
     ):
         raise ValueError(
-            f"Hessian archive h_param mismatch in {path}: "
-            f"{archived_h} != {expected_h_param}"
+            f"Hessian archive h_param mismatch: {archived_h} != "
+            f"{expected_h_param}."
         )
-    layer = int(data["layer"])
-    match = _HESSIAN_LAYER_FILE_RE.fullmatch(path.name)
-    if match is None or int(match.group(1)) != layer:
-        raise ValueError(f"Layer metadata does not match filename: {path}")
 
-    run_indices = hnp.asarray(data["analyzed_run_indices"], dtype=int).reshape(-1)
-    basin_ids = hnp.asarray(data["analyzed_basin_ids"], dtype=int).reshape(-1)
-    representative = hnp.asarray(
-        data["analyzed_is_representative"], dtype=bool
-    ).reshape(-1)
-    eigenvalues = hnp.asarray(data["hessian_eigenvalues"], dtype=float)
-    epsilon = float(data["epsilon"])
-    count = run_indices.size
-    if count == 0 or eigenvalues.ndim != 2 or eigenvalues.shape[0] != count:
-        raise ValueError(f"Invalid analyzed endpoint/eigenvalue shapes in {path}")
-    if epsilon <= 0.0 or not math.isfinite(epsilon):
-        raise ValueError(f"Invalid Hessian epsilon in {path}: {epsilon}")
-    structural_null_count = int(data["structural_null_count"])
-    if not 0 <= structural_null_count < eigenvalues.shape[1]:
-        raise ValueError(f"Invalid structural_null_count in {path}")
-    member_counts = hnp.asarray(data["basin_member_counts"], dtype=int).reshape(-1)
-    if member_counts.size == 0 or hnp.any(member_counts <= 0):
-        raise ValueError(f"Invalid basin_member_counts in {path}")
-    for key in (
-        "recomputed_energies",
-        "recomputed_gradient_norms",
-        "stationary",
-        "negative_eigenvalue_counts",
-        "zero_eigenvalue_counts",
-        "positive_eigenvalue_counts",
-        "minimum_eigenvalues",
-        "maximum_eigenvalues",
-        "minimum_positive_eigenvalues",
-        "positive_spectrum_condition_numbers",
-        "condition_number_defined",
-        "zero_fractions",
-        "excess_zero_eigenvalue_counts",
-        "classifications",
-        "quotient_negative_eigenvalue_counts",
-        "quotient_zero_eigenvalue_counts",
-        "quotient_positive_eigenvalue_counts",
-        "quotient_minimum_eigenvalues",
-        "quotient_minimum_positive_eigenvalues",
-        "quotient_positive_spectrum_condition_numbers",
+    threshold = float(hnp.asarray(data["hessian_rank_threshold"]).item())
+    if not math.isclose(
+        threshold,
+        _HESSIAN_RANK_THRESHOLD,
+        rel_tol=0.0,
+        abs_tol=0.0,
     ):
-        if hnp.asarray(data[key]).reshape(-1).size != count:
-            raise ValueError(f"Array {key!r} does not align in {path}")
-    if basin_ids.shape != (count,) or representative.shape != (count,):
-        raise ValueError(f"Basin arrays do not align in {path}")
-    if hnp.any(basin_ids < 0) or hnp.any(basin_ids >= member_counts.size):
-        raise ValueError(f"Analyzed basin IDs are outside the valid range in {path}")
-    energies = hnp.asarray(data["recomputed_energies"], dtype=float)
-    gradient_norms = hnp.asarray(data["recomputed_gradient_norms"], dtype=float)
-    if not hnp.all(hnp.isfinite(energies)):
-        raise FloatingPointError(f"Non-finite recomputed energies in {path}")
-    if not hnp.all(hnp.isfinite(gradient_norms)) or hnp.any(gradient_norms < 0.0):
-        raise FloatingPointError(f"Invalid recomputed gradient norms in {path}")
-    if not hnp.all(hnp.isfinite(eigenvalues)):
-        raise FloatingPointError(f"Non-finite Hessian eigenvalues in {path}")
-    if hnp.any(hnp.diff(eigenvalues, axis=1) < -1e-12):
-        raise ValueError(f"Hessian eigenvalues are not sorted in {path}")
+        raise ValueError(
+            f"Hessian rank threshold mismatch: {threshold} != "
+            f"{_HESSIAN_RANK_THRESHOLD}."
+        )
 
-    negative = hnp.count_nonzero(eigenvalues < -epsilon, axis=1)
-    zero = hnp.count_nonzero(hnp.abs(eigenvalues) <= epsilon, axis=1)
-    positive = hnp.count_nonzero(eigenvalues > epsilon, axis=1)
-    for calculated, key in (
-        (negative, "negative_eigenvalue_counts"),
-        (zero, "zero_eigenvalue_counts"),
-        (positive, "positive_eigenvalue_counts"),
-    ):
-        if not hnp.array_equal(calculated, hnp.asarray(data[key], dtype=int)):
-            raise ValueError(f"Saved {key} is inconsistent with eigenvalues in {path}")
-    if not hnp.all(negative + zero + positive == eigenvalues.shape[1]):
-        raise ValueError(f"Hessian sign counts do not sum to the dimension in {path}")
-    if not hnp.allclose(
-        hnp.asarray(data["minimum_eigenvalues"], dtype=float),
-        eigenvalues[:, 0],
-        rtol=1e-12,
-        atol=1e-14,
-    ):
-        raise ValueError(f"Saved minimum eigenvalues are inconsistent in {path}")
-    if not hnp.allclose(
-        hnp.asarray(data["maximum_eigenvalues"], dtype=float),
-        eigenvalues[:, -1],
-        rtol=1e-12,
-        atol=1e-14,
-    ):
-        raise ValueError(f"Saved maximum eigenvalues are inconsistent in {path}")
+    parameters_per_layer = int(
+        hnp.asarray(data["parameters_per_layer"]).item()
+    )
+    if parameters_per_layer != _HESSIAN_PARAMETERS_PER_LAYER:
+        raise ValueError(
+            "Unexpected Hessian parameter count per layer: "
+            f"{parameters_per_layer}."
+        )
 
-    minimum_positive = hnp.full(count, hnp.nan, dtype=float)
-    condition = hnp.full(count, hnp.nan, dtype=float)
-    condition_defined = hnp.zeros(count, dtype=bool)
-    for position in range(count):
-        positive_values = eigenvalues[position, eigenvalues[position] > epsilon]
-        if positive_values.size:
-            condition_defined[position] = True
-            minimum_positive[position] = positive_values[0]
-            condition[position] = eigenvalues[position, -1] / positive_values[0]
-    if not hnp.array_equal(
-        condition_defined,
-        hnp.asarray(data["condition_number_defined"], dtype=bool),
-    ):
-        raise ValueError(f"Saved condition-number flags are inconsistent in {path}")
-    if not hnp.allclose(
-        minimum_positive,
-        hnp.asarray(data["minimum_positive_eigenvalues"], dtype=float),
-        rtol=1e-11,
-        atol=1e-13,
-        equal_nan=True,
-    ):
-        raise ValueError(f"Saved minimum positive eigenvalues are inconsistent in {path}")
-    if not hnp.allclose(
-        condition,
-        hnp.asarray(data["positive_spectrum_condition_numbers"], dtype=float),
-        rtol=1e-11,
-        atol=1e-12,
-        equal_nan=True,
-    ):
-        raise ValueError(f"Saved condition numbers are inconsistent in {path}")
-    if not hnp.allclose(
-        hnp.asarray(data["zero_fractions"], dtype=float),
-        zero / eigenvalues.shape[1],
-        rtol=0.0,
-        atol=1e-15,
-    ):
-        raise ValueError(f"Saved zero fractions are inconsistent in {path}")
-    expected_excess_zero = hnp.maximum(zero - structural_null_count, 0)
-    if not hnp.array_equal(
-        expected_excess_zero,
-        hnp.asarray(data["excess_zero_eigenvalue_counts"], dtype=int),
-    ):
-        raise ValueError(f"Saved excess zero counts are inconsistent in {path}")
+    num_samples = int(hnp.asarray(data["num_hessian_samples"]).item())
+    if num_samples <= 0:
+        raise ValueError("num_hessian_samples must be positive.")
 
-    quotient_eigenvalues = hnp.asarray(
-        data["quotient_hessian_eigenvalues"], dtype=float
-    )
-    quotient_dimension = eigenvalues.shape[1] - structural_null_count
-    if quotient_eigenvalues.shape != (count, quotient_dimension):
-        raise ValueError(f"Invalid quotient spectrum shape in {path}")
-    if not hnp.all(hnp.isfinite(quotient_eigenvalues)):
-        raise FloatingPointError(f"Non-finite quotient eigenvalues in {path}")
-    if hnp.any(hnp.diff(quotient_eigenvalues, axis=1) < -1e-12):
-        raise ValueError(f"Quotient eigenvalues are not sorted in {path}")
-    quotient_negative = hnp.count_nonzero(
-        quotient_eigenvalues < -epsilon, axis=1
-    )
-    quotient_zero = hnp.count_nonzero(
-        hnp.abs(quotient_eigenvalues) <= epsilon, axis=1
-    )
-    quotient_positive = hnp.count_nonzero(
-        quotient_eigenvalues > epsilon, axis=1
-    )
-    for calculated, key in (
-        (quotient_negative, "quotient_negative_eigenvalue_counts"),
-        (quotient_zero, "quotient_zero_eigenvalue_counts"),
-        (quotient_positive, "quotient_positive_eigenvalue_counts"),
+    archived_layers = hnp.asarray(data["layers"], dtype=int).reshape(-1)
+    if (
+        archived_layers.size == 0
+        or hnp.any(archived_layers <= 0)
+        or hnp.unique(archived_layers).size != archived_layers.size
     ):
-        if not hnp.array_equal(calculated, hnp.asarray(data[key], dtype=int)):
-            raise ValueError(f"Saved {key} is inconsistent in {path}")
-    if not hnp.all(
-        quotient_negative + quotient_zero + quotient_positive
-        == quotient_dimension
-    ):
-        raise ValueError(f"Quotient sign counts do not sum correctly in {path}")
-    if not hnp.allclose(
-        hnp.asarray(data["quotient_minimum_eigenvalues"], dtype=float),
-        quotient_eigenvalues[:, 0],
-        rtol=1e-12,
-        atol=1e-14,
-    ):
-        raise ValueError(f"Saved quotient minima are inconsistent in {path}")
-    quotient_minimum_positive = hnp.full(count, hnp.nan, dtype=float)
-    quotient_condition = hnp.full(count, hnp.nan, dtype=float)
-    for position in range(count):
-        positive_values = quotient_eigenvalues[
-            position, quotient_eigenvalues[position] > epsilon
+        raise ValueError("Hessian archive layers must be unique positive integers.")
+    available_layers = [int(layer) for layer in archived_layers]
+
+    if requested_layers is None:
+        layers = available_layers
+    else:
+        layers = [int(layer) for layer in requested_layers]
+        missing_layers = [layer for layer in layers if layer not in available_layers]
+        if missing_layers:
+            raise KeyError(
+                "Requested Hessian layers are absent from the archive: "
+                + ", ".join(str(layer) for layer in missing_layers)
+            )
+
+    rank_by_layer = {}
+    condition_by_layer = {}
+    for layer in layers:
+        rank_key = f"L{layer}_rank"
+        condition_key = f"L{layer}_condition_number"
+        missing_keys = [
+            key for key in (rank_key, condition_key) if key not in data
         ]
-        if positive_values.size:
-            quotient_minimum_positive[position] = positive_values[0]
-            quotient_condition[position] = (
-                quotient_eigenvalues[position, -1] / positive_values[0]
+        if missing_keys:
+            raise KeyError(
+                f"Hessian archive {path} is missing: " + ", ".join(missing_keys)
             )
-    if not hnp.allclose(
-        quotient_minimum_positive,
-        hnp.asarray(data["quotient_minimum_positive_eigenvalues"], dtype=float),
-        rtol=1e-11,
-        atol=1e-13,
-        equal_nan=True,
-    ):
-        raise ValueError(f"Saved quotient positive minima are inconsistent in {path}")
-    if not hnp.allclose(
-        quotient_condition,
-        hnp.asarray(
-            data["quotient_positive_spectrum_condition_numbers"], dtype=float
-        ),
-        rtol=1e-11,
-        atol=1e-12,
-        equal_nan=True,
-    ):
-        raise ValueError(f"Saved quotient condition numbers are inconsistent in {path}")
 
-    stationary_flags = hnp.asarray(data["stationary"], dtype=bool)
-    expected_classifications = []
-    for is_stationary, negative_count, zero_count, positive_count in zip(
-        stationary_flags,
-        negative,
-        zero,
-        positive,
-    ):
-        if not is_stationary:
-            expected_classifications.append("nonstationary")
-        elif negative_count and positive_count:
-            expected_classifications.append("saddle")
-        elif negative_count:
-            expected_classifications.append("local_maximum_candidate")
-        elif zero_count:
-            expected_classifications.append("flat_stationary_minimum_candidate")
-        elif positive_count == eigenvalues.shape[1]:
-            expected_classifications.append("strict_local_minimum")
-        else:
-            expected_classifications.append("inconclusive_stationary_point")
-    if not hnp.array_equal(
-        hnp.asarray(expected_classifications),
-        hnp.asarray(data["classifications"]).astype(str),
-    ):
-        raise ValueError(f"Saved stationary classifications are inconsistent in {path}")
+        raw_ranks = hnp.asarray(data[rank_key])
+        if (
+            raw_ranks.shape != (num_samples,)
+            or hnp.iscomplexobj(raw_ranks)
+            or not hnp.all(hnp.isfinite(raw_ranks))
+            or not hnp.all(raw_ranks == hnp.rint(raw_ranks))
+        ):
+            raise ValueError(f"Invalid Hessian rank array {rank_key}.")
+        ranks = raw_ranks.astype(hnp.int64)
+        if hnp.any(ranks < 0) or hnp.any(
+            ranks > parameters_per_layer * int(layer)
+        ):
+            raise ValueError(f"Out-of-range Hessian ranks in {rank_key}.")
 
-    unique_basins = hnp.unique(basin_ids)
-    for basin_id in unique_basins:
-        if hnp.count_nonzero(representative & (basin_ids == basin_id)) != 1:
+        conditions = hnp.asarray(data[condition_key], dtype=float)
+        if conditions.shape != (num_samples,) or hnp.any(hnp.isinf(conditions)):
             raise ValueError(
-                f"Basin {int(basin_id)} in L={layer} must have one representative"
+                f"Invalid Hessian condition-number array {condition_key}."
             )
-    data["path"] = path
-    data["layer_value"] = layer
-    data["epsilon_value"] = epsilon
-    return data
+        finite_conditions = hnp.isfinite(conditions)
+        if hnp.any(conditions[finite_conditions] < 1.0 - 1e-12):
+            raise ValueError(
+                f"Hessian condition numbers below one in {condition_key}."
+            )
+        if not hnp.array_equal(finite_conditions, ranks > 0):
+            raise ValueError(
+                f"Hessian rank/condition definedness mismatch at L={layer}."
+            )
 
+        rank_by_layer[layer] = ranks
+        condition_by_layer[layer] = conditions
 
-def _validate_hessian_result_collection(layer_results, results_dir: Path) -> None:
-    """Reject mixed partial runs before combining their basin metrics."""
-    import numpy as hnp
-
-    if not layer_results:
-        raise ValueError("At least one Hessian layer result is required")
-    reference = layer_results[0]
-    scalar_fields = (
-        "schema_version",
-        "epsilon",
-        "stationarity_tolerance",
-        "basin_energy_tolerance",
-        "basin_state_tolerance",
-        "structural_null_count",
-        "hessian_method",
-        "hvp_chunk_size",
-        "analysis_mode",
-    )
-    for result in layer_results:
-        for key in scalar_fields:
-            reference_value = hnp.asarray(reference[key]).reshape(-1)
-            value = hnp.asarray(result[key]).reshape(-1)
-            if reference_value.size != 1 or value.size != 1:
-                raise ValueError(f"Hessian setting {key!r} must be scalar")
-            if hnp.issubdtype(reference_value.dtype, hnp.number) and hnp.issubdtype(
-                value.dtype, hnp.number
-            ):
-                equal = bool(
-                    hnp.allclose(
-                        reference_value.astype(float),
-                        value.astype(float),
-                        rtol=0.0,
-                        atol=0.0,
-                        equal_nan=True,
-                    )
-                )
-            else:
-                equal = str(reference_value[0]) == str(value[0])
-            if not equal:
-                raise ValueError(
-                    f"Mixed Hessian setting {key!r} across layer archives: "
-                    f"{reference['path']} and {result['path']}"
-                )
-
-    metadata_path = Path(results_dir) / "hessian_analysis_metadata.json"
-    if not metadata_path.is_file():
-        return
-    with metadata_path.open("r", encoding="utf-8") as handle:
-        metadata = json.load(handle)
-    metadata_layers = {int(layer) for layer in metadata.get("layers", [])}
-    loaded_layers = {int(result["layer_value"]) for result in layer_results}
-    if not loaded_layers.issubset(metadata_layers):
-        raise ValueError("Loaded Hessian layers are inconsistent with metadata")
-    analysis_mode = str(hnp.asarray(reference["analysis_mode"]))
-    if metadata.get("analysis_mode") != analysis_mode:
-        raise ValueError("Hessian analysis mode is inconsistent with metadata")
-    metadata_checks = {
-        "schema_version": int(hnp.asarray(reference["schema_version"])),
-        "epsilon": float(hnp.asarray(reference["epsilon"])),
-        "stationarity_tolerance": float(
-            hnp.asarray(reference["stationarity_tolerance"])
-        ),
-        "basin_energy_tolerance": float(
-            hnp.asarray(reference["basin_energy_tolerance"])
-        ),
-        "basin_state_tolerance": float(
-            hnp.asarray(reference["basin_state_tolerance"])
-        ),
-        "structural_null_count": int(
-            hnp.asarray(reference["structural_null_count"])
-        ),
-        "hessian_method": str(hnp.asarray(reference["hessian_method"])),
-        "hvp_chunk_size": int(hnp.asarray(reference["hvp_chunk_size"])),
-        "analysis_mode": analysis_mode,
+    return {
+        "path": path,
+        "layers": layers,
+        "num_samples": num_samples,
+        "threshold": threshold,
+        "rank_by_layer": rank_by_layer,
+        "condition_by_layer": condition_by_layer,
     }
-    for key, expected in metadata_checks.items():
-        actual = metadata.get(key)
-        if isinstance(expected, float):
-            if actual is None:
-                actual_value = math.nan
-            else:
-                actual_value = float(actual)
-            equal = math.isclose(
-                expected,
-                actual_value,
-                rel_tol=0.0,
-                abs_tol=0.0,
-            ) or (math.isnan(expected) and math.isnan(actual_value))
-        else:
-            equal = actual == expected
-        if not equal:
-            raise ValueError(
-                f"Hessian metadata field {key!r} does not match layer archives"
-            )
 
 
-def _hessian_point_label(
-    stationary: bool,
-    negative: int,
-    zero: int,
-    structural_null_count: int = 0,
-) -> str:
-    if stationary:
-        if negative:
-            return "stationary_negative_curvature"
-        if zero > structural_null_count:
-            return "flat_stationary_candidate"
-        if zero:
-            return "structurally_flat_stationary_candidate"
-        return "strict_local_minimum"
-    if negative:
-        return "nonstationary_negative_curvature"
-    return "nonstationary_no_detected_negative_curvature"
-
-
-_HESSIAN_CLASS_COLORS = {
-    "stationary_negative_curvature": "#d62728",
-    "flat_stationary_candidate": "#1f77b4",
-    "structurally_flat_stationary_candidate": "#17becf",
-    "strict_local_minimum": "#2ca02c",
-    "nonstationary_negative_curvature": "#ff7f0e",
-    "nonstationary_no_detected_negative_curvature": "#7f7f7f",
-}
-
-_HESSIAN_CLASS_LABELS = {
-    "stationary_negative_curvature": "Stationary, negative curvature",
-    "flat_stationary_candidate": "Extensively flat stationary candidate",
-    "structurally_flat_stationary_candidate": "Structurally flat candidate",
-    "strict_local_minimum": "Strict local minimum",
-    "nonstationary_negative_curvature": "Nonstationary, negative curvature",
-    "nonstationary_no_detected_negative_curvature": (
-        "Nonstationary, no detected negative curvature"
-    ),
-}
-
-
-def _hessian_representative_table(layer_results):
+def _finite_hessian_statistics(values):
+    """Return maximum, mean, SEM, and minimum over finite random samples."""
     import numpy as hnp
 
-    rows = []
-    for result in layer_results:
-        mask = hnp.asarray(result["analyzed_is_representative"], dtype=bool)
-        basin_ids = hnp.asarray(result["analyzed_basin_ids"], dtype=int)
-        member_counts = hnp.asarray(result["basin_member_counts"], dtype=int)
-        structural_null_count = int(result["structural_null_count"])
-        for position in hnp.flatnonzero(mask):
-            basin_id = int(basin_ids[position])
-            negative = int(result["negative_eigenvalue_counts"][position])
-            zero = int(result["zero_eigenvalue_counts"][position])
-            stationary = bool(result["stationary"][position])
-            rows.append(
-                {
-                    "layer": int(result["layer_value"]),
-                    "basin_id": basin_id,
-                    "run_index": int(result["analyzed_run_indices"][position]),
-                    "member_count": int(member_counts[basin_id]),
-                    "parameter_count": int(result["hessian_eigenvalues"].shape[1]),
-                    "epsilon": float(result["epsilon_value"]),
-                    "energy": float(result["recomputed_energies"][position]),
-                    "gradient_norm": float(
-                        result["recomputed_gradient_norms"][position]
-                    ),
-                    "stationary": stationary,
-                    "negative_count": negative,
-                    "zero_count": zero,
-                    "excess_zero_count": int(
-                        result["excess_zero_eigenvalue_counts"][position]
-                    ),
-                    "minimum_eigenvalue": float(
-                        result["minimum_eigenvalues"][position]
-                    ),
-                    "condition_number": float(
-                        result["positive_spectrum_condition_numbers"][position]
-                    ),
-                    "condition_number_defined": bool(
-                        result["condition_number_defined"][position]
-                    ),
-                    "zero_fraction": float(result["zero_fractions"][position]),
-                    "label": _hessian_point_label(
-                        stationary,
-                        negative,
-                        zero,
-                        structural_null_count,
-                    ),
-                    "eigenvalues": hnp.asarray(
-                        result["hessian_eigenvalues"][position], dtype=float
-                    ),
-                }
-            )
-    if not rows:
-        raise ValueError("No basin representatives are present in Hessian results")
-    return rows
+    samples = hnp.asarray(values, dtype=float).reshape(-1)
+    samples = samples[hnp.isfinite(samples)]
+    if samples.size == 0:
+        return (hnp.nan, hnp.nan, hnp.nan, hnp.nan)
+    sem = (
+        float(hnp.std(samples, ddof=1) / hnp.sqrt(samples.size))
+        if samples.size > 1
+        else 0.0
+    )
+    return (
+        float(hnp.max(samples)),
+        float(hnp.mean(samples)),
+        sem,
+        float(hnp.min(samples)),
+    )
 
 
-def _hessian_scatter_coordinates(rows):
-    import numpy as hnp
-
-    coordinates = hnp.empty(len(rows), dtype=float)
-    for layer in sorted({row["layer"] for row in rows}):
-        positions = [index for index, row in enumerate(rows) if row["layer"] == layer]
-        offsets = (
-            hnp.linspace(-0.28, 0.28, len(positions))
-            if len(positions) > 1
-            else hnp.zeros(1)
-        )
-        for index, offset in zip(positions, offsets):
-            coordinates[index] = layer + float(offset)
-    return coordinates
+def _hessian_threshold_tex(threshold: float) -> str:
+    exponent = int(math.floor(math.log10(float(threshold))))
+    mantissa = float(threshold) / (10.0**exponent)
+    if math.isclose(mantissa, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        return rf"10^{{{exponent}}}"
+    return rf"{mantissa:g}\times 10^{{{exponent}}}"
 
 
-def _style_and_save_hessian_figure(
-    fig,
-    outpath: Path,
+def _plot_random_hessian_summary(
+    values_by_layer: dict,
+    layers,
     *,
-    legend=False,
-    tight_rect=None,
-    tight_w_pad=None,
-    tight_h_pad=None,
-):
-    import matplotlib.pyplot as hplt
-    from plot import apply_fontsizes, style_axes_for_prx, style_legend_for_prx
+    ylabel: str,
+    title: str,
+    outpath: Path,
+    lower_bound_zero: bool,
+) -> Path:
+    """Plot layerwise maximum, mean +/- SEM, and minimum in one figure."""
+    import matplotlib.pyplot as plt
+    import numpy as hnp
+
+    valid_layers = [int(layer) for layer in layers if int(layer) in values_by_layer]
+    statistics = [
+        _finite_hessian_statistics(values_by_layer[layer])
+        for layer in valid_layers
+    ]
+    x = hnp.asarray(valid_layers, dtype=float)
+    maxima = hnp.asarray([item[0] for item in statistics], dtype=float)
+    means = hnp.asarray([item[1] for item in statistics], dtype=float)
+    sems = hnp.asarray([item[2] for item in statistics], dtype=float)
+    minima = hnp.asarray([item[3] for item in statistics], dtype=float)
+    finite = (
+        hnp.isfinite(maxima)
+        & hnp.isfinite(means)
+        & hnp.isfinite(sems)
+        & hnp.isfinite(minima)
+    )
+    if not hnp.any(finite):
+        raise ValueError(f"No finite Hessian statistics are available for {title}.")
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.plot(
+        x[finite],
+        maxima[finite],
+        marker="^",
+        linestyle="--",
+        linewidth=1.2,
+        markersize=5.0,
+        color="C3",
+        label="Maximum",
+    )
+    ax.errorbar(
+        x[finite],
+        means[finite],
+        yerr=sems[finite],
+        marker="o",
+        linestyle="-",
+        linewidth=1.5,
+        markersize=5.5,
+        capsize=3.0,
+        elinewidth=0.9,
+        color="C0",
+        label=r"Mean $\pm$ SEM",
+        zorder=3,
+    )
+    ax.plot(
+        x[finite],
+        minima[finite],
+        marker="v",
+        linestyle="--",
+        linewidth=1.2,
+        markersize=5.0,
+        color="C2",
+        label="Minimum",
+    )
+    ax.set_xlabel("Number of Layers")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(layer) for layer in valid_layers])
+    if lower_bound_zero:
+        ax.set_ylim(bottom=0.0)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="best", frameon=True, framealpha=0.9)
+    fig.tight_layout()
 
     outpath = Path(outpath)
     outpath.parent.mkdir(parents=True, exist_ok=True)
-    for axis in fig.axes:
-        # Colorbar axes do not expose ordinary x/y data, but accept this style.
-        apply_fontsizes(axis)
-        style_axes_for_prx(axis, grid=axis.get_label() != "<colorbar>")
-        if legend:
-            style_legend_for_prx(axis, frameon=False)
-    tight_kwargs = {}
-    if tight_w_pad is not None:
-        tight_kwargs["w_pad"] = float(tight_w_pad)
-    if tight_h_pad is not None:
-        tight_kwargs["h_pad"] = float(tight_h_pad)
-    fig.tight_layout(rect=tight_rect, **tight_kwargs)
     fig.savefig(outpath, bbox_inches="tight", pad_inches=0.02)
-    hplt.close(fig)
-
-
-def _plot_hessian_metric_overview(rows, figures_dir: Path):
-    import matplotlib.pyplot as hplt
-    import numpy as hnp
-    from matplotlib.lines import Line2D
-
-    x = _hessian_scatter_coordinates(rows)
-    layers = sorted({row["layer"] for row in rows})
-    colors = [_HESSIAN_CLASS_COLORS[row["label"]] for row in rows]
-    sizes = hnp.asarray([16.0 + 8.0 * math.sqrt(row["member_count"]) for row in rows])
-    epsilon = max(row["epsilon"] for row in rows)
-    fig, axes = hplt.subplots(2, 2, figsize=(8.5, 5.8), sharex=True)
-
-    axes[0, 0].scatter(
-        x,
-        [row["negative_count"] for row in rows],
-        c=colors,
-        s=sizes,
-        edgecolors="black",
-        linewidths=0.3,
-        alpha=0.8,
-    )
-    axes[0, 0].set_ylabel(r"Negative count $n_{-}$")
-
-    axes[0, 1].scatter(
-        x,
-        [row["zero_count"] for row in rows],
-        c=colors,
-        s=sizes,
-        edgecolors="black",
-        linewidths=0.3,
-        alpha=0.8,
-        label=r"Full $n_0$",
-    )
-    axes[0, 1].scatter(
-        x,
-        [row["excess_zero_count"] for row in rows],
-        c=colors,
-        s=16,
-        marker="x",
-        linewidths=0.8,
-        label=r"Excess $n_0$",
-    )
-    axes[0, 1].axhline(2, color="black", linestyle=":", linewidth=0.8)
-    axes[0, 1].set_ylabel(r"Near-zero count $n_0$")
-
-    minimum = hnp.asarray([row["minimum_eigenvalue"] for row in rows])
-    axes[1, 0].scatter(
-        x,
-        minimum,
-        c=colors,
-        s=sizes,
-        edgecolors="black",
-        linewidths=0.3,
-        alpha=0.8,
-    )
-    axes[1, 0].axhline(0.0, color="black", linewidth=0.7)
-    axes[1, 0].axhline(-epsilon, color="#d62728", linestyle="--", linewidth=0.7)
-    axes[1, 0].set_yscale("symlog", linthresh=epsilon)
-    axes[1, 0].set_ylabel(r"Minimum eigenvalue $\mu_{\min}$")
-
-    condition = hnp.asarray([row["condition_number"] for row in rows])
-    condition[~hnp.isfinite(condition) | (condition <= 0.0)] = hnp.nan
-    axes[1, 1].scatter(
-        x,
-        condition,
-        c=colors,
-        s=sizes,
-        edgecolors="black",
-        linewidths=0.3,
-        alpha=0.8,
-    )
-    axes[1, 1].set_yscale("log")
-    axes[1, 1].set_ylabel(r"Positive-spectrum condition $\kappa_{+}$")
-
-    for axis in axes.flat:
-        axis.set_xticks(layers)
-        axis.grid(True, axis="y", alpha=0.25)
-    for axis in axes[0, :]:
-        axis.tick_params(labelbottom=False)
-    for axis in axes[1, :]:
-        axis.set_xlabel("Number of layers")
-        axis.set_xticklabels(
-            [str(layer) for layer in layers], rotation=45, ha="right"
-        )
-    handles = [
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            linestyle="none",
-            markerfacecolor=color,
-            markeredgecolor="black",
-            markeredgewidth=0.3,
-            label=_HESSIAN_CLASS_LABELS[label],
-        )
-        for label, color in _HESSIAN_CLASS_COLORS.items()
-        if any(row["label"] == label for row in rows)
-    ]
-    handles.extend(
-        (
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                linestyle="none",
-                color="#555555",
-                label=r"Full $n_0$",
-            ),
-            Line2D(
-                [0],
-                [0],
-                marker="x",
-                linestyle="none",
-                color="#555555",
-                label=r"Excess $n_0$",
-            ),
-        )
-    )
-    fig.legend(
-        handles=handles,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.995),
-        ncol=3,
-        fontsize=8,
-    )
-    outpath = figures_dir / "hessian_metrics_by_basin.pdf"
-    _style_and_save_hessian_figure(
-        fig,
-        outpath,
-        legend=True,
-        tight_rect=(0.0, 0.0, 1.0, 0.87),
-        tight_w_pad=3.5,
-        tight_h_pad=1.0,
-    )
-    return outpath
-
-
-def _plot_hessian_metrics_for_each_layer(rows, figures_dir: Path):
-    """Render the four requested quantities against explicit basin IDs."""
-    import matplotlib.pyplot as hplt
-    import numpy as hnp
-    from matplotlib.lines import Line2D
-
-    output_dir = figures_dir / "basins"
-    output_paths = []
-    for layer in sorted({row["layer"] for row in rows}):
-        layer_rows = sorted(
-            (row for row in rows if row["layer"] == layer),
-            key=lambda row: row["basin_id"],
-        )
-        basin_ids = hnp.asarray(
-            [row["basin_id"] for row in layer_rows], dtype=float
-        )
-        colors = [_HESSIAN_CLASS_COLORS[row["label"]] for row in layer_rows]
-        sizes = hnp.asarray(
-            [16.0 + 8.0 * math.sqrt(row["member_count"]) for row in layer_rows]
-        )
-        epsilon = max(row["epsilon"] for row in layer_rows)
-        fig, axes = hplt.subplots(2, 2, figsize=(8.5, 5.8), sharex=True)
-
-        axes[0, 0].scatter(
-            basin_ids,
-            [row["negative_count"] for row in layer_rows],
-            c=colors,
-            s=sizes,
-            edgecolors="black",
-            linewidths=0.3,
-            alpha=0.8,
-        )
-        axes[0, 0].set_ylabel(r"Negative count $n_{-}$")
-
-        axes[0, 1].scatter(
-            basin_ids,
-            [row["zero_count"] for row in layer_rows],
-            c=colors,
-            s=sizes,
-            edgecolors="black",
-            linewidths=0.3,
-            alpha=0.8,
-        )
-        axes[0, 1].scatter(
-            basin_ids,
-            [row["excess_zero_count"] for row in layer_rows],
-            c=colors,
-            s=16,
-            marker="x",
-            linewidths=0.8,
-        )
-        axes[0, 1].axhline(2, color="black", linestyle=":", linewidth=0.8)
-        axes[0, 1].set_ylabel(r"Near-zero count $n_0$")
-
-        axes[1, 0].scatter(
-            basin_ids,
-            [row["minimum_eigenvalue"] for row in layer_rows],
-            c=colors,
-            s=sizes,
-            edgecolors="black",
-            linewidths=0.3,
-            alpha=0.8,
-        )
-        axes[1, 0].axhline(0.0, color="black", linewidth=0.7)
-        axes[1, 0].axhline(
-            -epsilon,
-            color="#d62728",
-            linestyle="--",
-            linewidth=0.7,
-        )
-        axes[1, 0].set_yscale("symlog", linthresh=epsilon)
-        axes[1, 0].set_ylabel(r"Minimum eigenvalue $\mu_{\min}$")
-
-        condition = hnp.asarray(
-            [row["condition_number"] for row in layer_rows], dtype=float
-        )
-        condition[~hnp.isfinite(condition) | (condition <= 0.0)] = hnp.nan
-        axes[1, 1].scatter(
-            basin_ids,
-            condition,
-            c=colors,
-            s=sizes,
-            edgecolors="black",
-            linewidths=0.3,
-            alpha=0.8,
-        )
-        axes[1, 1].set_yscale("log")
-        axes[1, 1].set_ylabel(r"Positive-spectrum condition $\kappa_{+}$")
-
-        if basin_ids.size <= 14:
-            ticks = basin_ids.astype(int)
-        else:
-            ticks = hnp.unique(
-                hnp.linspace(
-                    int(hnp.min(basin_ids)),
-                    int(hnp.max(basin_ids)),
-                    10,
-                ).round().astype(int)
-            )
-        for axis in axes.flat:
-            axis.set_xticks(ticks)
-            axis.grid(True, axis="y", alpha=0.25)
-        for axis in axes[0, :]:
-            axis.tick_params(labelbottom=False)
-        for axis in axes[1, :]:
-            axis.set_xlabel("Empirical basin ID")
-
-        present_labels = [
-            label
-            for label in _HESSIAN_CLASS_COLORS
-            if any(row["label"] == label for row in layer_rows)
-        ]
-        handles = [
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                linestyle="none",
-                markerfacecolor=_HESSIAN_CLASS_COLORS[label],
-                markeredgecolor="black",
-                markeredgewidth=0.3,
-                label=_HESSIAN_CLASS_LABELS[label],
-            )
-            for label in present_labels
-        ]
-        handles.extend(
-            (
-                Line2D(
-                    [0], [0], marker="o", linestyle="none", color="#555555",
-                    label=r"Full $n_0$",
-                ),
-                Line2D(
-                    [0], [0], marker="x", linestyle="none", color="#555555",
-                    label=r"Excess $n_0$",
-                ),
-            )
-        )
-        fig.legend(
-            handles=handles,
-            loc="upper center",
-            bbox_to_anchor=(0.5, 0.995),
-            ncol=min(3, len(handles)),
-            fontsize=8,
-        )
-        outpath = output_dir / f"hessian_metrics_L{layer:04d}.pdf"
-        _style_and_save_hessian_figure(
-            fig,
-            outpath,
-            legend=True,
-            tight_rect=(0.0, 0.0, 1.0, 0.87),
-            tight_w_pad=3.5,
-            tight_h_pad=1.0,
-        )
-        output_paths.append(outpath)
-    return output_paths
-
-
-def _plot_single_hessian_metric(rows, figures_dir: Path, metric: str):
-    import matplotlib.pyplot as hplt
-    import numpy as hnp
-
-    specifications = {
-        "negative_count": (r"Negative eigenvalue count $n_{-}$", False),
-        "zero_count": (r"Near-zero eigenvalue count $n_0$", False),
-        "minimum_eigenvalue": (r"Minimum eigenvalue $\mu_{\min}$", False),
-        "condition_number": (r"Positive-spectrum condition $\kappa_{+}$", True),
-    }
-    filenames = {
-        "negative_count": "negative_eigenvalue_count_by_basin.pdf",
-        "zero_count": "zero_eigenvalue_count_by_basin.pdf",
-        "minimum_eigenvalue": "minimum_eigenvalue_by_basin.pdf",
-        "condition_number": "condition_number_by_basin.pdf",
-    }
-    ylabel, logarithmic = specifications[metric]
-    x = _hessian_scatter_coordinates(rows)
-    values = hnp.asarray([row[metric] for row in rows], dtype=float)
-    if metric == "condition_number":
-        values[~hnp.isfinite(values) | (values <= 0.0)] = hnp.nan
-    sizes = [16.0 + 8.0 * math.sqrt(row["member_count"]) for row in rows]
-    colors = [_HESSIAN_CLASS_COLORS[row["label"]] for row in rows]
-    fig, ax = hplt.subplots(figsize=(6.7, 3.2))
-    ax.scatter(
-        x,
-        values,
-        c=colors,
-        s=sizes,
-        edgecolors="black",
-        linewidths=0.3,
-        alpha=0.8,
-    )
-    if metric == "zero_count":
-        ax.axhline(2, color="black", linestyle=":", linewidth=0.8)
-    if metric == "minimum_eigenvalue":
-        epsilon = max(row["epsilon"] for row in rows)
-        ax.axhline(0.0, color="black", linewidth=0.7)
-        ax.axhline(-epsilon, color="#d62728", linestyle="--", linewidth=0.7)
-        ax.set_yscale("symlog", linthresh=epsilon)
-    elif logarithmic:
-        ax.set_yscale("log")
-    layers = sorted({row["layer"] for row in rows})
-    ax.set_xticks(layers)
-    ax.set_xticklabels([str(layer) for layer in layers], rotation=45, ha="right")
-    ax.set_xlabel("Number of layers")
-    ax.set_ylabel(ylabel)
-    ax.grid(True, axis="y", alpha=0.25)
-    outpath = figures_dir / filenames[metric]
-    _style_and_save_hessian_figure(fig, outpath)
-    return outpath
-
-
-def _plot_all_hessian_endpoints(layer_results, figures_dir: Path):
-    """Render within-basin endpoint variation for --hessian-all-endpoints."""
-    import matplotlib.pyplot as hplt
-    import numpy as hnp
-    from matplotlib.lines import Line2D
-
-    output_paths = []
-    output_dir = figures_dir / "endpoints"
-    for result in layer_results:
-        if str(hnp.asarray(result["analysis_mode"])) != "all_selected_endpoints":
-            continue
-        basin_ids = hnp.asarray(result["analyzed_basin_ids"], dtype=int)
-        representative = hnp.asarray(
-            result["analyzed_is_representative"], dtype=bool
-        )
-        stationary = hnp.asarray(result["stationary"], dtype=bool)
-        negative = hnp.asarray(
-            result["negative_eigenvalue_counts"], dtype=int
-        )
-        zero = hnp.asarray(result["zero_eigenvalue_counts"], dtype=int)
-        labels = [
-            _hessian_point_label(
-                bool(is_stationary),
-                int(nneg),
-                int(nzero),
-                int(result["structural_null_count"]),
-            )
-            for is_stationary, nneg, nzero in zip(stationary, negative, zero)
-        ]
-        colors = [_HESSIAN_CLASS_COLORS[label] for label in labels]
-        x = basin_ids.astype(float)
-        for basin_id in hnp.unique(basin_ids):
-            positions = hnp.flatnonzero(basin_ids == basin_id)
-            if positions.size > 1:
-                x[positions] += hnp.linspace(-0.22, 0.22, positions.size)
-
-        fig, axes = hplt.subplots(2, 2, figsize=(8.5, 5.8), sharex=True)
-        metrics = (
-            (axes[0, 0], negative, r"Negative count $n_{-}$"),
-            (axes[0, 1], zero, r"Near-zero count $n_0$"),
-            (
-                axes[1, 0],
-                hnp.asarray(result["minimum_eigenvalues"], dtype=float),
-                r"Minimum eigenvalue $\mu_{\min}$",
-            ),
-            (
-                axes[1, 1],
-                hnp.asarray(
-                    result["positive_spectrum_condition_numbers"], dtype=float
-                ),
-                r"Positive-spectrum condition $\kappa_{+}$",
-            ),
-        )
-        for axis, values, ylabel in metrics:
-            nonrepresentative = ~representative
-            axis.scatter(
-                x[nonrepresentative],
-                values[nonrepresentative],
-                c=hnp.asarray(colors, dtype=object)[nonrepresentative],
-                s=12,
-                edgecolors="none",
-                alpha=0.35,
-            )
-            axis.scatter(
-                x[representative],
-                values[representative],
-                c=hnp.asarray(colors, dtype=object)[representative],
-                s=48,
-                marker="*",
-                edgecolors="black",
-                linewidths=0.4,
-                alpha=0.95,
-            )
-            axis.set_ylabel(ylabel)
-            axis.grid(True, axis="y", alpha=0.25)
-        epsilon = float(result["epsilon_value"])
-        structural_null_count = int(result["structural_null_count"])
-        axes[0, 1].axhline(
-            structural_null_count,
-            color="black",
-            linestyle=":",
-            linewidth=0.8,
-        )
-        axes[1, 0].axhline(0.0, color="black", linewidth=0.7)
-        axes[1, 0].axhline(
-            -epsilon,
-            color="#d62728",
-            linestyle="--",
-            linewidth=0.7,
-        )
-        axes[1, 0].set_yscale("symlog", linthresh=epsilon)
-        axes[1, 1].set_yscale("log")
-        unique_basins = hnp.unique(basin_ids)
-        if unique_basins.size <= 14:
-            ticks = unique_basins
-        else:
-            ticks = hnp.unique(
-                hnp.linspace(
-                    int(unique_basins.min()),
-                    int(unique_basins.max()),
-                    10,
-                ).round().astype(int)
-            )
-        for axis in axes.flat:
-            axis.set_xticks(ticks)
-        for axis in axes[0, :]:
-            axis.tick_params(labelbottom=False)
-        for axis in axes[1, :]:
-            axis.set_xlabel("Empirical basin ID")
-        fig.legend(
-            handles=(
-                Line2D(
-                    [0], [0], marker="*", linestyle="none", color="#555555",
-                    label="Basin representative",
-                ),
-                Line2D(
-                    [0], [0], marker="o", linestyle="none", color="#888888",
-                    label="Other analyzed endpoint",
-                ),
-            ),
-            loc="upper center",
-            bbox_to_anchor=(0.5, 0.995),
-            ncol=2,
-            fontsize=8,
-        )
-        layer = int(result["layer_value"])
-        outpath = output_dir / f"hessian_all_endpoints_L{layer:04d}.pdf"
-        _style_and_save_hessian_figure(
-            fig,
-            outpath,
-            legend=True,
-            tight_rect=(0.0, 0.0, 1.0, 0.90),
-            tight_w_pad=3.5,
-            tight_h_pad=1.0,
-        )
-        output_paths.append(outpath)
-    return output_paths
-
-
-def _plot_hessian_layer_spectra(layer_results, figures_dir: Path):
-    import matplotlib.colors as hcolors
-    import matplotlib.pyplot as hplt
-    import numpy as hnp
-
-    output_dir = figures_dir / "spectra"
-    output_paths = []
-    for result in layer_results:
-        representative = hnp.asarray(
-            result["analyzed_is_representative"], dtype=bool
-        )
-        basin_ids = hnp.asarray(result["analyzed_basin_ids"], dtype=int)[
-            representative
-        ]
-        spectra = hnp.asarray(result["hessian_eigenvalues"], dtype=float)[
-            representative
-        ]
-        order = hnp.argsort(basin_ids)
-        basin_ids = basin_ids[order]
-        spectra = spectra[order]
-        epsilon = float(result["epsilon_value"])
-        magnitude = max(float(hnp.max(hnp.abs(spectra))), epsilon * 10.0)
-        height = min(8.0, max(3.0, 1.8 + 0.20 * spectra.shape[0]))
-        fig, ax = hplt.subplots(figsize=(7.0, height))
-        image = ax.imshow(
-            spectra,
-            aspect="auto",
-            interpolation="nearest",
-            origin="lower",
-            cmap="coolwarm",
-            norm=hcolors.SymLogNorm(
-                linthresh=epsilon,
-                vmin=-magnitude,
-                vmax=magnitude,
-            ),
-        )
-        if basin_ids.size <= 24:
-            ticks = hnp.arange(basin_ids.size)
-        else:
-            ticks = hnp.unique(
-                hnp.linspace(0, basin_ids.size - 1, 16).round().astype(int)
-            )
-        ax.set_yticks(ticks)
-        ax.set_yticklabels([str(int(basin_ids[index])) for index in ticks])
-        ax.set_xlabel("Eigenvalue index (ascending)")
-        ax.set_ylabel("Empirical basin ID")
-        colorbar = fig.colorbar(image, ax=ax, pad=0.02)
-        minimum_exponent = int(math.floor(math.log10(epsilon)))
-        maximum_exponent = int(math.floor(math.log10(magnitude)))
-        exponent_ticks = hnp.unique(
-            hnp.linspace(
-                minimum_exponent,
-                maximum_exponent,
-                min(5, maximum_exponent - minimum_exponent + 1),
-            ).round().astype(int)
-        )
-        positive_ticks = 10.0 ** exponent_ticks
-        colorbar.set_ticks(
-            hnp.concatenate((-positive_ticks[::-1], hnp.asarray([0.0]), positive_ticks))
-        )
-        colorbar.set_label("Hessian eigenvalue")
-        layer = int(result["layer_value"])
-        outpath = output_dir / f"hessian_spectrum_L{layer:04d}.pdf"
-        _style_and_save_hessian_figure(fig, outpath)
-        output_paths.append(outpath)
-    return output_paths
-
-
-def _plot_hessian_energy_curvature(rows, figures_dir: Path):
-    import matplotlib.pyplot as hplt
-
-    fig, ax = hplt.subplots(figsize=(6.2, 3.8))
-    scatter = ax.scatter(
-        [row["energy"] for row in rows],
-        [row["minimum_eigenvalue"] for row in rows],
-        c=[row["zero_fraction"] for row in rows],
-        s=[16.0 + 8.0 * math.sqrt(row["member_count"]) for row in rows],
-        cmap="viridis",
-        edgecolors="black",
-        linewidths=0.3,
-        alpha=0.8,
-    )
-    epsilon = max(row["epsilon"] for row in rows)
-    ax.axhline(0.0, color="black", linewidth=0.7)
-    ax.axhline(-epsilon, color="#d62728", linestyle="--", linewidth=0.7)
-    ax.set_yscale("symlog", linthresh=epsilon)
-    ax.set_xlabel("Final energy")
-    ax.set_ylabel(r"Minimum eigenvalue $\mu_{\min}$")
-    colorbar = fig.colorbar(scatter, ax=ax, pad=0.02)
-    colorbar.set_label(r"Near-zero fraction $n_0/P$")
-    outpath = figures_dir / "final_energy_vs_minimum_eigenvalue.pdf"
-    _style_and_save_hessian_figure(fig, outpath)
-    return outpath
-
-
-def _plot_hessian_classifications(rows, figures_dir: Path):
-    import matplotlib.pyplot as hplt
-    import numpy as hnp
-
-    layers = sorted({row["layer"] for row in rows})
-    labels = [
-        label
-        for label in _HESSIAN_CLASS_COLORS
-        if any(row["label"] == label for row in rows)
-    ]
-    fig, ax = hplt.subplots(figsize=(7.0, 3.5))
-    bottom = hnp.zeros(len(layers), dtype=float)
-    for label in labels:
-        counts = hnp.asarray(
-            [
-                sum(row["layer"] == layer and row["label"] == label for row in rows)
-                for layer in layers
-            ],
-            dtype=float,
-        )
-        ax.bar(
-            layers,
-            counts,
-            bottom=bottom,
-            color=_HESSIAN_CLASS_COLORS[label],
-            edgecolor="black",
-            linewidth=0.3,
-            label=_HESSIAN_CLASS_LABELS[label],
-        )
-        bottom += counts
-    ax.set_xticks(layers)
-    ax.set_xticklabels([str(layer) for layer in layers], rotation=45, ha="right")
-    ax.set_xlabel("Number of layers")
-    ax.set_ylabel("Number of empirical basins")
-    ax.legend(bbox_to_anchor=(1.02, 1.0), loc="upper left")
-    outpath = figures_dir / "hessian_classification_counts.pdf"
-    _style_and_save_hessian_figure(fig, outpath, legend=True)
+    plt.close(fig)
     return outpath
 
 
@@ -1561,146 +571,60 @@ def visualize_hessian_results(
     expected_h_param: float,
     layers=None,
 ):
-    """Validate saved Hessian outputs and render basin/layer comparisons."""
-    import matplotlib
-
-    matplotlib.use("Agg", force=True)
-    paths = _hessian_result_paths(results_dir, layers)
-    layer_results = [
-        _load_validated_hessian_layer(path, expected_h_param) for path in paths
-    ]
-    _validate_hessian_result_collection(layer_results, results_dir)
-    rows = _hessian_representative_table(layer_results)
-    figures_dir = Path(figures_dir).expanduser().resolve()
-    figures_dir.mkdir(parents=True, exist_ok=True)
-
-    figure_paths = [_plot_hessian_metric_overview(rows, figures_dir)]
-    figure_paths.extend(_plot_hessian_metrics_for_each_layer(rows, figures_dir))
-    figure_paths.extend(_plot_all_hessian_endpoints(layer_results, figures_dir))
-    for metric in (
-        "negative_count",
-        "zero_count",
-        "minimum_eigenvalue",
-        "condition_number",
-    ):
-        figure_paths.append(_plot_single_hessian_metric(rows, figures_dir, metric))
-    figure_paths.extend(_plot_hessian_layer_spectra(layer_results, figures_dir))
-    figure_paths.append(_plot_hessian_energy_curvature(rows, figures_dir))
-    figure_paths.append(_plot_hessian_classifications(rows, figures_dir))
-
-    classification_counts = {
-        label: sum(row["label"] == label for row in rows)
-        for label in _HESSIAN_CLASS_COLORS
-    }
-    report = {
-        "h_param": float(expected_h_param),
-        "layers": sorted({row["layer"] for row in rows}),
-        "analysis_mode": str(layer_results[0]["analysis_mode"]),
-        "analyzed_endpoint_count": sum(
-            int(result["analyzed_run_indices"].size) for result in layer_results
-        ),
-        "basin_representative_count": len(rows),
-        "stationary_representative_count": sum(row["stationary"] for row in rows),
-        "negative_curvature_representative_count": sum(
-            row["negative_count"] > 0 for row in rows
-        ),
-        "classification_counts": classification_counts,
-        "minimum_eigenvalue": min(row["minimum_eigenvalue"] for row in rows),
-        "maximum_zero_fraction": max(row["zero_fraction"] for row in rows),
-        "figure_files": [str(path) for path in figure_paths],
-    }
-    manifest_path = figures_dir / "hessian_visualization_manifest.json"
-    temporary_path = manifest_path.with_name(f".{manifest_path.name}.tmp")
-    with temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(report, handle, ensure_ascii=False, indent=2, allow_nan=False)
-        handle.write("\n")
-    os.replace(temporary_path, manifest_path)
-    print(
-        "Hessian visualization: "
-        f"{len(rows)} basin representatives across {len(report['layers'])} layers; "
-        f"{report['negative_curvature_representative_count']} have negative curvature, "
-        f"{report['stationary_representative_count']} satisfy stationarity tolerance."
+    """Render only the random-point Hessian rank and condition figures."""
+    result = _load_random_hessian_result(
+        results_dir,
+        expected_h_param=expected_h_param,
+        requested_layers=layers,
     )
-    print(f"Saved Hessian figures to: {figures_dir}")
-    return {"report": report, "manifest": manifest_path}
+    threshold_tex = _hessian_threshold_tex(result["threshold"])
+    figures_dir = Path(figures_dir)
+    rank_path = _plot_random_hessian_summary(
+        result["rank_by_layer"],
+        result["layers"],
+        ylabel=rf"Hessian rank ($|\lambda_i| \geq {threshold_tex}$)",
+        title=(
+            f"Hessian rank at {result['num_samples']} random parameter points"
+        ),
+        outpath=figures_dir / "hessian_rank_random_points.pdf",
+        lower_bound_zero=True,
+    )
+    condition_path = _plot_random_hessian_summary(
+        result["condition_by_layer"],
+        result["layers"],
+        ylabel=(
+            rf"Thresholded Hessian condition number "
+            rf"($|\lambda_i| \geq {threshold_tex}$)"
+        ),
+        title=(
+            "Hessian condition number at "
+            f"{result['num_samples']} random parameter points"
+        ),
+        outpath=figures_dir / "hessian_condition_number_random_points.pdf",
+        lower_bound_zero=False,
+    )
+    print(
+        "Hessian visualization: saved rank and condition-number figures to "
+        f"{figures_dir}",
+        flush=True,
+    )
+    return rank_path, condition_path
 
 
 def run_hessian_workflow(args):
-    """Compute Hessian summaries when requested, then render their figures."""
-    input_path, results_dir, figures_dir = _resolve_hessian_paths(args)
+    """Compute/reuse random-point Hessian summaries and render exactly two PDFs."""
+    results_dir, figures_dir = _resolve_hessian_paths(args)
     if not args.reuse_hessian_results:
         from DPQC_overparam_hessian import run_hessian_analysis
 
         run_hessian_analysis(
-            input_path=input_path,
             output_dir=results_dir,
             h_param=float(args.h_param),
             layers=args.hessian_layers,
-            runs=args.hessian_runs,
-            epsilon=float(args.hessian_epsilon),
-            stationarity_tolerance=float(
-                args.hessian_stationarity_tolerance
-            ),
-            basin_energy_tolerance=float(
-                args.hessian_basin_energy_tolerance
-            ),
-            basin_state_tolerance=(
-                None
-                if args.hessian_energy_only_basins
-                else float(args.hessian_basin_state_tolerance)
-            ),
-            all_endpoints=bool(args.hessian_all_endpoints),
-            save_hessians=bool(args.hessian_save_matrices),
+            num_samples=int(args.hessian_num_samples),
+            seed_base=int(args.hessian_seed_base),
             hvp_chunk_size=int(args.hessian_hvp_chunk_size),
         )
-    else:
-        metadata_path = results_dir / "hessian_analysis_metadata.json"
-        if metadata_path.is_file():
-            with metadata_path.open("r", encoding="utf-8") as handle:
-                metadata = json.load(handle)
-            requested_settings = {
-                "epsilon": float(args.hessian_epsilon),
-                "stationarity_tolerance": float(
-                    args.hessian_stationarity_tolerance
-                ),
-                "basin_energy_tolerance": float(
-                    args.hessian_basin_energy_tolerance
-                ),
-                "basin_state_tolerance": (
-                    None
-                    if args.hessian_energy_only_basins
-                    else float(args.hessian_basin_state_tolerance)
-                ),
-            }
-            mismatches = [
-                key
-                for key, requested in requested_settings.items()
-                if metadata.get(key) != requested
-            ]
-            if (
-                args.hessian_runs is not None
-                and list(args.hessian_runs) != metadata.get("requested_runs")
-            ):
-                mismatches.append("runs")
-            requested_mode = (
-                "all_selected_endpoints"
-                if args.hessian_all_endpoints
-                else "one_representative_per_empirical_basin"
-            )
-            if metadata.get("analysis_mode") != requested_mode:
-                mismatches.append("analysis_mode")
-            if args.hessian_save_matrices and not metadata.get(
-                "save_hessians", False
-            ):
-                mismatches.append("save_hessians")
-            if mismatches:
-                warnings.warn(
-                    "--reuse-hessian-results uses saved settings; ignored "
-                    "command-line calculation settings: "
-                    + ", ".join(dict.fromkeys(mismatches)),
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
     return visualize_hessian_results(
         results_dir,
         figures_dir,
@@ -1912,19 +836,6 @@ def style_violin_bodies(vp, colors, *, alpha=0.20, lw=1.0, line_color=None):
         if artist is not None:
             if line_color is not None:
                 artist.set_color(line_color)
-            artist.set_linewidth(lw)
-
-
-def style_boxplot(bp, color, *, alpha=0.20, lw=1.0):
-    for box in bp["boxes"]:
-        box.set_facecolor(color)
-        box.set_edgecolor(color)
-        box.set_alpha(alpha)
-        box.set_linewidth(lw)
-
-    for key in ("whiskers", "caps", "medians"):
-        for artist in bp[key]:
-            artist.set_color(color)
             artist.set_linewidth(lw)
 
 
@@ -3056,31 +1967,6 @@ final_theta_periodic_only_rmsdist_by_layer = _load_layer_arrays_from_npz(
     "theta_rmsdist",
     dtype=NP_REAL_DTYPE,
 )
-ancilla_p1_stats_by_layer = {
-    int(L): {
-        "ancilla_qubits": np.asarray(
-            vqe_optimization_results[f"L{int(L)}_ancilla_qubits"],
-            dtype=NP_INT_DTYPE,
-        ),
-        "p1_runs": np.asarray(
-            vqe_optimization_results[f"L{int(L)}_ancilla_p1_runs"],
-            dtype=NP_REAL_DTYPE,
-        ),
-        "mean": np.asarray(
-            vqe_optimization_results[f"L{int(L)}_ancilla_p1_mean"],
-            dtype=NP_REAL_DTYPE,
-        ),
-        "var": np.asarray(
-            vqe_optimization_results[f"L{int(L)}_ancilla_p1_var"],
-            dtype=NP_REAL_DTYPE,
-        ),
-        "std": np.asarray(
-            vqe_optimization_results[f"L{int(L)}_ancilla_p1_std"],
-            dtype=NP_REAL_DTYPE,
-        ),
-    }
-    for L in vqe_layer_list
-}
 final_stats = {
     "layer": np.asarray(vqe_optimization_results["final_stats_layer"], dtype=NP_INT_DTYPE),
     "success_rate": np.asarray(vqe_optimization_results["final_stats_success_rate"], dtype=NP_REAL_DTYPE),
@@ -3172,20 +2058,6 @@ plot_violin_by_layer(
     outpath=os.path.join(energy_fig_dir, "final_energy_error.pdf"),
     show_legend=False,
     log_scale=False,
-)
-
-plot_violin_by_layer(
-    [
-        np.maximum(err, eps)
-        for err in final_energy_error_by_layer
-    ],
-    vqe_layer_list,
-    cmap=cmap,
-    ylabel="Final energy error",
-    title=f"Final energy-error distributions{vqe_optimizer_title_suffix}",
-    outpath=os.path.join(energy_fig_dir, "final_energy_error_logscale.pdf"),
-    show_legend=False,
-    log_scale=True,
 )
 
 plot_beeswarm_by_layer(
@@ -3301,59 +2173,6 @@ render_success_probability_multiple_tolerances_figure(
     ),
 )
 
-fig, ax = new_fig_ax(outside_legend=True)
-legend_handles = []
-all_x_ticks = set()
-
-for idx, L in enumerate(vqe_layer_list):
-    color = cmap(idx / len(vqe_layer_list))
-
-    legend_handles.append(
-        Patch(
-            facecolor=color,
-            edgecolor=color,
-            alpha=0.25,
-            label=f"L{L}",
-        )
-    )
-
-    anc_ids = ancilla_p1_stats_by_layer[L]["ancilla_qubits"]
-    p1_runs = ancilla_p1_stats_by_layer[L]["p1_runs"]
-
-    positions = anc_ids.astype(float) + (
-        idx - (len(vqe_layer_list) - 1) / 2
-    ) * (0.12 / len(vqe_layer_list))
-
-    all_x_ticks.update(anc_ids.tolist())
-
-    bp = ax.boxplot(
-        [p1_runs[:, j] for j in range(p1_runs.shape[1])],
-        positions=positions,
-        widths=0.08,
-        showfliers=False,
-        patch_artist=True,
-        manage_ticks=False,
-    )
-
-    style_boxplot(bp, color, alpha=0.20, lw=1.0)
-
-ax.set_xlabel("Ancilla Qubit Index")
-ax.set_ylabel("Ancilla probability")
-ax.set_title(rf"Ancilla $P(1)$ over {num_runs} runs")
-ax.grid(True, alpha=0.3)
-ax.set_xticks(sorted(all_x_ticks))
-ax.legend(handles=legend_handles, bbox_to_anchor=(1.05, 1), loc="upper left")
-
-save_fig(
-    fig,
-    ax,
-    os.path.join(energy_fig_dir, "ancilla_p1.pdf"),
-    outside_legend=True,
-)
-
-
-# ============================================================
-
 # ============================================================
 # Load random-parameter QFIM results and generate QFIM figures
 # ============================================================
@@ -3361,10 +2180,32 @@ save_fig(
 # ============================================================
 QFIM_EIG_PLOT_EPS = cfg.QFIM_EIG_PLOT_EPS
 NUM_QFIM_SAMPLES = cfg.NUM_QFIM_SAMPLES
+QFIM_TRACE_EIGENVALUE_THRESHOLD = NP_REAL_DTYPE(
+    cfg.QFIM_EFFECTIVE_RANK_THRESHOLD
+)
 
 QFIM_PATH_EIGCOUNT_THRESHOLDS = tuple(
     float(t) for t in cfg.QFIM_PATH_EIGCOUNT_THRESHOLDS
 )
+
+
+def qfim_trace_at_or_above_rank_threshold(eigenvalues: np.ndarray) -> np.ndarray:
+    """Sum eigenvalues at/above the cutoff; preserve invalid spectra as NaN."""
+    eigs = np.asarray(eigenvalues, dtype=NP_REAL_DTYPE)
+    if eigs.ndim == 0:
+        raise ValueError("QFIM eigenvalues must have an eigenvalue axis.")
+
+    trace = np.sum(
+        np.where(
+            eigs >= QFIM_TRACE_EIGENVALUE_THRESHOLD,
+            eigs,
+            NP_REAL_DTYPE(0.0),
+        ),
+        axis=-1,
+        dtype=NP_REAL_DTYPE,
+    )
+    finite_spectrum = np.all(np.isfinite(eigs), axis=-1)
+    return np.where(finite_spectrum, trace, NP_REAL_DTYPE(np.nan))
 
 
 def eigenvalue_index_ticks(n_params: int, *, max_ticks: int = 11) -> np.ndarray:
@@ -3560,12 +2401,10 @@ qfim_eigs_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     "eigs_desc",
     dtype=NP_REAL_DTYPE,
 )
-qfim_eigsum_reduced_0123_by_layer = _load_layer_arrays_from_npz(
-    qfim_random_points_results,
-    qfim_layer_list,
-    "trace",
-    dtype=NP_REAL_DTYPE,
-)
+qfim_thresholded_trace_reduced_0123_by_layer = {
+    int(L): qfim_trace_at_or_above_rank_threshold(eigs)
+    for L, eigs in qfim_eigs_reduced_0123_by_layer.items()
+}
 qfim_abs_entry_sum_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     qfim_random_points_results,
     qfim_layer_list,
@@ -3607,6 +2446,20 @@ def _qfim_threshold_tex_for_label(threshold: float) -> str:
         return rf"10^{{{exp}}}"
 
     return rf"{mant:g}\times 10^{{{exp}}}"
+
+
+QFIM_TRACE_THRESHOLD_TEX = _qfim_threshold_tex_for_label(
+    QFIM_TRACE_EIGENVALUE_THRESHOLD
+)
+QFIM_TRACE_YLABEL = (
+    rf"QFIM trace ($\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}$)"
+)
+QFIM_TRACE_MEAN_YLABEL = (
+    rf"Mean QFIM trace ($\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}$)"
+)
+QFIM_TRACE_SUM_LABEL = (
+    rf"$\sum_{{\lambda_k \geq {QFIM_TRACE_THRESHOLD_TEX}}}\lambda_k(F)$"
+)
 
 
 def qfim_random_eigcount_by_threshold_by_layer(
@@ -3766,8 +2619,8 @@ plot_qfim_random_eigcount_threshold_overlay(
 
 # ============================================================
 # Maximum QFIM trace + mean ± SEM by layer
-#   Trace(F) is computed as the sum of QFIM eigenvalues at each
-#   random parameter point, using qfim_eigsum_reduced_0123_by_layer.
+#   The plotted value is the sum of QFIM eigenvalues at or above the rank
+#   threshold at each random parameter point.
 #   reduced keep=(0,1,2,3) only
 # ============================================================
 def _qfim_metric_max_mean_sem_xy(metric_by_layer: dict, layers):
@@ -3874,7 +2727,7 @@ def plot_qfim_trace_max_mean_sem_by_layer(
     )
 
     ax.set_xlabel("Number of Layers")
-    ax.set_ylabel("QFIM trace")
+    ax.set_ylabel(QFIM_TRACE_YLABEL)
     ax.set_title(title)
     ax.set_xticks(x)
     ax.set_xticklabels([str(L) for L in valid_layers])
@@ -3890,7 +2743,7 @@ def plot_qfim_trace_max_mean_sem_by_layer(
 
 if INCLUDE_QFIM_TRACE_FIGURES:
     plot_qfim_trace_max_mean_sem_by_layer(
-        qfim_eigsum_reduced_0123_by_layer,
+        qfim_thresholded_trace_reduced_0123_by_layer,
         qfim_layer_list,
         title=(
             rf"QFIM trace maximum and mean $\pm$ SEM at "
@@ -3965,7 +2818,7 @@ def plot_qfim_trace_history_mean_by_layer(
     *,
     title: str,
     outpath: str,
-    ylabel: str = "Mean QFIM trace",
+    ylabel: str = QFIM_TRACE_MEAN_YLABEL,
     metric_name: str = "QFIM trace",
     cmap=None,
     log_scale: bool = False,
@@ -4071,36 +2924,11 @@ if INCLUDE_OPTIMIZATION_PATH_QFIM:
         dtype=NP_REAL_DTYPE,
     )
 
-    qfim_trace_history_result_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_trace_history_optimization_path_{keep_key}.npz",
-    )
-    if os.path.exists(qfim_trace_history_result_path):
-        qfim_trace_history_results = load_npz_result(
-            qfim_trace_history_result_path
-        )
-        qfim_trace_history_layer_list = [
-            int(L)
-            for L in np.asarray(
-                qfim_trace_history_results["layers"],
-                dtype=NP_INT_DTYPE,
-            )
-        ]
-        qfim_trace_history_optimization_path_by_layer = (
-            _load_layer_arrays_from_npz(
-                qfim_trace_history_results,
-                qfim_trace_history_layer_list,
-                suffix=None,
-                dtype=NP_REAL_DTYPE,
-            )
-        )
-    else:
-        qfim_trace_history_layer_list = list(vqe_layer_list)
-        qfim_trace_history_optimization_path_by_layer = {
-            int(L): np.sum(np.asarray(eigs, dtype=NP_REAL_DTYPE), axis=2)
-            for L, eigs
-            in qfim_eigs_history_optimization_path_by_layer.items()
-        }
+    qfim_trace_history_layer_list = list(vqe_layer_list)
+    qfim_trace_history_optimization_path_by_layer = {
+        int(L): qfim_trace_at_or_above_rank_threshold(eigs)
+        for L, eigs in qfim_eigs_history_optimization_path_by_layer.items()
+    }
 
     if INCLUDE_QFIM_TRACE_FIGURES:
         plot_qfim_trace_history_mean_by_layer(
@@ -4482,7 +3310,7 @@ for threshold in (
 
 # ============================================================
 # Mean ± SEM scalar QFIM diagnostics
-#   1. Sum of QFIM eigenvalues
+#   1. Sum of QFIM eigenvalues at or above the rank threshold
 #   2. Sum of absolute values of QFIM matrix entries
 #   reduced keep=(0,1,2,3) only
 # ============================================================
@@ -4563,7 +3391,7 @@ if INCLUDE_OPTIMIZATION_PATH_QFIM and INCLUDE_QFIM_TRACE_FIGURES:
     plot_metric_mean_sem_by_layer(
         qfim_trace_history_optimization_path_by_layer,
         qfim_trace_history_layer_list,
-        ylabel="Mean QFIM trace",
+        ylabel=QFIM_TRACE_MEAN_YLABEL,
         title=(
             rf"QFIM trace mean $\pm$ SEM vs Layers along optimization path "
             rf"({keep_label})"
@@ -4572,7 +3400,7 @@ if INCLUDE_OPTIMIZATION_PATH_QFIM and INCLUDE_QFIM_TRACE_FIGURES:
             qfim_trace_dir,
             f"qfim_trace_mean_errorbar_optimization_path_{keep_key}.pdf",
         ),
-        label=r"$\sum_k \lambda_k(F)$",
+        label=QFIM_TRACE_SUM_LABEL,
         color="C0",
         marker="o",
         log_scale=False,
@@ -4953,12 +3781,10 @@ def render_qfim_keep01234_core_figures() -> None:
                 "eigs_desc",
                 dtype=NP_REAL_DTYPE,
             )
-            trace_by_layer = _load_layer_arrays_from_npz(
-                random_result,
-                random_layers,
-                "trace",
-                dtype=NP_REAL_DTYPE,
-            )
+            trace_by_layer = {
+                int(L): qfim_trace_at_or_above_rank_threshold(eigs)
+                for L, eigs in eigs_by_layer.items()
+            }
             abs_entry_sum_by_layer = _load_layer_arrays_from_npz(
                 random_result,
                 random_layers,
@@ -5142,55 +3968,12 @@ def render_qfim_keep01234_core_figures() -> None:
                     cmap=cmap,
                 )
 
-    trace_history_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_trace_history_optimization_path_{keep_key_5}.npz",
-    )
-    trace_history_result = (
-        _load_optional_npz_result(
-            trace_history_path,
-            description="keep01234 optimization-path QFIM-trace result",
-        )
-        if os.path.exists(trace_history_path)
-        else None
-    )
-
-    trace_history_layers = None
-    trace_history_sample_iters = None
-    trace_history_by_layer = {}
-
-    if trace_history_result is not None:
-        trace_history_layers = _summary_layers_or_none(
-            trace_history_result,
-            description="keep01234 optimization-path QFIM-trace result",
-        )
-        trace_history_sample_iters = _summary_sample_iters_or_none(
-            trace_history_result,
-            description="keep01234 optimization-path QFIM-trace result",
-        )
-        if trace_history_layers is not None:
-            trace_history_by_layer = _load_layer_arrays_from_npz(
-                trace_history_result,
-                trace_history_layers,
-                suffix=None,
-                dtype=NP_REAL_DTYPE,
-            )
-
-    if (
-        (
-            trace_history_layers is None
-            or trace_history_sample_iters is None
-            or not trace_history_by_layer
-        )
-        and eigs_history_layers is not None
-        and eigs_history_sample_iters is not None
-    ):
-        trace_history_layers = eigs_history_layers
-        trace_history_sample_iters = eigs_history_sample_iters
-        trace_history_by_layer = {
-            int(L): np.sum(np.asarray(eigs, dtype=NP_REAL_DTYPE), axis=2)
-            for L, eigs in eigs_history_by_layer.items()
-        }
+    trace_history_layers = eigs_history_layers
+    trace_history_sample_iters = eigs_history_sample_iters
+    trace_history_by_layer = {
+        int(L): qfim_trace_at_or_above_rank_threshold(eigs)
+        for L, eigs in eigs_history_by_layer.items()
+    }
 
     if (
         INCLUDE_QFIM_TRACE_FIGURES
@@ -5215,7 +3998,7 @@ def render_qfim_keep01234_core_figures() -> None:
         plot_metric_mean_sem_by_layer(
             trace_history_by_layer,
             trace_history_layers,
-            ylabel="Mean QFIM trace",
+            ylabel=QFIM_TRACE_MEAN_YLABEL,
             title=(
                 rf"QFIM trace mean $\pm$ SEM vs Layers along optimization "
                 rf"path ({keep_label_5})"
@@ -5227,7 +4010,7 @@ def render_qfim_keep01234_core_figures() -> None:
                     f"{keep_key_5}.pdf"
                 ),
             ),
-            label=r"$\sum_k \lambda_k(F)$",
+            label=QFIM_TRACE_SUM_LABEL,
             color="C0",
             marker="o",
             log_scale=False,

@@ -8,9 +8,11 @@ saved VQE and random-point QFIM results below
 ``figs/dpqc_reset/h_<h_param>`` without recomputing either quantity.
 The shared QFIM figures include the participation effective rank
 ``(sum(lambda[lambda > 1e-12]))**2 / sum(lambda[lambda > 1e-12]**2)``
-saved by the compute stage.  For each retained subsystem, the random-parameter
-figure uses the number of layers on the x-axis and shows the effective-rank
-mean with SEM error bars together with explicit minimum and maximum curves.
+saved by the compute stage, plus Trace figures computed as
+``sum(lambda[lambda >= 1e-12])`` from the saved eigenvalues.  For each retained
+subsystem, the random-parameter figures use the number of layers on the x-axis.
+The effective-rank figure shows its mean with SEM error bars together with
+explicit minimum and maximum curves.
 Threshold rank and optimization-iteration effective-rank figures are not
 rendered.
 
@@ -87,7 +89,7 @@ def _parse_cli_args(
         description=(
             "Visualize saved fixed-Rx(pi) reset-DPQC VQE and random-point "
             "QFIM results without recomputation, including layerwise "
-            "participation-effective-rank mean/min/max/SEM summaries."
+            "participation-effective-rank and thresholded-Trace summaries."
         )
     )
     parser.add_argument(
@@ -136,7 +138,6 @@ def _build_visualizer_command(
         _OUTPUT_FAMILY,
         "--skip-optimization-path-qfim",
         "--skip-qfim-eigs-by-index-layers",
-        "--skip-qfim-trace-figures",
     ]
     tolerance_values = (
         () if convergence_tolerances is None else convergence_tolerances

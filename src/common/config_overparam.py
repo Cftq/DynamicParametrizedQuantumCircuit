@@ -8,7 +8,7 @@
 # ------------------------------------------------------------
 H_PARAM = 0.10
 # R: number of independent VQE optimization trials for every layer.
-NUM_RUNS = 100
+NUM_RUNS = 10
 STEPS = 3000
 SAMPLE_EVERY = 1000
 # Parameter update used by the DPQC and reset-DPQC VQE pipelines.
@@ -48,7 +48,7 @@ SUCCESS_PROBABILITY_FIGURE_THRESHOLDS = tuple(
 # Layer schedules
 # ------------------------------------------------------------
 # DPQC VQE optimization
-VQE_MAX_LAYER = 44
+VQE_MAX_LAYER = 8
 VQE_DENSE_UNTIL_LAYER = 8
 VQE_SPARSE_STEP = 4
 
