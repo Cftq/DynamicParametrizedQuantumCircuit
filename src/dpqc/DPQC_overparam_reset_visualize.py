@@ -9,10 +9,13 @@ saved VQE and random-point QFIM results below
 The shared QFIM figures include the participation effective rank
 ``(sum(lambda[lambda > 1e-12]))**2 / sum(lambda[lambda > 1e-12]**2)``
 saved by the compute stage, plus Trace figures computed as
-``sum(lambda[lambda >= 1e-12])`` from the saved eigenvalues.  For each retained
-subsystem, the random-parameter figures use the number of layers on the x-axis.
-The effective-rank and Trace figures show their means with SEM error bars
-together with explicit minimum and maximum curves.
+``sum(lambda[lambda >= 1e-12])`` and spectral Shannon entropy figures computed
+as ``-sum(p * log(p))`` in nats from those same saved eigenvalues.  Here the
+probabilities normalize the active spectrum ``lambda >= 1e-12``; a zero active
+trace gives entropy zero.  For each retained subsystem, the random-parameter
+figures use the number of layers on the x-axis.  The effective-rank, Trace, and
+Shannon-entropy figures show their means with SEM error bars together with
+explicit minimum and maximum curves.
 Optimization-path effective rank is neither computed nor rendered.  Random-
 point threshold rank is retained as numerical data but is not rendered.
 
@@ -89,7 +92,8 @@ def _parse_cli_args(
         description=(
             "Visualize saved fixed-Rx(pi) reset-DPQC VQE and random-point "
             "QFIM results without recomputation, including layerwise "
-            "participation-effective-rank and thresholded-Trace summaries."
+            "participation-effective-rank, thresholded-Trace, and spectral "
+            "Shannon-entropy summaries."
         )
     )
     parser.add_argument(

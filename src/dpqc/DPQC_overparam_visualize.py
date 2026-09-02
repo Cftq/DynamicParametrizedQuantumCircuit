@@ -6,7 +6,8 @@ Run DPQC_overparam_vqe.py followed by DPQC_overparam_qfim.py to create the
 .npz files under figs/dpqc/h_<h_param>/numerical_results. This script loads
 those saved results and generates figures without recomputing VQE/QFIM.
 QFIM trace figures sum only eigenvalues at or above the configured QFIM rank
-threshold (1e-12 by default).
+threshold (1e-12 by default).  The same active spectrum is normalized to
+compute its Shannon entropy in nats directly from the saved eigenvalues.
 
 Example::
 
@@ -1826,6 +1827,7 @@ qfim_eigcount_optimization_path_min_dir = os.path.join(
     "min",
 )
 qfim_effective_rank_dir = os.path.join(qfim_fig_dir, "effective_rank")
+qfim_shannon_entropy_dir = os.path.join(qfim_fig_dir, "shannon_entropy")
 circuit_dir = os.path.join(save_dir, "optimized_circuits")
 numerical_results_dir = os.path.join(save_dir, "numerical_results")
 energy_results_dir = os.path.join(numerical_results_dir, "energy")
@@ -1909,6 +1911,7 @@ _output_dirs = (
     qfim_eigcount_dir,
     qfim_eigcount_random_dir,
     qfim_effective_rank_dir,
+    qfim_shannon_entropy_dir,
     circuit_dir,
 )
 if INCLUDE_QFIM_TRACE_FIGURES:
@@ -2208,6 +2211,50 @@ def qfim_trace_at_or_above_rank_threshold(eigenvalues: np.ndarray) -> np.ndarray
     return np.where(finite_spectrum, trace, NP_REAL_DTYPE(np.nan))
 
 
+def qfim_spectral_shannon_entropy(eigenvalues: np.ndarray) -> np.ndarray:
+    """Return ``-sum(p log(p))`` in nats for each saved QFIM spectrum.
+
+    Only eigenvalues at or above ``QFIM_TRACE_EIGENVALUE_THRESHOLD`` belong
+    to the active spectrum, matching the existing thresholded Trace and rank
+    diagnostics.  A finite spectrum with zero active trace has entropy zero;
+    a spectrum containing any non-finite value produces NaN.
+    """
+    eigs = np.asarray(eigenvalues, dtype=NP_REAL_DTYPE)
+    if eigs.ndim == 0:
+        raise ValueError("QFIM eigenvalues must have an eigenvalue axis.")
+
+    finite_spectrum = np.all(np.isfinite(eigs), axis=-1)
+    active_eigs = np.where(
+        np.isfinite(eigs) & (eigs >= QFIM_TRACE_EIGENVALUE_THRESHOLD),
+        eigs,
+        NP_REAL_DTYPE(0.0),
+    )
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        active_trace = np.sum(active_eigs, axis=-1, dtype=NP_REAL_DTYPE)
+        positive_trace = np.isfinite(active_trace) & (active_trace > 0.0)
+        probabilities = np.divide(
+            active_eigs,
+            active_trace[..., None],
+            out=np.zeros_like(active_eigs, dtype=NP_REAL_DTYPE),
+            where=positive_trace[..., None],
+        )
+        log_probabilities = np.zeros_like(probabilities, dtype=NP_REAL_DTYPE)
+        np.log(
+            probabilities,
+            out=log_probabilities,
+            where=probabilities > 0.0,
+        )
+        entropy = -np.sum(
+            probabilities * log_probabilities,
+            axis=-1,
+            dtype=NP_REAL_DTYPE,
+        )
+    finite_spectrum = finite_spectrum & np.isfinite(active_trace)
+    entropy = np.maximum(entropy, NP_REAL_DTYPE(0.0))
+    entropy = np.where(positive_trace, entropy, NP_REAL_DTYPE(0.0))
+    return np.where(finite_spectrum, entropy, NP_REAL_DTYPE(np.nan))
+
+
 def eigenvalue_index_ticks(n_params: int, *, max_ticks: int = 11) -> np.ndarray:
     n_params = int(n_params)
 
@@ -2405,6 +2452,10 @@ qfim_thresholded_trace_reduced_0123_by_layer = {
     int(L): qfim_trace_at_or_above_rank_threshold(eigs)
     for L, eigs in qfim_eigs_reduced_0123_by_layer.items()
 }
+qfim_shannon_entropy_reduced_0123_by_layer = {
+    int(L): qfim_spectral_shannon_entropy(eigs)
+    for L, eigs in qfim_eigs_reduced_0123_by_layer.items()
+}
 qfim_abs_entry_sum_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     qfim_random_points_results,
     qfim_layer_list,
@@ -2459,6 +2510,16 @@ QFIM_TRACE_MEAN_YLABEL = (
 )
 QFIM_TRACE_SUM_LABEL = (
     rf"$\sum_{{\lambda_k \geq {QFIM_TRACE_THRESHOLD_TEX}}}\lambda_k(F)$"
+)
+QFIM_SHANNON_ENTROPY_YLABEL = (
+    rf"QFIM spectral Shannon entropy (nats, "
+    rf"$\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}$)"
+)
+QFIM_SHANNON_ENTROPY_LABEL = (
+    rf"$H_{{\mathrm{{Sh}}}}(F)=-\sum_i p_i\ln p_i$"
+)
+QFIM_SHANNON_ENTROPY_THRESHOLD_TAG = (
+    f"ge_{_thr_tag(QFIM_TRACE_EIGENVALUE_THRESHOLD)}"
 )
 
 
@@ -2695,6 +2756,7 @@ def plot_qfim_trace_max_mean_sem_by_layer(
     marker_min: str = "v",
     lw: float = 1.4,
     log_scale: bool = False,
+    ylabel: str = QFIM_TRACE_YLABEL,
 ):
     (
         x,
@@ -2748,7 +2810,7 @@ def plot_qfim_trace_max_mean_sem_by_layer(
     )
 
     ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(QFIM_TRACE_YLABEL)
+    ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.set_xticks(x)
     ax.set_xticklabels([str(L) for L in valid_layers])
@@ -2784,6 +2846,32 @@ if INCLUDE_QFIM_TRACE_FIGURES:
         lw=1.4,
         log_scale=False,
     )
+
+
+plot_qfim_trace_max_mean_sem_by_layer(
+    qfim_shannon_entropy_reduced_0123_by_layer,
+    qfim_layer_list,
+    title=(
+        rf"QFIM spectral Shannon entropy over {NUM_QFIM_SAMPLES} random "
+        rf"points ({keep_label})"
+    ),
+    outpath=os.path.join(
+        qfim_shannon_entropy_dir,
+        (
+            "qfim_shannon_entropy_max_mean_sem_random_points_"
+            f"{QFIM_SHANNON_ENTROPY_THRESHOLD_TAG}_{keep_key}.pdf"
+        ),
+    ),
+    color_max="C3",
+    color_mean="C0",
+    color_min="C2",
+    marker_max="^",
+    marker_mean="o",
+    marker_min="v",
+    lw=1.4,
+    log_scale=False,
+    ylabel=QFIM_SHANNON_ENTROPY_YLABEL,
+)
 
 
 # ============================================================
@@ -2861,6 +2949,7 @@ def plot_qfim_trace_history_mean_by_layer(
 
     fig, ax = new_fig_ax(outside_legend=True, legend_space_frac=0.22)
     n_layers = len(valid_layers)
+    plotted = False
 
     for layer_idx, L in enumerate(valid_layers):
         traces = np.asarray(trace_history_by_layer[L], dtype=NP_REAL_DTYPE)
@@ -2888,6 +2977,7 @@ def plot_qfim_trace_history_mean_by_layer(
 
         color = cmap(layer_idx / max(n_layers - 1, 1))
 
+        plotted = True
         ax.errorbar(
             x[finite_mask],
             means[finite_mask],
@@ -2901,6 +2991,10 @@ def plot_qfim_trace_history_mean_by_layer(
             color=color,
             label=f"L={L}",
         )
+
+    if not plotted:
+        plt.close(fig)
+        return
 
     ax.set_xlabel("Iterations")
     ax.set_ylabel(ylabel)
@@ -2933,6 +3027,7 @@ def plot_qfim_trace_history_mean_by_layer(
 
 qfim_eigs_history_optimization_path_by_layer = {}
 qfim_trace_history_optimization_path_by_layer = {}
+qfim_shannon_entropy_history_optimization_path_by_layer = {}
 qfim_trace_history_layer_list = []
 
 if INCLUDE_OPTIMIZATION_PATH_QFIM:
@@ -2953,6 +3048,10 @@ if INCLUDE_OPTIMIZATION_PATH_QFIM:
         int(L): qfim_trace_at_or_above_rank_threshold(eigs)
         for L, eigs in qfim_eigs_history_optimization_path_by_layer.items()
     }
+    qfim_shannon_entropy_history_optimization_path_by_layer = {
+        int(L): qfim_spectral_shannon_entropy(eigs)
+        for L, eigs in qfim_eigs_history_optimization_path_by_layer.items()
+    }
 
     if INCLUDE_QFIM_TRACE_FIGURES:
         plot_qfim_trace_history_mean_by_layer(
@@ -2968,13 +3067,35 @@ if INCLUDE_OPTIMIZATION_PATH_QFIM:
             log_scale=False,
         )
 
+    plot_qfim_trace_history_mean_by_layer(
+        qfim_shannon_entropy_history_optimization_path_by_layer,
+        qfim_trace_history_layer_list,
+        sample_iters,
+        title=(
+            "Mean QFIM spectral Shannon entropy along optimization path "
+            f"({keep_label})"
+        ),
+        outpath=os.path.join(
+            qfim_shannon_entropy_dir,
+            (
+                "qfim_shannon_entropy_mean_sem_optimization_path_by_iteration_"
+                f"{QFIM_SHANNON_ENTROPY_THRESHOLD_TAG}_{keep_key}.pdf"
+            ),
+        ),
+        ylabel=QFIM_SHANNON_ENTROPY_YLABEL,
+        metric_name="QFIM spectral Shannon entropy",
+        cmap=cmap,
+        log_scale=False,
+    )
+
 
 def _sample_mean_sem(samples: np.ndarray) -> Tuple[NP_REAL_DTYPE, NP_REAL_DTYPE]:
     samples = np.asarray(samples, dtype=NP_REAL_DTYPE).reshape(-1)
+    samples = samples[np.isfinite(samples)]
     n = int(samples.size)
 
     if n == 0:
-        return NP_REAL_DTYPE(0.0), NP_REAL_DTYPE(0.0)
+        return NP_REAL_DTYPE(np.nan), NP_REAL_DTYPE(np.nan)
 
     mean = NP_REAL_DTYPE(np.mean(samples))
 
@@ -3352,7 +3473,9 @@ def _metric_mean_sem_by_layer(metric_by_layer: dict, layers) -> dict:
         stats_by_layer[L] = {
             "mean": mean_L,
             "sem": sem_L,
-            "n": NP_INT_DTYPE(np.asarray(metric_by_layer[L]).size),
+            "n": NP_INT_DTYPE(
+                np.count_nonzero(np.isfinite(metric_by_layer[L]))
+            ),
         }
 
     return stats_by_layer
@@ -3377,8 +3500,13 @@ def plot_metric_mean_sem_by_layer(
         layers,
     )
 
-    if x.size == 0:
+    finite = np.isfinite(means) & np.isfinite(sems)
+    if x.size == 0 or not np.any(finite):
         return
+
+    x = x[finite]
+    means = means[finite]
+    sems = sems[finite]
 
     fig, ax = new_fig_ax(outside_legend=False)
 
@@ -3425,6 +3553,29 @@ if INCLUDE_OPTIMIZATION_PATH_QFIM and INCLUDE_QFIM_TRACE_FIGURES:
             f"qfim_trace_mean_errorbar_optimization_path_{keep_key}.pdf",
         ),
         label=QFIM_TRACE_SUM_LABEL,
+        color="C0",
+        marker="o",
+        log_scale=False,
+    )
+
+if INCLUDE_OPTIMIZATION_PATH_QFIM:
+    plot_metric_mean_sem_by_layer(
+        qfim_shannon_entropy_history_optimization_path_by_layer,
+        qfim_trace_history_layer_list,
+        ylabel=QFIM_SHANNON_ENTROPY_YLABEL,
+        title=(
+            rf"QFIM spectral Shannon entropy mean $\pm$ SEM vs Layers "
+            rf"along optimization path ({keep_label})"
+        ),
+        outpath=os.path.join(
+            qfim_shannon_entropy_dir,
+            (
+                "qfim_shannon_entropy_flattened_mean_sem_"
+                "optimization_path_by_layer_"
+                f"{QFIM_SHANNON_ENTROPY_THRESHOLD_TAG}_{keep_key}.pdf"
+            ),
+        ),
+        label=QFIM_SHANNON_ENTROPY_LABEL,
         color="C0",
         marker="o",
         log_scale=False,
@@ -3809,6 +3960,10 @@ def render_qfim_keep01234_core_figures() -> None:
                 int(L): qfim_trace_at_or_above_rank_threshold(eigs)
                 for L, eigs in eigs_by_layer.items()
             }
+            shannon_entropy_by_layer = {
+                int(L): qfim_spectral_shannon_entropy(eigs)
+                for L, eigs in eigs_by_layer.items()
+            }
             abs_entry_sum_by_layer = _load_layer_arrays_from_npz(
                 random_result,
                 random_layers,
@@ -3887,6 +4042,32 @@ def render_qfim_keep01234_core_figures() -> None:
                     lw=1.4,
                     log_scale=False,
                 )
+
+            plot_qfim_trace_max_mean_sem_by_layer(
+                shannon_entropy_by_layer,
+                random_layers,
+                title=(
+                    "QFIM spectral Shannon entropy over "
+                    f"{num_random_samples} random points ({keep_label_5})"
+                ),
+                outpath=os.path.join(
+                    qfim_shannon_entropy_dir,
+                    (
+                        "qfim_shannon_entropy_max_mean_sem_random_points_"
+                        f"{QFIM_SHANNON_ENTROPY_THRESHOLD_TAG}_"
+                        f"{keep_key_5}.pdf"
+                    ),
+                ),
+                color_max="C3",
+                color_mean="C0",
+                color_min="C2",
+                marker_max="^",
+                marker_mean="o",
+                marker_min="v",
+                lw=1.4,
+                log_scale=False,
+                ylabel=QFIM_SHANNON_ENTROPY_YLABEL,
+            )
 
             plot_metric_mean_sem_by_layer(
                 abs_entry_sum_by_layer,
@@ -4000,6 +4181,10 @@ def render_qfim_keep01234_core_figures() -> None:
         int(L): qfim_trace_at_or_above_rank_threshold(eigs)
         for L, eigs in eigs_history_by_layer.items()
     }
+    shannon_entropy_history_by_layer = {
+        int(L): qfim_spectral_shannon_entropy(eigs)
+        for L, eigs in eigs_history_by_layer.items()
+    }
 
     if (
         INCLUDE_QFIM_TRACE_FIGURES
@@ -4037,6 +4222,53 @@ def render_qfim_keep01234_core_figures() -> None:
                 ),
             ),
             label=QFIM_TRACE_SUM_LABEL,
+            color="C0",
+            marker="o",
+            log_scale=False,
+        )
+
+    if (
+        trace_history_layers is not None
+        and trace_history_sample_iters is not None
+    ):
+        plot_qfim_trace_history_mean_by_layer(
+            shannon_entropy_history_by_layer,
+            trace_history_layers,
+            trace_history_sample_iters,
+            title=(
+                "Mean QFIM spectral Shannon entropy along optimization path "
+                f"({keep_label_5})"
+            ),
+            outpath=os.path.join(
+                qfim_shannon_entropy_dir,
+                (
+                    "qfim_shannon_entropy_mean_sem_optimization_path_"
+                    "by_iteration_"
+                    f"{QFIM_SHANNON_ENTROPY_THRESHOLD_TAG}_{keep_key_5}.pdf"
+                ),
+            ),
+            ylabel=QFIM_SHANNON_ENTROPY_YLABEL,
+            metric_name="QFIM spectral Shannon entropy",
+            cmap=cmap,
+            log_scale=False,
+        )
+        plot_metric_mean_sem_by_layer(
+            shannon_entropy_history_by_layer,
+            trace_history_layers,
+            ylabel=QFIM_SHANNON_ENTROPY_YLABEL,
+            title=(
+                rf"QFIM spectral Shannon entropy mean $\pm$ SEM vs Layers "
+                rf"along optimization path ({keep_label_5})"
+            ),
+            outpath=os.path.join(
+                qfim_shannon_entropy_dir,
+                (
+                    "qfim_shannon_entropy_flattened_mean_sem_"
+                    "optimization_path_by_layer_"
+                    f"{QFIM_SHANNON_ENTROPY_THRESHOLD_TAG}_{keep_key_5}.pdf"
+                ),
+            ),
+            label=QFIM_SHANNON_ENTROPY_LABEL,
             color="C0",
             marker="o",
             log_scale=False,
