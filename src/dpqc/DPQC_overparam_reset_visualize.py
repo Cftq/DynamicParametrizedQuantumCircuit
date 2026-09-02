@@ -11,10 +11,10 @@ The shared QFIM figures include the participation effective rank
 saved by the compute stage, plus Trace figures computed as
 ``sum(lambda[lambda >= 1e-12])`` from the saved eigenvalues.  For each retained
 subsystem, the random-parameter figures use the number of layers on the x-axis.
-The effective-rank figure shows its mean with SEM error bars together with
-explicit minimum and maximum curves.
-Threshold rank and optimization-iteration effective-rank figures are not
-rendered.
+The effective-rank and Trace figures show their means with SEM error bars
+together with explicit minimum and maximum curves.
+Optimization-path effective rank is neither computed nor rendered.  Random-
+point threshold rank is retained as numerical data but is not rendered.
 
 The plotting implementation is shared with ``DPQC_overparam_visualize.py``.
 It is launched in a separate Python process with the result family fixed to

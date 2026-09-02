@@ -1587,7 +1587,7 @@ def _plot_random_qfim_trace_by_layer(
     num_samples: int,
     outpath: str,
 ) -> None:
-    valid_layers, maxima, means, sems = [], [], [], []
+    valid_layers, maxima, means, sems, minima = [], [], [], [], []
     for L in layers:
         values = np.asarray(trace_by_layer[int(L)], dtype=NP_REAL_DTYPE)
         finite_values = values[np.isfinite(values)]
@@ -1598,29 +1598,46 @@ def _plot_random_qfim_trace_by_layer(
         maxima.append(float(np.max(finite_values)))
         means.append(mean)
         sems.append(sem)
+        minima.append(float(np.min(finite_values)))
     if not valid_layers:
         return
 
     x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
     upqc.new_prx_figure(width="double")
     ax = plt.gca()
-    ax.plot(
-        x,
-        maxima,
-        marker="o",
-        linewidth=1.3,
-        color="C0",
-        label="Maximum",
-    )
     ax.errorbar(
         x,
         means,
         yerr=sems,
-        marker="s",
-        linewidth=1.3,
+        marker="o",
+        linestyle="-",
+        linewidth=1.5,
+        markersize=5.5,
         capsize=3.0,
-        color="C1",
+        elinewidth=0.9,
+        color=METRIC_COLORS["qfim"],
         label=r"Mean $\pm$ SEM",
+        zorder=3,
+    )
+    ax.plot(
+        x,
+        minima,
+        marker="v",
+        linestyle="--",
+        linewidth=1.2,
+        markersize=5.0,
+        color="C2",
+        label="Minimum",
+    )
+    ax.plot(
+        x,
+        maxima,
+        marker="^",
+        linestyle="--",
+        linewidth=1.2,
+        markersize=5.0,
+        color="C3",
+        label="Maximum",
     )
     ax.set_xlabel("Number of Layers")
     ax.set_ylabel(QFIM_TRACE_YLABEL)
@@ -1630,6 +1647,7 @@ def _plot_random_qfim_trace_by_layer(
     )
     ax.set_xticks(x)
     ax.set_xticklabels([str(L) for L in valid_layers])
+    ax.set_ylim(bottom=0.0)
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(loc="best", frameon=True, framealpha=0.9)
     Path(outpath).parent.mkdir(parents=True, exist_ok=True)
@@ -2147,11 +2165,11 @@ def _load_optimization_path_results() -> None:
         for keep_key, eigs_by_layer in upqc.qfim_eigs_history_by_keep.items()
     }
 
-    hs_rank_path = os.path.join(
+    hs_eigs_path = os.path.join(
         upqc.hs_results_dir,
-        "hs_rank_history_optimization_path_reduced_0123.npz",
+        "hs_eigs_history_optimization_path_reduced_0123.npz",
     )
-    hs_result = _load_required_result(hs_rank_path)
+    hs_result = _load_required_result(hs_eigs_path)
     upqc.hs_eigs_history_by_layer = {
         L: np.asarray(hs_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
         for L in layers
@@ -2159,7 +2177,7 @@ def _load_optimization_path_results() -> None:
     hs_pure_result = _load_required_result(
         os.path.join(
             upqc.hs_results_dir,
-            "hs_rank_history_optimization_path_pure_full.npz",
+            "hs_eigs_history_optimization_path_pure_full.npz",
         )
     )
     upqc.hs_eigs_history_pure_by_layer = {

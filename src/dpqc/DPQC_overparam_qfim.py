@@ -631,14 +631,18 @@ def run_qfim(*, include_optimization_path: bool = True):
     RUN_QFIM_EFFECTIVE_RANK_RANDOM_POINTS = (
         cfg.RUN_QFIM_EFFECTIVE_RANK_RANDOM_POINTS
     )
-    RUN_QFIM_EFFECTIVE_RANK_OPTIMIZATION_PATH = (
-        cfg.RUN_QFIM_EFFECTIVE_RANK_OPTIMIZATION_PATH
-    )
-    def psd_rank_and_desc_eigs(F: jnp.ndarray):
-        evals = jnp.clip(jnp.linalg.eigvalsh(_hermitian(F)), a_min=0.0)
-        rank, _ = threshold_psd_eigvals_for_rank(evals)
 
-        return rank, evals[::-1]
+    def psd_desc_eigs(F: jnp.ndarray):
+        evals = jnp.clip(jnp.linalg.eigvalsh(_hermitian(F)), a_min=0.0)
+
+        return evals[::-1]
+
+
+    def psd_rank_and_desc_eigs(F: jnp.ndarray):
+        evals_desc = psd_desc_eigs(F)
+        rank, _ = threshold_psd_eigvals_for_rank(evals_desc)
+
+        return rank, evals_desc
 
 
     def participation_effective_rank_from_eigvals(
@@ -1400,26 +1404,20 @@ def run_qfim(*, include_optimization_path: bool = True):
         return
 
     # ============================================================
-    # Optimization-path QFIM rank/eigenvalues: compute and save numerical results
+    # Optimization-path QFIM eigenvalues: compute and save numerical results
     # ============================================================
-    # QFIM rank along the VQE optimization path
-    #   x-axis: sampled optimization iteration
-    #   y-axis: run-mean QFIM effective rank at theta(iteration)
-    #   color: layer number
-    # ============================================================
-    def compute_joint_qfim_rank_history_by_layer(
+    def compute_joint_qfim_eigs_history_by_layer(
         theta_samples_by_layer: dict,
         layers,
         *,
         jvp_chunk: int = RED_JVP_CHUNK,
     ):
-        rank_histories = ({}, {})
         eig_histories = ({}, {})
 
         for L in tqdm(
             layers,
             desc=(
-                "QFIM rank/eigenvalue history; "
+                "QFIM eigenvalue history; "
                 "keep=(0,1,2,3) and keep=(0,1,2,3,4)"
             ),
             unit="layer",
@@ -1452,14 +1450,6 @@ def run_qfim(*, include_optimization_path: bool = True):
                     jvp_chunk=jvp_chunk,
                 )
             )
-            ranks_L = tuple(
-                np.full(
-                    (n_runs_L, n_times_L),
-                    np.nan,
-                    dtype=NP_REAL_DTYPE,
-                )
-                for _ in range(2)
-            )
             eigs_L = tuple(
                 np.full(
                     (n_runs_L, n_times_L, n_params_L),
@@ -1471,7 +1461,7 @@ def run_qfim(*, include_optimization_path: bool = True):
 
             for run_idx in tqdm(
                 range(n_runs_L),
-                desc=f"QFIM-rank runs (L={L})",
+                desc=f"QFIM-eigenvalue runs (L={L})",
                 unit="run",
                 leave=False,
             ):
@@ -1483,93 +1473,23 @@ def run_qfim(*, include_optimization_path: bool = True):
                         )
                     )
                     for state_index, F in enumerate((F4, F5)):
-                        _, eigs_desc = psd_rank_and_desc_eigs(F)
+                        eigs_desc = psd_desc_eigs(F)
                         eigs_np = jax_to_np(eigs_desc, dtype=NP_REAL_DTYPE)
                         eigs_L[state_index][run_idx, time_idx, :] = eigs_np
-                        ranks_L[state_index][run_idx, time_idx] = np.count_nonzero(
-                            eigs_np > float(QFIM_EFFECTIVE_RANK_THRESHOLD)
-                        )
 
             for state_index in range(2):
-                rank_histories[state_index][L] = ranks_L[state_index]
                 eig_histories[state_index][L] = eigs_L[state_index]
 
-        return (
-            (rank_histories[0], eig_histories[0]),
-            (rank_histories[1], eig_histories[1]),
-        )
+        return eig_histories
 
 
     (
-        (
-            qfim_rank_history_by_layer,
-            qfim_eigs_history_optimization_path_by_layer,
-        ),
-        (
-            qfim_rank_history_keep01234_by_layer,
-            qfim_eigs_history_optimization_path_keep01234_by_layer,
-        ),
-    ) = compute_joint_qfim_rank_history_by_layer(
+        qfim_eigs_history_optimization_path_by_layer,
+        qfim_eigs_history_optimization_path_keep01234_by_layer,
+    ) = compute_joint_qfim_eigs_history_by_layer(
         theta_sample_traces_by_layer,
         vqe_layer_list,
         jvp_chunk=RED_JVP_CHUNK,
-    )
-
-    np.savez(
-        os.path.join(qfim_fig_dir, f"qfim_rank_history_optimization_path_{keep_key}.npz"),
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-        **{
-            f"L{int(L)}": arr
-            for L, arr in qfim_rank_history_by_layer.items()
-        },
-    )
-
-    np.savez(
-        os.path.join(
-            qfim_fig_dir,
-            f"qfim_rank_history_optimization_path_{keep_key_5}.npz",
-        ),
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-        keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
-        state_label=np.asarray(keep_label_5),
-        **{
-            f"L{int(L)}": arr
-            for L, arr in qfim_rank_history_keep01234_by_layer.items()
-        },
-    )
-
-    qfim_rank_history_result_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_rank_history_optimization_path_{keep_key}.npz",
-    )
-
-    save_npz_result(
-        qfim_rank_history_result_path,
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-        **{
-            f"L{int(L)}": arr
-            for L, arr in qfim_rank_history_by_layer.items()
-        },
-    )
-
-    qfim_rank_history_keep01234_result_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_rank_history_optimization_path_{keep_key_5}.npz",
-    )
-
-    save_npz_result(
-        qfim_rank_history_keep01234_result_path,
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-        keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
-        state_label=np.asarray(keep_label_5),
-        **{
-            f"L{int(L)}": arr
-            for L, arr in qfim_rank_history_keep01234_by_layer.items()
-        },
     )
 
 
@@ -1648,161 +1568,6 @@ def run_qfim(*, include_optimization_path: bool = True):
             in qfim_trace_history_optimization_path_keep01234_by_layer.items()
         },
     )
-
-
-    # ============================================================
-    # Optimization-path QFIM effective-rank summary
-    # ============================================================
-    def _qfim_effective_rank_arrays_for_npz(
-        rank_history_by_layer: dict,
-        eigs_history_by_layer: dict,
-    ) -> dict:
-        arrays = {}
-
-        for L, eigs in eigs_history_by_layer.items():
-            L_tag = f"L{int(L)}"
-            eigs = np.clip(
-                np.asarray(eigs, dtype=NP_REAL_DTYPE),
-                0.0,
-                None,
-            )
-            threshold_rank = np.asarray(
-                rank_history_by_layer[L],
-                dtype=NP_INT_DTYPE,
-            )
-            trace = np.sum(eigs, axis=2)
-            frobenius_norm_sq = np.sum(eigs * eigs, axis=2)
-            active = eigs > float(QFIM_EFFECTIVE_RANK_THRESHOLD)
-            participation_eigs = np.where(
-                active,
-                eigs,
-                NP_REAL_DTYPE(0.0),
-            )
-            participation_trace = np.sum(participation_eigs, axis=2)
-            participation_frobenius_norm_sq = np.sum(
-                participation_eigs * participation_eigs,
-                axis=2,
-            )
-            participation_rank = np.zeros_like(trace)
-            np.divide(
-                participation_trace * participation_trace,
-                participation_frobenius_norm_sq,
-                out=participation_rank,
-                where=(
-                    participation_frobenius_norm_sq
-                    > float(PARTICIPATION_EFFECTIVE_RANK_EPS)
-                ),
-            )
-            largest_eigenvalue = np.max(eigs, axis=2)
-            smallest_active_eigenvalue = np.min(
-                np.where(active, eigs, np.inf),
-                axis=2,
-            )
-            smallest_active_eigenvalue = np.where(
-                threshold_rank > 0,
-                smallest_active_eigenvalue,
-                np.nan,
-            )
-            active_condition_number = np.full_like(trace, np.nan)
-            np.divide(
-                largest_eigenvalue,
-                smallest_active_eigenvalue,
-                out=active_condition_number,
-                where=(threshold_rank > 0),
-            )
-
-            arrays.update(
-                {
-                    f"{L_tag}_threshold_rank": threshold_rank,
-                    f"{L_tag}_qfim_threshold_rank": threshold_rank,
-                    f"{L_tag}_participation_rank": participation_rank,
-                    f"{L_tag}_qfim_participation_rank": participation_rank,
-                    f"{L_tag}_trace": trace,
-                    f"{L_tag}_qfim_trace": trace,
-                    f"{L_tag}_frobenius_norm_sq": frobenius_norm_sq,
-                    f"{L_tag}_qfim_frobenius_norm_sq": frobenius_norm_sq,
-                    f"{L_tag}_largest_eigenvalue": largest_eigenvalue,
-                    f"{L_tag}_largest_qfim_eigenvalue": largest_eigenvalue,
-                    f"{L_tag}_smallest_active_eigenvalue": (
-                        smallest_active_eigenvalue
-                    ),
-                    f"{L_tag}_smallest_active_qfim_eigenvalue": (
-                        smallest_active_eigenvalue
-                    ),
-                    f"{L_tag}_active_condition_number": (
-                        active_condition_number
-                    ),
-                    f"{L_tag}_condition_number_active": (
-                        active_condition_number
-                    ),
-                }
-            )
-
-        return arrays
-
-
-    qfim_spectral_summary_npz_arrays = _qfim_effective_rank_arrays_for_npz(
-        qfim_rank_history_by_layer,
-        qfim_eigs_history_optimization_path_by_layer,
-    )
-    qfim_spectral_summary_keep01234_npz_arrays = (
-        _qfim_effective_rank_arrays_for_npz(
-            qfim_rank_history_keep01234_by_layer,
-            qfim_eigs_history_optimization_path_keep01234_by_layer,
-        )
-    )
-
-
-    qfim_effective_rank_optimization_path_result_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_effective_rank_optimization_path_{keep_key}.npz",
-    )
-    qfim_effective_rank_optimization_path_keep01234_result_path = os.path.join(
-        qfim_results_dir,
-        f"qfim_effective_rank_optimization_path_{keep_key_5}.npz",
-    )
-    if RUN_QFIM_EFFECTIVE_RANK_OPTIMIZATION_PATH:
-        save_npz_result(
-            qfim_effective_rank_optimization_path_result_path,
-            h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-            layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-            sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-            qfim_effective_rank_threshold=np.asarray(
-                QFIM_EFFECTIVE_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            participation_effective_rank_threshold=np.asarray(
-                QFIM_EFFECTIVE_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            participation_effective_rank_eps=np.asarray(
-                PARTICIPATION_EFFECTIVE_RANK_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            **qfim_spectral_summary_npz_arrays,
-        )
-        save_npz_result(
-            qfim_effective_rank_optimization_path_keep01234_result_path,
-            h_param=np.asarray(h_param, dtype=NP_REAL_DTYPE),
-            layers=np.asarray(vqe_layer_list, dtype=NP_INT_DTYPE),
-            sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-            keep_wires=np.asarray(KEEP_WIRES_5, dtype=NP_INT_DTYPE),
-            state_label=np.asarray(keep_label_5),
-            qfim_effective_rank_threshold=np.asarray(
-                QFIM_EFFECTIVE_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            participation_effective_rank_threshold=np.asarray(
-                QFIM_EFFECTIVE_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            participation_effective_rank_eps=np.asarray(
-                PARTICIPATION_EFFECTIVE_RANK_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            **qfim_spectral_summary_keep01234_npz_arrays,
-        )
-
 
     print(
         "Saved keep0123 and keep01234 numerical results to: "

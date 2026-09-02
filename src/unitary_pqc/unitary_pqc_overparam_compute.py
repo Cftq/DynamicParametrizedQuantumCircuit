@@ -386,23 +386,17 @@ qfim_eigs_pure_by_layer = {}
 qfim_eigs_reduced_by_layer = {}
 qfim_thresh_pure_by_layer = {}
 qfim_thresh_reduced_by_layer = {}
-qfim_rank_history_by_layer = {}
 qfim_eigs_history_by_layer = {}
-qfim_thresh_history_by_layer = {}
 qfim_random_result_paths_by_keep = {}
 qfim_optimization_path_result_paths_by_keep = {}
 hs_rank_reduced_by_layer = {}
 hs_eigs_reduced_by_layer = {}
 hs_thresh_reduced_by_layer = {}
-hs_rank_history_by_layer = {}
 hs_eigs_history_by_layer = {}
-hs_thresh_history_by_layer = {}
 ortk_rank_by_layer = {}
 ortk_effective_rank_by_layer = {}
 ortk_eigs_by_layer = {}
 ortk_trace_by_layer = {}
-ortk_rank_history_by_layer = {}
-ortk_effective_rank_history_by_layer = {}
 ortk_eigs_history_by_layer = {}
 ortk_trace_history_by_layer = {}
 hessian_rank_by_layer = {}
@@ -412,59 +406,17 @@ qfim_eigs_pure_dir = os.path.join(qfim_eigs_dir, "pure_full")
 qfim_eigs_reduced_0123_dir = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
 qfim_rank_dir = os.path.join(qfim_fig_dir, "rank")
 qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
-qfim_rank_optimization_path_dir = os.path.join(qfim_rank_dir, "optimization_path")
-qfim_rank_optimization_path_mean_dir = os.path.join(
-    qfim_rank_optimization_path_dir,
-    "mean",
-)
-qfim_rank_optimization_path_min_dir = os.path.join(
-    qfim_rank_optimization_path_dir,
-    "min",
-)
 hs_eigs_dir = os.path.join(hs_fig_dir, "eigs")
 hs_eigs_reduced_0123_dir = os.path.join(hs_eigs_dir, "reduced_keep_0123")
 hs_rank_dir = os.path.join(hs_fig_dir, "rank")
 hs_rank_random_dir = os.path.join(hs_rank_dir, "random_points")
-hs_rank_optimization_path_dir = os.path.join(hs_rank_dir, "optimization_path")
-hs_rank_optimization_path_mean_dir = os.path.join(
-    hs_rank_optimization_path_dir,
-    "mean",
-)
-hs_rank_optimization_path_min_dir = os.path.join(
-    hs_rank_optimization_path_dir,
-    "min",
-)
 ortk_eigs_dir = os.path.join(ortk_fig_dir, "eigs")
 ortk_rank_dir = os.path.join(ortk_fig_dir, "rank")
 ortk_rank_random_dir = os.path.join(ortk_rank_dir, "random_points")
-ortk_rank_optimization_path_dir = os.path.join(
-    ortk_rank_dir,
-    "optimization_path",
-)
-ortk_rank_optimization_path_mean_dir = os.path.join(
-    ortk_rank_optimization_path_dir,
-    "mean",
-)
-ortk_rank_optimization_path_min_dir = os.path.join(
-    ortk_rank_optimization_path_dir,
-    "min",
-)
 ortk_effective_rank_dir = os.path.join(ortk_fig_dir, "effective_rank")
 ortk_effective_rank_random_dir = os.path.join(
     ortk_effective_rank_dir,
     "random_points",
-)
-ortk_effective_rank_optimization_path_dir = os.path.join(
-    ortk_effective_rank_dir,
-    "optimization_path",
-)
-ortk_effective_rank_optimization_path_mean_dir = os.path.join(
-    ortk_effective_rank_optimization_path_dir,
-    "mean",
-)
-ortk_effective_rank_optimization_path_min_dir = os.path.join(
-    ortk_effective_rank_optimization_path_dir,
-    "min",
 )
 ortk_trace_dir = os.path.join(ortk_fig_dir, "trace")
 ortk_trace_optimization_path_dir = os.path.join(
@@ -492,27 +444,15 @@ def _ensure_unitary_result_dirs() -> None:
     os.makedirs(qfim_eigs_reduced_0123_dir, exist_ok=True)
     os.makedirs(qfim_rank_dir, exist_ok=True)
     os.makedirs(qfim_rank_random_dir, exist_ok=True)
-    os.makedirs(qfim_rank_optimization_path_dir, exist_ok=True)
-    os.makedirs(qfim_rank_optimization_path_mean_dir, exist_ok=True)
-    os.makedirs(qfim_rank_optimization_path_min_dir, exist_ok=True)
     os.makedirs(hs_eigs_dir, exist_ok=True)
     os.makedirs(hs_eigs_reduced_0123_dir, exist_ok=True)
     os.makedirs(hs_rank_dir, exist_ok=True)
     os.makedirs(hs_rank_random_dir, exist_ok=True)
-    os.makedirs(hs_rank_optimization_path_dir, exist_ok=True)
-    os.makedirs(hs_rank_optimization_path_mean_dir, exist_ok=True)
-    os.makedirs(hs_rank_optimization_path_min_dir, exist_ok=True)
     os.makedirs(ortk_eigs_dir, exist_ok=True)
     os.makedirs(ortk_rank_dir, exist_ok=True)
     os.makedirs(ortk_rank_random_dir, exist_ok=True)
-    os.makedirs(ortk_rank_optimization_path_dir, exist_ok=True)
-    os.makedirs(ortk_rank_optimization_path_mean_dir, exist_ok=True)
-    os.makedirs(ortk_rank_optimization_path_min_dir, exist_ok=True)
     os.makedirs(ortk_effective_rank_dir, exist_ok=True)
     os.makedirs(ortk_effective_rank_random_dir, exist_ok=True)
-    os.makedirs(ortk_effective_rank_optimization_path_dir, exist_ok=True)
-    os.makedirs(ortk_effective_rank_optimization_path_mean_dir, exist_ok=True)
-    os.makedirs(ortk_effective_rank_optimization_path_min_dir, exist_ok=True)
     os.makedirs(ortk_trace_dir, exist_ok=True)
     os.makedirs(ortk_trace_optimization_path_dir, exist_ok=True)
     os.makedirs(circuit_dir, exist_ok=True)
@@ -774,33 +714,25 @@ def save_qfim_optimization_path_results_by_keep(
     *,
     layers,
     sample_iterations,
-    rank_keep0123_by_layer: dict,
     eigs_keep0123_by_layer: dict,
-    threshold_keep0123_by_layer: dict,
-    rank_keep01234_by_layer: dict,
     eigs_keep01234_by_layer: dict,
-    threshold_keep01234_by_layer: dict,
     analysis_batch_size: Optional[int] = None,
 ) -> dict[str, dict[str, str]]:
-    """Save rank, eigenspectrum, and trace histories for both kept states."""
+    """Save raw eigenspectrum and trace histories for both kept states."""
     specifications = (
         (
             QFIM_KEEP0123_KEY,
             KEEP_WIRES_4,
             QFIM_KEEP0123_LABEL,
             "reduced_mixed",
-            rank_keep0123_by_layer,
             eigs_keep0123_by_layer,
-            threshold_keep0123_by_layer,
         ),
         (
             QFIM_KEEP01234_KEY,
             KEEP_WIRES_5,
             QFIM_KEEP01234_LABEL,
             "pure_full",
-            rank_keep01234_by_layer,
             eigs_keep01234_by_layer,
-            threshold_keep01234_by_layer,
         ),
     )
     sample_iterations = np.asarray(sample_iterations, dtype=NP_INT_DTYPE)
@@ -813,27 +745,61 @@ def save_qfim_optimization_path_results_by_keep(
         keep_wires,
         state_label,
         representation,
-        rank_by_layer,
         eigs_by_layer,
-        threshold_by_layer,
     ) in specifications:
-        valid_layers = _validated_qfim_layers(
-            layers,
-            rank_by_layer,
-            eigs_by_layer,
-            threshold_by_layer,
-            expected_rank_ndim=2,
-            context=f"optimization-path {keep_key}",
-        )
-        expected_num_runs = np.asarray(rank_by_layer[valid_layers[0]]).shape[0]
-        for L in valid_layers:
-            history_shape = np.asarray(rank_by_layer[L]).shape
-            expected_shape = (expected_num_runs, sample_iterations.size)
-            if history_shape != expected_shape:
+        valid_layers = []
+        expected_num_runs = None
+        for layer in layers:
+            L = int(layer)
+            if eigs_by_layer.get(L) is None:
                 raise ValueError(
-                    f"optimization-path {keep_key} history shape mismatch "
-                    f"for L={L}: expected {expected_shape}, got {history_shape}."
+                    f"Missing optimization-path {keep_key} QFIM "
+                    f"eigenspectra for L={L}."
                 )
+            raw_eigs = np.asarray(eigs_by_layer[L])
+            if (
+                not np.issubdtype(raw_eigs.dtype, np.number)
+                or np.iscomplexobj(raw_eigs)
+            ):
+                raise TypeError(
+                    f"optimization-path {keep_key} QFIM eigenspectra for "
+                    f"L={L} must be real numeric data."
+                )
+            eigs = np.asarray(raw_eigs, dtype=NP_REAL_DTYPE)
+            if eigs.ndim != 3:
+                raise ValueError(
+                    f"optimization-path {keep_key} QFIM eigenspectra for "
+                    f"L={L} must be 3D, got {eigs.shape}."
+                )
+            if expected_num_runs is None:
+                expected_num_runs = int(eigs.shape[0])
+                if expected_num_runs <= 0:
+                    raise ValueError(
+                        f"optimization-path {keep_key} must contain at least "
+                        "one run."
+                    )
+            expected_shape = (
+                expected_num_runs,
+                sample_iterations.size,
+                num_params_per_layer * L,
+            )
+            if eigs.shape != expected_shape:
+                raise ValueError(
+                    f"optimization-path {keep_key} QFIM eigenspectrum shape "
+                    f"mismatch for L={L}: expected {expected_shape}, "
+                    f"got {eigs.shape}."
+                )
+            if not np.all(np.isfinite(eigs)):
+                raise FloatingPointError(
+                    f"optimization-path {keep_key} QFIM eigenspectra for "
+                    f"L={L} contain non-finite values."
+                )
+            valid_layers.append(L)
+        if not valid_layers:
+            raise ValueError(
+                f"No optimization-path {keep_key} QFIM eigenspectra are "
+                "available."
+            )
         metadata = {
             "schema_version": np.asarray(1, dtype=NP_INT_DTYPE),
             "ansatz": np.asarray("unitary_pqc"),
@@ -879,10 +845,6 @@ def save_qfim_optimization_path_results_by_keep(
             ),
             "eigenvalues_threshold_masked": np.asarray(False),
         }
-        rank_path = os.path.join(
-            qfim_results_dir,
-            f"qfim_rank_history_optimization_path_{keep_key}.npz",
-        )
         eigs_path = os.path.join(
             qfim_results_dir,
             f"qfim_eigs_history_optimization_path_{keep_key}.npz",
@@ -890,24 +852,6 @@ def save_qfim_optimization_path_results_by_keep(
         trace_path = os.path.join(
             qfim_results_dir,
             f"qfim_trace_history_optimization_path_{keep_key}.npz",
-        )
-        save_npz_result(
-            rank_path,
-            **metadata,
-            **{
-                f"L{L}": np.asarray(
-                    rank_by_layer[L],
-                    dtype=NP_REAL_DTYPE,
-                )
-                for L in valid_layers
-            },
-            **{
-                f"L{L}_rank_threshold": np.asarray(
-                    threshold_by_layer[L],
-                    dtype=NP_REAL_DTYPE,
-                )
-                for L in valid_layers
-            },
         )
         save_npz_result(
             eigs_path,
@@ -934,7 +878,6 @@ def save_qfim_optimization_path_results_by_keep(
             },
         )
         result_paths[keep_key] = {
-            "rank": rank_path,
             "eigs": eigs_path,
             "trace": trace_path,
         }
@@ -1893,6 +1836,15 @@ def _make_psd_analysis_batch_runner(matrix_fn):
     return jax.jit(jax.vmap(metrics_one))
 
 
+def _make_psd_eigvals_batch_runner(matrix_fn):
+    """Batch raw PSD eigenspectra without computing rank diagnostics."""
+
+    def eigvals_one(theta: jnp.ndarray):
+        return (psd_eigvals_desc(matrix_fn(theta)),)
+
+    return jax.jit(jax.vmap(eigvals_one))
+
+
 def make_qfim_analysis_batch_runner(
     num_layers: int,
     *,
@@ -1938,6 +1890,51 @@ def make_hs_analysis_batch_runner(
     return _make_psd_analysis_batch_runner(matrix_fn)
 
 
+def make_qfim_eigvals_batch_runner(
+    num_layers: int,
+    *,
+    keep_wires=KEEP_WIRES,
+    jvp_chunk: int = RED_JVP_CHUNK,
+    representation: str = "reduced",
+):
+    """Create an optimization-path QFIM raw-eigenspectrum runner."""
+    if representation == "pure_full":
+        matrix_fn = make_pure_qfim_matrix_fn_for_layer(int(num_layers))
+    elif representation == "reduced":
+        matrix_fn = make_reduced_qfim_matrix_fn_for_layer_sequential(
+            num_layers=int(num_layers),
+            keep_wires=keep_wires,
+            jvp_chunk=jvp_chunk,
+        )
+    else:
+        raise ValueError("representation must be 'pure_full' or 'reduced'.")
+    return _make_psd_eigvals_batch_runner(matrix_fn)
+
+
+def make_hs_eigvals_batch_runner(
+    num_layers: int,
+    *,
+    keep_wires=KEEP_WIRES,
+    jvp_chunk: int = RED_JVP_CHUNK,
+    representation: str = "reduced",
+):
+    """Create an optimization-path HS raw-eigenspectrum runner."""
+    if representation == "pure_full":
+        matrix_fn = make_pure_full_hs_matrix_fn_for_layer(
+            num_layers=int(num_layers),
+            jvp_chunk=jvp_chunk,
+        )
+    elif representation == "reduced":
+        matrix_fn = make_reduced_hs_matrix_fn_for_layer_sequential(
+            num_layers=int(num_layers),
+            keep_wires=keep_wires,
+            jvp_chunk=jvp_chunk,
+        )
+    else:
+        raise ValueError("representation must be 'pure_full' or 'reduced'.")
+    return _make_psd_eigvals_batch_runner(matrix_fn)
+
+
 def make_ortk_analysis_batch_runner(num_layers: int):
     """Create a fixed-shape ORTK ``jit(vmap(...))`` metrics runner."""
     metrics_fn = make_ortk_rank_effective_eigvals_fn_for_layer(int(num_layers))
@@ -1950,6 +1947,19 @@ def make_ortk_analysis_batch_runner(num_layers: int):
             eigs_desc,
             jnp.sum(eigs_desc),
         )
+
+    return jax.jit(jax.vmap(metrics_one))
+
+
+def make_ortk_eigs_trace_batch_runner(num_layers: int):
+    """Batch ORTK raw eigenspectra and traces without rank diagnostics."""
+    eigvals_fn = make_observable_tangent_kernel_eigvals_fn_for_layer(
+        int(num_layers)
+    )
+
+    def metrics_one(theta: jnp.ndarray):
+        eigs_desc = eigvals_fn(theta)
+        return eigs_desc, jnp.sum(eigs_desc)
 
     return jax.jit(jax.vmap(metrics_one))
 
@@ -1972,7 +1982,7 @@ def make_hessian_analysis_batch_runner(num_layers: int):
     return jax.jit(jax.vmap(metrics_one))
 
 
-def compute_qfim_rank_history_by_layer(
+def compute_qfim_eigs_history_by_layer(
     theta_samples_by_layer: dict,
     layers,
     *,
@@ -1981,13 +1991,11 @@ def compute_qfim_rank_history_by_layer(
     representation: str = "reduced",
     batch_size: Optional[int] = None,
 ):
-    rank_history_by_layer = {}
     eigs_history_by_layer = {}
-    thresh_history_by_layer = {}
 
     for L in tqdm(
         layers,
-        desc="QFIM rank history along optimization path",
+        desc="QFIM eigenspectra along optimization path",
         unit="layer",
     ):
         L_int = int(L)
@@ -2006,57 +2014,45 @@ def compute_qfim_rank_history_by_layer(
             )
 
         num_runs, num_times, num_params = theta_samples.shape
-        batch_runner = make_qfim_analysis_batch_runner(
+        batch_runner = make_qfim_eigvals_batch_runner(
             num_layers=L_int,
             keep_wires=keep_wires,
             jvp_chunk=jvp_chunk,
             representation=representation,
         )
-        ranks_flat, _, eigs_flat, thresholds_flat = (
-            _evaluate_analysis_in_batches(
-                theta_samples.reshape((-1, num_params)),
-                batch_runner,
-                batch_size=batch_size,
-                description=(
-                    f"QFIM batches ({representation}, L={L_int}, "
-                    f"batch={_resolve_analysis_batch_size(batch_size)})"
-                ),
-            )
-        )
-        ranks_L = np.asarray(ranks_flat, dtype=NP_REAL_DTYPE).reshape(
-            (num_runs, num_times)
+        (eigs_flat,) = _evaluate_analysis_in_batches(
+            theta_samples.reshape((-1, num_params)),
+            batch_runner,
+            batch_size=batch_size,
+            description=(
+                f"QFIM batches ({representation}, L={L_int}, "
+                f"batch={_resolve_analysis_batch_size(batch_size)})"
+            ),
         )
         eigs_L = np.asarray(eigs_flat, dtype=NP_REAL_DTYPE).reshape(
             (num_runs, num_times, num_params)
         )
-        thresh_L = np.asarray(
-            thresholds_flat,
-            dtype=NP_REAL_DTYPE,
-        ).reshape((num_runs, num_times))
 
-        rank_history_by_layer[L_int] = ranks_L
         eigs_history_by_layer[L_int] = eigs_L
-        thresh_history_by_layer[L_int] = thresh_L
 
         del batch_runner
         _release_jax_compilation_cache()
 
-    return rank_history_by_layer, eigs_history_by_layer, thresh_history_by_layer
+    return eigs_history_by_layer
 
 
-def compute_ortk_rank_history_by_layer(
+def compute_ortk_eigs_trace_history_by_layer(
     theta_samples_by_layer: dict,
     layers,
     *,
     batch_size: Optional[int] = None,
 ):
-    rank_history_by_layer = {}
-    effective_rank_history_by_layer = {}
     eigs_history_by_layer = {}
+    trace_history_by_layer = {}
 
     for L in tqdm(
         layers,
-        desc="ORTK rank history along optimization path",
+        desc="ORTK eigenspectra along optimization path",
         unit="layer",
     ):
         L_int = int(L)
@@ -2076,8 +2072,8 @@ def compute_ortk_rank_history_by_layer(
         num_runs, num_times, _ = theta_samples.shape
         num_observables = int(H_OBSERVABLE_MATRICES.shape[0])
         num_params = int(theta_samples.shape[-1])
-        batch_runner = make_ortk_analysis_batch_runner(L_int)
-        ranks_flat, effective_ranks_flat, eigs_flat, _ = (
+        batch_runner = make_ortk_eigs_trace_batch_runner(L_int)
+        eigs_flat, traces_flat = (
             _evaluate_analysis_in_batches(
                 theta_samples.reshape((-1, num_params)),
                 batch_runner,
@@ -2088,31 +2084,22 @@ def compute_ortk_rank_history_by_layer(
                 ),
             )
         )
-        ranks_L = np.asarray(ranks_flat, dtype=NP_REAL_DTYPE).reshape(
-            (num_runs, num_times)
-        )
-        effective_ranks_L = np.asarray(
-            effective_ranks_flat,
-            dtype=NP_REAL_DTYPE,
-        ).reshape((num_runs, num_times))
         eigs_L = np.asarray(eigs_flat, dtype=NP_REAL_DTYPE).reshape(
             (num_runs, num_times, num_observables)
         )
+        traces_L = np.asarray(traces_flat, dtype=NP_REAL_DTYPE).reshape(
+            (num_runs, num_times)
+        )
 
-        rank_history_by_layer[L_int] = ranks_L
-        effective_rank_history_by_layer[L_int] = effective_ranks_L
         eigs_history_by_layer[L_int] = eigs_L
+        trace_history_by_layer[L_int] = traces_L
 
         del batch_runner
         _release_jax_compilation_cache()
 
-    return (
-        rank_history_by_layer,
-        effective_rank_history_by_layer,
-        eigs_history_by_layer,
-    )
+    return eigs_history_by_layer, trace_history_by_layer
 
-def compute_hs_rank_history_by_layer(
+def compute_hs_eigs_history_by_layer(
     theta_samples_by_layer: dict,
     layers,
     *,
@@ -2121,13 +2108,11 @@ def compute_hs_rank_history_by_layer(
     representation: str = "reduced",
     batch_size: Optional[int] = None,
 ):
-    rank_history_by_layer = {}
     eigs_history_by_layer = {}
-    thresh_history_by_layer = {}
 
     for L in tqdm(
         layers,
-        desc="HS rank history along optimization path",
+        desc="HS eigenspectra along optimization path",
         unit="layer",
     ):
         L_int = int(L)
@@ -2146,42 +2131,31 @@ def compute_hs_rank_history_by_layer(
             )
 
         num_runs, num_times, num_params = theta_samples.shape
-        batch_runner = make_hs_analysis_batch_runner(
+        batch_runner = make_hs_eigvals_batch_runner(
             num_layers=L_int,
             keep_wires=keep_wires,
             jvp_chunk=jvp_chunk,
             representation=representation,
         )
-        ranks_flat, _, eigs_flat, thresholds_flat = (
-            _evaluate_analysis_in_batches(
-                theta_samples.reshape((-1, num_params)),
-                batch_runner,
-                batch_size=batch_size,
-                description=(
-                    f"HS batches ({representation}, L={L_int}, "
-                    f"batch={_resolve_analysis_batch_size(batch_size)})"
-                ),
-            )
-        )
-        ranks_L = np.asarray(ranks_flat, dtype=NP_REAL_DTYPE).reshape(
-            (num_runs, num_times)
+        (eigs_flat,) = _evaluate_analysis_in_batches(
+            theta_samples.reshape((-1, num_params)),
+            batch_runner,
+            batch_size=batch_size,
+            description=(
+                f"HS batches ({representation}, L={L_int}, "
+                f"batch={_resolve_analysis_batch_size(batch_size)})"
+            ),
         )
         eigs_L = np.asarray(eigs_flat, dtype=NP_REAL_DTYPE).reshape(
             (num_runs, num_times, num_params)
         )
-        thresh_L = np.asarray(
-            thresholds_flat,
-            dtype=NP_REAL_DTYPE,
-        ).reshape((num_runs, num_times))
 
-        rank_history_by_layer[L_int] = ranks_L
         eigs_history_by_layer[L_int] = eigs_L
-        thresh_history_by_layer[L_int] = thresh_L
 
         del batch_runner
         _release_jax_compilation_cache()
 
-    return rank_history_by_layer, eigs_history_by_layer, thresh_history_by_layer
+    return eigs_history_by_layer
 
 def _qfim_history_plot_iterations(sample_iters_for_plot) -> np.ndarray:
     x = np.asarray(sample_iters_for_plot, dtype=NP_REAL_DTYPE).copy()
@@ -2212,40 +2186,40 @@ def _finite_mean_sem_over_runs_by_time(values_2d: np.ndarray):
 
     return means, sems, counts
 
-def _rank_history_for_plot(rank_history_by_layer: dict, L: int, x: np.ndarray):
-    ranks = np.asarray(rank_history_by_layer[int(L)], dtype=NP_REAL_DTYPE)
+def _scalar_history_for_plot(values_by_layer: dict, L: int, x: np.ndarray):
+    values = np.asarray(values_by_layer[int(L)], dtype=NP_REAL_DTYPE)
 
-    if ranks.ndim != 2:
+    if values.ndim != 2:
         raise ValueError(
-            "Each rank history array must be 2D: "
+            "Each scalar history array must be 2D: "
             "(num_runs, num_sample_iters)."
         )
 
-    if ranks.shape[1] != x.size and ranks.shape[0] == x.size:
-        ranks = ranks.T
+    if values.shape[1] != x.size and values.shape[0] == x.size:
+        values = values.T
 
-    if ranks.shape[1] != x.size:
+    if values.shape[1] != x.size:
         raise ValueError(
             f"Shape mismatch for L={L}: "
-            f"ranks.shape={ranks.shape}, len(sample_iters)={x.size}."
+            f"values.shape={values.shape}, len(sample_iters)={x.size}."
         )
 
-    return ranks
+    return values
 
-def plot_qfim_rank_history_mean_by_layer(
-    rank_history_by_layer: dict,
+def plot_scalar_history_mean_by_layer(
+    values_by_layer: dict,
     layers,
     sample_iters_for_plot,
     *,
     title: str,
     outpath: str,
-    ylabel: str = r"Mean QFIM effective rank $(\lambda_k > 10^{-12})$",
+    ylabel: str,
     cmap=None,
 ):
     valid_layers = [
         int(L)
         for L in layers
-        if rank_history_by_layer.get(int(L)) is not None
+        if values_by_layer.get(int(L)) is not None
     ]
 
     if not valid_layers:
@@ -2259,8 +2233,8 @@ def plot_qfim_rank_history_mean_by_layer(
     num_layers = len(valid_layers)
 
     for layer_idx, L in enumerate(valid_layers):
-        ranks = _rank_history_for_plot(rank_history_by_layer, L, x)
-        means, sems, counts = _finite_mean_sem_over_runs_by_time(ranks)
+        values = _scalar_history_for_plot(values_by_layer, L, x)
+        means, sems, counts = _finite_mean_sem_over_runs_by_time(values)
         finite_mask = np.isfinite(means) & (counts > 0)
 
         if not np.any(finite_mask):
@@ -2303,81 +2277,6 @@ def plot_qfim_rank_history_mean_by_layer(
         legend_space_frac=0.26,
     )
 
-def plot_qfim_rank_history_min_by_layer(
-    rank_history_by_layer: dict,
-    layers,
-    sample_iters_for_plot,
-    *,
-    title: str,
-    outpath: str,
-    ylabel: str = r"Minimum QFIM effective rank $(\lambda_k > 10^{-12})$",
-    cmap=None,
-    integer_y_axis: bool = True,
-):
-    valid_layers = [
-        int(L)
-        for L in layers
-        if rank_history_by_layer.get(int(L)) is not None
-    ]
-
-    if not valid_layers:
-        return
-
-    x = _qfim_history_plot_iterations(sample_iters_for_plot)
-    cmap = matplotlib.colormaps.get_cmap("viridis") if cmap is None else cmap
-
-    new_prx_figure(width="double")
-    ax = plt.gca()
-    num_layers = len(valid_layers)
-
-    for layer_idx, L in enumerate(valid_layers):
-        ranks = _rank_history_for_plot(rank_history_by_layer, L, x)
-        valid = np.isfinite(ranks)
-        counts = np.sum(valid, axis=0)
-        ranks_for_min = np.where(valid, ranks, np.inf)
-        min_ranks = np.min(ranks_for_min, axis=0)
-        min_ranks = np.where(counts > 0, min_ranks, np.nan)
-        finite_mask = np.isfinite(min_ranks) & (counts > 0)
-
-        if not np.any(finite_mask):
-            continue
-
-        color = cmap(layer_idx / max(num_layers - 1, 1))
-
-        ax.plot(
-            x[finite_mask],
-            min_ranks[finite_mask],
-            marker="o",
-            linestyle=":",
-            linewidth=1.2,
-            markersize=4.5,
-            color=color,
-            label=f"L={L}",
-        )
-
-    ax.set_xlabel("Iterations")
-    ax.set_ylabel(ylabel)
-    set_prx_title(title, ax=ax)
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(int(t)) for t in x], rotation=45, ha="right")
-    ax.set_ylim(bottom=0.0)
-    if integer_y_axis:
-        ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.00),
-        borderaxespad=0.0,
-        frameon=True,
-        framealpha=0.9,
-    )
-
-    save_current_figure(
-        outpath,
-        outside_legend=True,
-        legend_space_frac=0.26,
-    )
-
 def configure_unitary_pqc_overparam(
     *,
     h_value: Optional[float] = None,
@@ -2396,18 +2295,11 @@ def configure_unitary_pqc_overparam(
     global circuit_dir, numerical_results_dir, energy_results_dir, qfim_results_dir
     global hs_results_dir, ortk_results_dir, hessian_results_dir
     global qfim_eigs_dir, qfim_eigs_pure_dir, qfim_eigs_reduced_0123_dir
-    global qfim_rank_dir, qfim_rank_random_dir, qfim_rank_optimization_path_dir
-    global qfim_rank_optimization_path_mean_dir, qfim_rank_optimization_path_min_dir
+    global qfim_rank_dir, qfim_rank_random_dir
     global hs_eigs_dir, hs_eigs_reduced_0123_dir
-    global hs_rank_dir, hs_rank_random_dir, hs_rank_optimization_path_dir
-    global hs_rank_optimization_path_mean_dir, hs_rank_optimization_path_min_dir
+    global hs_rank_dir, hs_rank_random_dir
     global ortk_eigs_dir, ortk_rank_dir, ortk_rank_random_dir
-    global ortk_rank_optimization_path_dir
-    global ortk_rank_optimization_path_mean_dir, ortk_rank_optimization_path_min_dir
     global ortk_effective_rank_dir, ortk_effective_rank_random_dir
-    global ortk_effective_rank_optimization_path_dir
-    global ortk_effective_rank_optimization_path_mean_dir
-    global ortk_effective_rank_optimization_path_min_dir
     global ortk_trace_dir, ortk_trace_optimization_path_dir
     # ============================================================
     # DPQC optimization + plots + QFIM rank (pure + reduced)
@@ -2551,59 +2443,17 @@ def configure_unitary_pqc_overparam(
     qfim_eigs_reduced_0123_dir = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
     qfim_rank_dir = os.path.join(qfim_fig_dir, "rank")
     qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
-    qfim_rank_optimization_path_dir = os.path.join(qfim_rank_dir, "optimization_path")
-    qfim_rank_optimization_path_mean_dir = os.path.join(
-        qfim_rank_optimization_path_dir,
-        "mean",
-    )
-    qfim_rank_optimization_path_min_dir = os.path.join(
-        qfim_rank_optimization_path_dir,
-        "min",
-    )
     hs_eigs_dir = os.path.join(hs_fig_dir, "eigs")
     hs_eigs_reduced_0123_dir = os.path.join(hs_eigs_dir, "reduced_keep_0123")
     hs_rank_dir = os.path.join(hs_fig_dir, "rank")
     hs_rank_random_dir = os.path.join(hs_rank_dir, "random_points")
-    hs_rank_optimization_path_dir = os.path.join(hs_rank_dir, "optimization_path")
-    hs_rank_optimization_path_mean_dir = os.path.join(
-        hs_rank_optimization_path_dir,
-        "mean",
-    )
-    hs_rank_optimization_path_min_dir = os.path.join(
-        hs_rank_optimization_path_dir,
-        "min",
-    )
     ortk_eigs_dir = os.path.join(ortk_fig_dir, "eigs")
     ortk_rank_dir = os.path.join(ortk_fig_dir, "rank")
     ortk_rank_random_dir = os.path.join(ortk_rank_dir, "random_points")
-    ortk_rank_optimization_path_dir = os.path.join(
-        ortk_rank_dir,
-        "optimization_path",
-    )
-    ortk_rank_optimization_path_mean_dir = os.path.join(
-        ortk_rank_optimization_path_dir,
-        "mean",
-    )
-    ortk_rank_optimization_path_min_dir = os.path.join(
-        ortk_rank_optimization_path_dir,
-        "min",
-    )
     ortk_effective_rank_dir = os.path.join(ortk_fig_dir, "effective_rank")
     ortk_effective_rank_random_dir = os.path.join(
         ortk_effective_rank_dir,
         "random_points",
-    )
-    ortk_effective_rank_optimization_path_dir = os.path.join(
-        ortk_effective_rank_dir,
-        "optimization_path",
-    )
-    ortk_effective_rank_optimization_path_mean_dir = os.path.join(
-        ortk_effective_rank_optimization_path_dir,
-        "mean",
-    )
-    ortk_effective_rank_optimization_path_min_dir = os.path.join(
-        ortk_effective_rank_optimization_path_dir,
-        "min",
     )
     ortk_trace_dir = os.path.join(ortk_fig_dir, "trace")
     ortk_trace_optimization_path_dir = os.path.join(
@@ -2879,11 +2729,9 @@ def run_vqe_optimization(
     global success_rates_history, energy_mean_history, energy_std_history, final_stats, dense_until_layer, max_layer
     global sparse_step, dense_end, layer_list, save_dir, figures_dir, energy_fig_dir, qfim_fig_dir, hs_fig_dir, ortk_fig_dir, hessian_fig_dir, circuit_dir, optimizer
     global qfim_eigs_dir, qfim_eigs_pure_dir, qfim_eigs_reduced_0123_dir
-    global qfim_rank_dir, qfim_rank_random_dir, qfim_rank_optimization_path_dir
-    global qfim_rank_optimization_path_mean_dir, qfim_rank_optimization_path_min_dir
+    global qfim_rank_dir, qfim_rank_random_dir
     global hs_eigs_dir, hs_eigs_reduced_0123_dir
-    global hs_rank_dir, hs_rank_random_dir, hs_rank_optimization_path_dir
-    global hs_rank_optimization_path_mean_dir, hs_rank_optimization_path_min_dir
+    global hs_rank_dir, hs_rank_random_dir
     global theta_history, best_theta_by_layer, final_theta_wrapped_rmsdist_by_layer, energy_traces_by_layer, grad_norm_traces_by_layer, sample_every
     global sample_iters, sample_iter_set, theta_sample_traces_by_layer, cmap
     global numerical_results_dir, energy_results_dir, qfim_results_dir, hs_results_dir, ortk_results_dir, hessian_results_dir
@@ -2934,28 +2782,10 @@ def run_vqe_optimization(
     qfim_eigs_reduced_0123_dir = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
     qfim_rank_dir = os.path.join(qfim_fig_dir, "rank")
     qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
-    qfim_rank_optimization_path_dir = os.path.join(qfim_rank_dir, "optimization_path")
-    qfim_rank_optimization_path_mean_dir = os.path.join(
-        qfim_rank_optimization_path_dir,
-        "mean",
-    )
-    qfim_rank_optimization_path_min_dir = os.path.join(
-        qfim_rank_optimization_path_dir,
-        "min",
-    )
     hs_eigs_dir = os.path.join(hs_fig_dir, "eigs")
     hs_eigs_reduced_0123_dir = os.path.join(hs_eigs_dir, "reduced_keep_0123")
     hs_rank_dir = os.path.join(hs_fig_dir, "rank")
     hs_rank_random_dir = os.path.join(hs_rank_dir, "random_points")
-    hs_rank_optimization_path_dir = os.path.join(hs_rank_dir, "optimization_path")
-    hs_rank_optimization_path_mean_dir = os.path.join(
-        hs_rank_optimization_path_dir,
-        "mean",
-    )
-    hs_rank_optimization_path_min_dir = os.path.join(
-        hs_rank_optimization_path_dir,
-        "min",
-    )
     _ensure_unitary_result_dirs()
     
     optimizer = optax.adam(learning_rate=lr)
@@ -4768,20 +4598,16 @@ def run_optimization_path_qfim_analysis(
     make_plots: bool = False,
     analysis_batch_size: Optional[int] = None,
 ) -> None:
-    """Compute trajectory matrix metrics with fixed-size JAX batches."""
-    global qfim_rank_history_by_layer, qfim_eigs_history_by_layer, qfim_thresh_history_by_layer, qfim_rank_history_npz
-    global hs_rank_history_by_layer, hs_eigs_history_by_layer, hs_thresh_history_by_layer, hs_rank_history_npz
-    global ortk_rank_history_by_layer, ortk_effective_rank_history_by_layer
+    """Compute trajectory eigenspectra and traces with fixed JAX batches."""
+    global qfim_eigs_history_by_layer, hs_eigs_history_by_layer
     global ortk_eigs_history_by_layer, ortk_trace_history_by_layer
     global qfim_optimization_path_result_paths_by_keep
     effective_analysis_batch_size = _resolve_analysis_batch_size(
         analysis_batch_size
     )
-    # QFIM rank/eigenvalues along the Unitary-PQC VQE optimization path
-    #   x-axis: sampled optimization iteration
-    #   y-axis: run-mean/run-min QFIM effective rank at theta(iteration)
-    #   color: layer number
-    # ============================================================
+    # Raw QFIM/HS/ORTK eigenspectra are retained for trace and spectral-count
+    # diagnostics. Optimization-path rank diagnostics are intentionally not
+    # derived from them.
     
     
     
@@ -4796,131 +4622,64 @@ def run_optimization_path_qfim_analysis(
     
     
     
-    qfim_rank_history_by_layer, qfim_eigs_history_by_layer, qfim_thresh_history_by_layer = (
-        compute_qfim_rank_history_by_layer(
-            theta_sample_traces_by_layer,
-            layer_list,
-            keep_wires=KEEP_WIRES,
-            jvp_chunk=RED_JVP_CHUNK,
-            batch_size=effective_analysis_batch_size,
-        )
+    qfim_eigs_history_by_layer = compute_qfim_eigs_history_by_layer(
+        theta_sample_traces_by_layer,
+        layer_list,
+        keep_wires=KEEP_WIRES,
+        jvp_chunk=RED_JVP_CHUNK,
+        batch_size=effective_analysis_batch_size,
     )
-    
-    qfim_rank_history_npz = {
-        "sample_iters": np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        "plot_iters": _qfim_history_plot_iterations(sample_iters),
-        "layers": np.asarray(layer_list, dtype=NP_INT_DTYPE),
-        "analysis_batch_size": np.asarray(
-            effective_analysis_batch_size,
-            dtype=NP_INT_DTYPE,
-        ),
-    }
-    qfim_rank_history_npz.update(
-        {
-            f"L{int(L)}_rank": arr
-            for L, arr in qfim_rank_history_by_layer.items()
-        }
-    )
-    qfim_rank_history_npz.update(
-        {
-            f"L{int(L)}_eigs": arr
-            for L, arr in qfim_eigs_history_by_layer.items()
-        }
-    )
-    qfim_rank_history_npz.update(
-        {
-            f"L{int(L)}_rank_threshold": arr
-            for L, arr in qfim_thresh_history_by_layer.items()
-        }
-    )
-    
-    save_npz_result(
-        os.path.join(qfim_results_dir, "qfim_rank_history_optimization_path_reduced_0123.npz"),
-        **qfim_rank_history_npz,
+    qfim_eigs_history_pure = compute_qfim_eigs_history_by_layer(
+        theta_sample_traces_by_layer,
+        layer_list,
+        jvp_chunk=RED_JVP_CHUNK,
+        representation="pure_full",
+        batch_size=effective_analysis_batch_size,
     )
 
-    qfim_rank_history_pure, qfim_eigs_history_pure, qfim_thresh_history_pure = (
-        compute_qfim_rank_history_by_layer(
-            theta_sample_traces_by_layer,
-            layer_list,
-            jvp_chunk=RED_JVP_CHUNK,
-            representation="pure_full",
-            batch_size=effective_analysis_batch_size,
-        )
-    )
-    save_npz_result(
-        os.path.join(qfim_results_dir, "qfim_rank_history_optimization_path_pure_full.npz"),
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        plot_iters=_qfim_history_plot_iterations(sample_iters),
-        layers=np.asarray(layer_list, dtype=NP_INT_DTYPE),
-        representation=np.asarray("pure_full"),
-        analysis_batch_size=np.asarray(
-            effective_analysis_batch_size,
-            dtype=NP_INT_DTYPE,
-        ),
-        **{f"L{int(L)}_rank": arr for L, arr in qfim_rank_history_pure.items()},
-        **{f"L{int(L)}_eigs": arr for L, arr in qfim_eigs_history_pure.items()},
-        **{f"L{int(L)}_rank_threshold": arr for L, arr in qfim_thresh_history_pure.items()},
-    )
-
-    # Save DPQC-style rank/eigenvalue/trace archives for each kept state.  The
-    # existing reduced_0123 and pure_full archives above remain compatibility
-    # views over the same in-memory arrays.
+    # Save canonical raw-eigenspectrum and trace archives for each kept state.
     qfim_optimization_path_result_paths_by_keep = (
         save_qfim_optimization_path_results_by_keep(
             layers=layer_list,
             sample_iterations=sample_iters,
-            rank_keep0123_by_layer=qfim_rank_history_by_layer,
             eigs_keep0123_by_layer=qfim_eigs_history_by_layer,
-            threshold_keep0123_by_layer=qfim_thresh_history_by_layer,
-            rank_keep01234_by_layer=qfim_rank_history_pure,
             eigs_keep01234_by_layer=qfim_eigs_history_pure,
-            threshold_keep01234_by_layer=qfim_thresh_history_pure,
             analysis_batch_size=effective_analysis_batch_size,
         )
     )
 
-    hs_rank_history_by_layer, hs_eigs_history_by_layer, hs_thresh_history_by_layer = (
-        compute_hs_rank_history_by_layer(
-            theta_sample_traces_by_layer,
-            layer_list,
-            keep_wires=KEEP_WIRES,
-            jvp_chunk=RED_JVP_CHUNK,
-            batch_size=effective_analysis_batch_size,
-        )
+    hs_eigs_history_by_layer = compute_hs_eigs_history_by_layer(
+        theta_sample_traces_by_layer,
+        layer_list,
+        keep_wires=KEEP_WIRES,
+        jvp_chunk=RED_JVP_CHUNK,
+        batch_size=effective_analysis_batch_size,
     )
 
-    hs_rank_history_npz = {
+    hs_history_metadata = {
+        "schema_version": np.asarray(1, dtype=NP_INT_DTYPE),
+        "analysis_kind": np.asarray("optimization_path"),
+        "h_param": np.asarray(h_param, dtype=NP_REAL_DTYPE),
         "sample_iters": np.asarray(sample_iters, dtype=NP_INT_DTYPE),
         "plot_iters": _qfim_history_plot_iterations(sample_iters),
         "layers": np.asarray(layer_list, dtype=NP_INT_DTYPE),
+        "eigenvalue_order": np.asarray("descending"),
         "analysis_batch_size": np.asarray(
             effective_analysis_batch_size,
             dtype=NP_INT_DTYPE,
         ),
     }
-    hs_rank_history_npz.update(
-        {
-            f"L{int(L)}_rank": arr
-            for L, arr in hs_rank_history_by_layer.items()
-        }
-    )
-    hs_rank_history_npz.update(
-        {
-            f"L{int(L)}_eigs": arr
-            for L, arr in hs_eigs_history_by_layer.items()
-        }
-    )
-    hs_rank_history_npz.update(
-        {
-            f"L{int(L)}_rank_threshold": arr
-            for L, arr in hs_thresh_history_by_layer.items()
-        }
-    )
-
     save_npz_result(
-        os.path.join(hs_results_dir, "hs_rank_history_optimization_path_reduced_0123.npz"),
-        **hs_rank_history_npz,
+        os.path.join(
+            hs_results_dir,
+            "hs_eigs_history_optimization_path_reduced_0123.npz",
+        ),
+        **hs_history_metadata,
+        representation=np.asarray("reduced_mixed"),
+        **{
+            f"L{int(L)}": arr
+            for L, arr in hs_eigs_history_by_layer.items()
+        },
     )
 
     # Reuse the already-batched pure QFIM spectra: G_HS = F_Q / 2.
@@ -4928,59 +4687,36 @@ def run_optimization_path_qfim_analysis(
         int(L): 0.5 * np.asarray(eigs, dtype=NP_REAL_DTYPE)
         for L, eigs in qfim_eigs_history_pure.items()
     }
-    hs_thresh_history_pure = {
-        int(L): np.full(
-            np.asarray(eigs).shape[:2],
-            QFIM_EFFECTIVE_RANK_THRESHOLD,
-            dtype=NP_REAL_DTYPE,
-        )
-        for L, eigs in hs_eigs_history_pure.items()
-    }
-    hs_rank_history_pure = {
-        int(L): np.sum(
-            np.asarray(eigs, dtype=NP_REAL_DTYPE)
-            > hs_thresh_history_pure[int(L)][..., None],
-            axis=-1,
-            dtype=NP_INT_DTYPE,
-        ).astype(NP_REAL_DTYPE)
-        for L, eigs in hs_eigs_history_pure.items()
-    }
     save_npz_result(
-        os.path.join(hs_results_dir, "hs_rank_history_optimization_path_pure_full.npz"),
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        plot_iters=_qfim_history_plot_iterations(sample_iters),
-        layers=np.asarray(layer_list, dtype=NP_INT_DTYPE),
+        os.path.join(
+            hs_results_dir,
+            "hs_eigs_history_optimization_path_pure_full.npz",
+        ),
+        **hs_history_metadata,
         representation=np.asarray("pure_full"),
         hs_implementation=np.asarray("pure_qfim_spectrum_over_2"),
-        analysis_batch_size=np.asarray(
-            effective_analysis_batch_size,
-            dtype=NP_INT_DTYPE,
-        ),
-        **{f"L{int(L)}_rank": arr for L, arr in hs_rank_history_pure.items()},
-        **{f"L{int(L)}_eigs": arr for L, arr in hs_eigs_history_pure.items()},
-        **{f"L{int(L)}_rank_threshold": arr for L, arr in hs_thresh_history_pure.items()},
+        **{
+            f"L{int(L)}": arr
+            for L, arr in hs_eigs_history_pure.items()
+        },
     )
 
-    ortk_rank_history_by_layer = {}
-    ortk_effective_rank_history_by_layer = {}
     ortk_eigs_history_by_layer = {}
     ortk_trace_history_by_layer = {}
     if RUN_ORTK_ANALYSIS:
         (
-            ortk_rank_history_by_layer,
-            ortk_effective_rank_history_by_layer,
             ortk_eigs_history_by_layer,
-        ) = compute_ortk_rank_history_by_layer(
+            ortk_trace_history_by_layer,
+        ) = compute_ortk_eigs_trace_history_by_layer(
             theta_sample_traces_by_layer,
             layer_list,
             batch_size=effective_analysis_batch_size,
         )
-        ortk_trace_history_by_layer = {
-            int(L): np.sum(np.asarray(arr, dtype=NP_REAL_DTYPE), axis=2)
-            for L, arr in ortk_eigs_history_by_layer.items()
-        }
 
         ortk_history_metadata = {
+            "schema_version": np.asarray(1, dtype=NP_INT_DTYPE),
+            "analysis_kind": np.asarray("optimization_path"),
+            "h_param": np.asarray(h_param, dtype=NP_REAL_DTYPE),
             "sample_iters": np.asarray(sample_iters, dtype=NP_INT_DTYPE),
             "plot_iters": _qfim_history_plot_iterations(sample_iters),
             "layers": np.asarray(layer_list, dtype=NP_INT_DTYPE),
@@ -4992,51 +4728,10 @@ def run_optimization_path_qfim_analysis(
         save_npz_result(
             os.path.join(
                 ortk_results_dir,
-                "ortk_rank_history_optimization_path.npz",
-            ),
-            **ortk_history_metadata,
-            ortk_rank_threshold=np.asarray(
-                ORTK_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            **{
-                f"L{int(L)}": arr
-                for L, arr in ortk_rank_history_by_layer.items()
-            },
-        )
-        save_npz_result(
-            os.path.join(
-                ortk_results_dir,
-                "ortk_effective_rank_history_optimization_path.npz",
-            ),
-            **ortk_history_metadata,
-            ortk_participation_eps=np.asarray(
-                ORTK_PARTICIPATION_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
-            ortk_participation_rank_threshold=np.asarray(
-                ORTK_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            **{
-                f"L{int(L)}": arr
-                for L, arr in ortk_effective_rank_history_by_layer.items()
-            },
-        )
-        save_npz_result(
-            os.path.join(
-                ortk_results_dir,
                 "ortk_eigs_history_optimization_path.npz",
             ),
             **ortk_history_metadata,
-            ortk_rank_threshold=np.asarray(
-                ORTK_RANK_THRESHOLD,
-                dtype=NP_REAL_DTYPE,
-            ),
-            ortk_participation_eps=np.asarray(
-                ORTK_PARTICIPATION_EPS,
-                dtype=NP_REAL_DTYPE,
-            ),
+            eigenvalue_order=np.asarray("descending"),
             **{
                 f"L{int(L)}": arr
                 for L, arr in ortk_eigs_history_by_layer.items()
@@ -5057,120 +4752,8 @@ def run_optimization_path_qfim_analysis(
     if not make_plots:
         return
 
-    plot_qfim_rank_history_mean_by_layer(
-        qfim_rank_history_by_layer,
-        layer_list,
-        sample_iters,
-        title="Mean QFIM effective rank along optimization path (keep=(0,1,2,3))",
-        outpath=os.path.join(
-            qfim_rank_optimization_path_mean_dir,
-            "qfim_rank_mean_history_optimization_path_reduced_0123.pdf",
-        ),
-        cmap=cmap,
-    )
-    
-    plot_qfim_rank_history_min_by_layer(
-        qfim_rank_history_by_layer,
-        layer_list,
-        sample_iters,
-        title="Minimum QFIM effective rank along optimization path (keep=(0,1,2,3))",
-        outpath=os.path.join(
-            qfim_rank_optimization_path_min_dir,
-            "qfim_rank_min_history_optimization_path_reduced_0123.pdf",
-        ),
-        cmap=cmap,
-    )
-
-    plot_qfim_rank_history_mean_by_layer(
-        hs_rank_history_by_layer,
-        layer_list,
-        sample_iters,
-        title="Mean HS tangent Gram effective rank along optimization path (keep=(0,1,2,3))",
-        outpath=os.path.join(
-            hs_rank_optimization_path_mean_dir,
-            "hs_rank_mean_history_optimization_path_reduced_0123.pdf",
-        ),
-        ylabel=r"Mean HS effective rank $(\lambda_k > 10^{-12})$",
-        cmap=cmap,
-    )
-
-    plot_qfim_rank_history_min_by_layer(
-        hs_rank_history_by_layer,
-        layer_list,
-        sample_iters,
-        title="Minimum HS tangent Gram effective rank along optimization path (keep=(0,1,2,3))",
-        outpath=os.path.join(
-            hs_rank_optimization_path_min_dir,
-            "hs_rank_min_history_optimization_path_reduced_0123.pdf",
-        ),
-        ylabel=r"Minimum HS effective rank $(\lambda_k > 10^{-12})$",
-        cmap=cmap,
-    )
-
     if RUN_ORTK_ANALYSIS:
-        plot_qfim_rank_history_mean_by_layer(
-            ortk_rank_history_by_layer,
-            layer_list,
-            sample_iters,
-            title="Mean Observable-Relevant Tangent Kernel rank along optimization path",
-            outpath=os.path.join(
-                ortk_rank_optimization_path_mean_dir,
-                "ortk_rank_mean_history_optimization_path.pdf",
-            ),
-            ylabel="Mean ORTK rank",
-            cmap=cmap,
-        )
-        plot_qfim_rank_history_min_by_layer(
-            ortk_rank_history_by_layer,
-            layer_list,
-            sample_iters,
-            title="Minimum Observable-Relevant Tangent Kernel rank along optimization path",
-            outpath=os.path.join(
-                ortk_rank_optimization_path_min_dir,
-                "ortk_rank_min_history_optimization_path.pdf",
-            ),
-            ylabel="Minimum ORTK rank",
-            cmap=cmap,
-            integer_y_axis=True,
-        )
-        plot_qfim_rank_history_mean_by_layer(
-            ortk_effective_rank_history_by_layer,
-            layer_list,
-            sample_iters,
-            title=(
-                "Mean Observable-Relevant Tangent Kernel participation effective "
-                "rank along optimization path"
-            ),
-            outpath=os.path.join(
-                ortk_effective_rank_optimization_path_mean_dir,
-                "ortk_effective_rank_mean_history_optimization_path.pdf",
-            ),
-            ylabel=(
-                r"Mean ORTK participation effective rank "
-                r"$(\lambda_k > 10^{-12})$"
-            ),
-            cmap=cmap,
-        )
-        plot_qfim_rank_history_min_by_layer(
-            ortk_effective_rank_history_by_layer,
-            layer_list,
-            sample_iters,
-            title=(
-                "Minimum Observable-Relevant Tangent Kernel participation "
-                "effective rank along optimization path"
-            ),
-            outpath=os.path.join(
-                ortk_effective_rank_optimization_path_min_dir,
-                "ortk_effective_rank_min_history_optimization_path.pdf",
-            ),
-            ylabel=(
-                r"Minimum ORTK participation effective rank "
-                r"$(\lambda_k > 10^{-12})$"
-            ),
-            cmap=cmap,
-            integer_y_axis=False,
-        )
-        plot_qfim_rank_history_mean_by_layer(
+        plot_scalar_history_mean_by_layer(
             ortk_trace_history_by_layer,
             layer_list,
             sample_iters,

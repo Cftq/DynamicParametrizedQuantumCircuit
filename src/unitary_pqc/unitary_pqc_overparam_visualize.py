@@ -1451,7 +1451,7 @@ def _plot_qfim_trace_max_mean_sem_by_layer(
     num_samples: int,
     outpath: str,
 ) -> None:
-    """Plot random-point trace maximum and mean with SEM against layers."""
+    """Plot random-point trace mean with SEM and extrema against layers."""
     rows = []
     for L in layers:
         values = np.asarray(trace_by_layer.get(int(L)), dtype=NP_REAL_DTYPE).reshape(-1)
@@ -1459,40 +1459,64 @@ def _plot_qfim_trace_max_mean_sem_by_layer(
         if values.size == 0:
             continue
         mean, sem, _ = _finite_mean_sem(values)
-        rows.append((int(L), float(np.max(values)), float(mean), float(sem)))
+        rows.append(
+            (
+                int(L),
+                float(np.max(values)),
+                float(mean),
+                float(sem),
+                float(np.min(values)),
+            )
+        )
     if not rows:
         return
     x = np.asarray([row[0] for row in rows], dtype=NP_REAL_DTYPE)
 
     upqc.new_prx_figure(width="double")
     ax = plt.gca()
-    ax.plot(
-        x,
-        [row[1] for row in rows],
-        marker="o",
-        linewidth=1.4,
-        color="C0",
-        label="Maximum QFIM trace",
-    )
     ax.errorbar(
         x,
         [row[2] for row in rows],
         yerr=[row[3] for row in rows],
-        marker="s",
-        linewidth=1.4,
-        capsize=4.0,
-        elinewidth=1.0,
-        color="C1",
-        label=r"Mean QFIM trace $\pm$ SEM",
+        marker="o",
+        linestyle="-",
+        linewidth=1.5,
+        markersize=5.5,
+        capsize=3.0,
+        elinewidth=0.9,
+        color=METRIC_COLORS["qfim"],
+        label=r"Mean $\pm$ SEM",
+        zorder=3,
+    )
+    ax.plot(
+        x,
+        [row[4] for row in rows],
+        marker="v",
+        linestyle="--",
+        linewidth=1.2,
+        markersize=5.0,
+        color="C2",
+        label="Minimum",
+    )
+    ax.plot(
+        x,
+        [row[1] for row in rows],
+        marker="^",
+        linestyle="--",
+        linewidth=1.2,
+        markersize=5.0,
+        color="C3",
+        label="Maximum",
     )
     ax.set_xlabel("Number of Layers")
     ax.set_ylabel(QFIM_TRACE_YLABEL)
     ax.set_title(
-        rf"QFIM trace maximum and mean $\pm$ SEM at {int(num_samples)} "
-        rf"random points ({keep_label}, $\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}$)"
+        rf"QFIM trace over {int(num_samples)} random points "
+        rf"({keep_label}, $\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}$)"
     )
     ax.set_xticks(x)
     ax.set_xticklabels([str(row[0]) for row in rows])
+    ax.set_ylim(bottom=0.0)
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(loc="best", frameon=True, framealpha=0.9)
     Path(outpath).parent.mkdir(parents=True, exist_ok=True)
@@ -2126,23 +2150,24 @@ def _load_optimization_path_results() -> None:
         for L, eigs in upqc.qfim_eigs_history_pure_by_layer.items()
     }
 
-    hs_rank_path = os.path.join(
+    hs_eigs_path = os.path.join(
         upqc.hs_results_dir,
-        "hs_rank_history_optimization_path_reduced_0123.npz",
+        "hs_eigs_history_optimization_path_reduced_0123.npz",
     )
-    hs_result = _load_required_result(hs_rank_path)
+    hs_result = _load_required_result(hs_eigs_path, require_h_param=True)
     upqc.hs_eigs_history_by_layer = {
-        L: np.asarray(hs_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
+        L: np.asarray(hs_result[f"L{L}"], dtype=NP_REAL_DTYPE)
         for L in layers
     }
     hs_pure_result = _load_required_result(
         os.path.join(
             upqc.hs_results_dir,
-            "hs_rank_history_optimization_path_pure_full.npz",
-        )
+            "hs_eigs_history_optimization_path_pure_full.npz",
+        ),
+        require_h_param=True,
     )
     upqc.hs_eigs_history_pure_by_layer = {
-        L: np.asarray(hs_pure_result[f"L{L}_eigs"], dtype=NP_REAL_DTYPE)
+        L: np.asarray(hs_pure_result[f"L{L}"], dtype=NP_REAL_DTYPE)
         for L in layers
     }
 

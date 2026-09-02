@@ -382,17 +382,13 @@ qfim_eigs_pure_by_layer = {}
 qfim_eigs_reduced_by_layer = {}
 qfim_thresh_pure_by_layer = {}
 qfim_thresh_reduced_by_layer = {}
-qfim_rank_history_by_layer = {}
 qfim_eigs_history_by_layer = {}
-qfim_thresh_history_by_layer = {}
 qfim_random_result_paths_by_keep = {}
 qfim_optimization_path_result_paths_by_keep = {}
 hs_rank_reduced_by_layer = {}
 hs_eigs_reduced_by_layer = {}
 hs_thresh_reduced_by_layer = {}
-hs_rank_history_by_layer = {}
 hs_eigs_history_by_layer = {}
-hs_thresh_history_by_layer = {}
 hessian_rank_by_layer = {}
 hessian_condition_by_layer = {}
 
@@ -404,28 +400,10 @@ qfim_eigs_pure_dir = os.path.join(qfim_eigs_dir, "pure_full")
 qfim_eigs_reduced_0123_dir = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
 qfim_rank_dir = os.path.join(qfim_fig_dir, "rank")
 qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
-qfim_rank_optimization_path_dir = os.path.join(qfim_rank_dir, "optimization_path")
-qfim_rank_optimization_path_mean_dir = os.path.join(
-    qfim_rank_optimization_path_dir,
-    "mean",
-)
-qfim_rank_optimization_path_min_dir = os.path.join(
-    qfim_rank_optimization_path_dir,
-    "min",
-)
 hs_eigs_dir = os.path.join(hs_fig_dir, "eigs")
 hs_eigs_reduced_0123_dir = os.path.join(hs_eigs_dir, "reduced_keep_0123")
 hs_rank_dir = os.path.join(hs_fig_dir, "rank")
 hs_rank_random_dir = os.path.join(hs_rank_dir, "random_points")
-hs_rank_optimization_path_dir = os.path.join(hs_rank_dir, "optimization_path")
-hs_rank_optimization_path_mean_dir = os.path.join(
-    hs_rank_optimization_path_dir,
-    "mean",
-)
-hs_rank_optimization_path_min_dir = os.path.join(
-    hs_rank_optimization_path_dir,
-    "min",
-)
 _figsize_from_width = plot_style._figsize_from_width
 new_prx_figure = plot_style.new_prx_figure
 set_prx_title = plot_style.set_prx_title
@@ -443,16 +421,10 @@ def _ensure_unitary_result_dirs() -> None:
     os.makedirs(hessian_fig_dir, exist_ok=True)
     os.makedirs(qfim_rank_dir, exist_ok=True)
     os.makedirs(qfim_rank_random_dir, exist_ok=True)
-    os.makedirs(qfim_rank_optimization_path_dir, exist_ok=True)
-    os.makedirs(qfim_rank_optimization_path_mean_dir, exist_ok=True)
-    os.makedirs(qfim_rank_optimization_path_min_dir, exist_ok=True)
     os.makedirs(hs_eigs_dir, exist_ok=True)
     os.makedirs(hs_eigs_reduced_0123_dir, exist_ok=True)
     os.makedirs(hs_rank_dir, exist_ok=True)
     os.makedirs(hs_rank_random_dir, exist_ok=True)
-    os.makedirs(hs_rank_optimization_path_dir, exist_ok=True)
-    os.makedirs(hs_rank_optimization_path_mean_dir, exist_ok=True)
-    os.makedirs(hs_rank_optimization_path_min_dir, exist_ok=True)
     os.makedirs(circuit_dir, exist_ok=True)
     os.makedirs(numerical_results_dir, exist_ok=True)
     os.makedirs(energy_results_dir, exist_ok=True)
@@ -561,6 +533,52 @@ def _validated_qfim_layers(
     if not valid_layers:
         raise ValueError(f"No complete {context} QFIM results are available.")
     return valid_layers
+
+
+def _validated_qfim_eigenvalue_history_layers(
+    layers,
+    eigs_by_layer: dict,
+    sample_iterations,
+    *,
+    context: str,
+) -> tuple[list[int], int]:
+    """Validate optimization-path spectra without computing rank metrics."""
+    sample_iterations = np.asarray(sample_iterations, dtype=NP_INT_DTYPE)
+    valid_layers = []
+    expected_num_runs = None
+    for layer in layers:
+        L = int(layer)
+        value = eigs_by_layer.get(L)
+        if value is None:
+            raise ValueError(f"Missing {context} QFIM eigenvalues for L={L}.")
+        eigs = np.asarray(value)
+        if not np.issubdtype(eigs.dtype, np.number) or np.iscomplexobj(eigs):
+            raise TypeError(
+                f"{context} QFIM eigenvalues for L={L} must be real numeric "
+                f"data, got dtype={eigs.dtype}."
+            )
+        expected_num_params = num_params_per_layer * L
+        if eigs.ndim != 3 or eigs.shape[1:] != (
+            sample_iterations.size,
+            expected_num_params,
+        ):
+            raise ValueError(
+                f"{context} QFIM eigenspectrum shape mismatch for L={L}: "
+                f"expected (num_runs, {sample_iterations.size}, "
+                f"{expected_num_params}), got {eigs.shape}."
+            )
+        if expected_num_runs is None:
+            expected_num_runs = int(eigs.shape[0])
+        elif eigs.shape[0] != expected_num_runs:
+            raise ValueError(
+                f"{context} QFIM run-count mismatch for L={L}: "
+                f"expected {expected_num_runs}, got {eigs.shape[0]}."
+            )
+        valid_layers.append(L)
+
+    if not valid_layers or expected_num_runs is None:
+        raise ValueError(f"No complete {context} QFIM eigenvalues are available.")
+    return valid_layers, expected_num_runs
 
 
 def save_qfim_random_point_results_by_keep(
@@ -715,33 +733,25 @@ def save_qfim_optimization_path_results_by_keep(
     *,
     layers,
     sample_iterations,
-    rank_keep0123_by_layer: dict,
     eigs_keep0123_by_layer: dict,
-    threshold_keep0123_by_layer: dict,
-    rank_keep01234_by_layer: dict,
     eigs_keep01234_by_layer: dict,
-    threshold_keep01234_by_layer: dict,
     analysis_batch_size: Optional[int] = None,
 ) -> dict[str, dict[str, str]]:
-    """Save rank, eigenspectrum, and trace histories for both kept states."""
+    """Save eigenspectrum and trace histories for both kept states."""
     specifications = (
         (
             QFIM_KEEP0123_KEY,
             KEEP_WIRES_4,
             QFIM_KEEP0123_LABEL,
             "reduced_mixed",
-            rank_keep0123_by_layer,
             eigs_keep0123_by_layer,
-            threshold_keep0123_by_layer,
         ),
         (
             QFIM_KEEP01234_KEY,
             KEEP_WIRES_5,
             QFIM_KEEP01234_LABEL,
             "pure_full",
-            rank_keep01234_by_layer,
             eigs_keep01234_by_layer,
-            threshold_keep01234_by_layer,
         ),
     )
     sample_iterations = np.asarray(sample_iterations, dtype=NP_INT_DTYPE)
@@ -754,27 +764,16 @@ def save_qfim_optimization_path_results_by_keep(
         keep_wires,
         state_label,
         representation,
-        rank_by_layer,
         eigs_by_layer,
-        threshold_by_layer,
     ) in specifications:
-        valid_layers = _validated_qfim_layers(
-            layers,
-            rank_by_layer,
-            eigs_by_layer,
-            threshold_by_layer,
-            expected_rank_ndim=2,
-            context=f"optimization-path {keep_key}",
+        valid_layers, expected_num_runs = (
+            _validated_qfim_eigenvalue_history_layers(
+                layers,
+                eigs_by_layer,
+                sample_iterations,
+                context=f"optimization-path {keep_key}",
+            )
         )
-        expected_num_runs = np.asarray(rank_by_layer[valid_layers[0]]).shape[0]
-        for L in valid_layers:
-            history_shape = np.asarray(rank_by_layer[L]).shape
-            expected_shape = (expected_num_runs, sample_iterations.size)
-            if history_shape != expected_shape:
-                raise ValueError(
-                    f"optimization-path {keep_key} history shape mismatch "
-                    f"for L={L}: expected {expected_shape}, got {history_shape}."
-                )
         metadata = {
             "schema_version": np.asarray(1, dtype=NP_INT_DTYPE),
             "ansatz": np.asarray(ANSATZ_NAME),
@@ -824,10 +823,6 @@ def save_qfim_optimization_path_results_by_keep(
             ),
             "eigenvalues_threshold_masked": np.asarray(False),
         }
-        rank_path = os.path.join(
-            qfim_results_dir,
-            f"qfim_rank_history_optimization_path_{keep_key}.npz",
-        )
         eigs_path = os.path.join(
             qfim_results_dir,
             f"qfim_eigs_history_optimization_path_{keep_key}.npz",
@@ -835,24 +830,6 @@ def save_qfim_optimization_path_results_by_keep(
         trace_path = os.path.join(
             qfim_results_dir,
             f"qfim_trace_history_optimization_path_{keep_key}.npz",
-        )
-        save_npz_result(
-            rank_path,
-            **metadata,
-            **{
-                f"L{L}": np.asarray(
-                    rank_by_layer[L],
-                    dtype=NP_REAL_DTYPE,
-                )
-                for L in valid_layers
-            },
-            **{
-                f"L{L}_rank_threshold": np.asarray(
-                    threshold_by_layer[L],
-                    dtype=NP_REAL_DTYPE,
-                )
-                for L in valid_layers
-            },
         )
         save_npz_result(
             eigs_path,
@@ -879,7 +856,6 @@ def save_qfim_optimization_path_results_by_keep(
             },
         )
         result_paths[keep_key] = {
-            "rank": rank_path,
             "eigs": eigs_path,
             "trace": trace_path,
         }
@@ -1702,14 +1678,24 @@ def _make_psd_analysis_batch_runner(matrix_fn):
     return jax.jit(jax.vmap(metrics_one))
 
 
+def _make_psd_eigenvalue_batch_runner(matrix_fn):
+    """Batch raw PSD eigenspectra without rank or threshold calculations."""
+
+    def eigenvalues_one(theta: jnp.ndarray):
+        return (psd_eigvals_desc(matrix_fn(theta)),)
+
+    return jax.jit(jax.vmap(eigenvalues_one))
+
+
 def make_qfim_analysis_batch_runner(
     num_layers: int,
     *,
     keep_wires=KEEP_WIRES,
     jvp_chunk: int = RED_JVP_CHUNK,
     representation: str = "reduced",
+    eigenvalues_only: bool = False,
 ):
-    """Create a fixed-shape QFIM ``jit(vmap(...))`` metrics runner."""
+    """Create a fixed-shape QFIM ``jit(vmap(...))`` analysis runner."""
     if representation == "pure_full":
         matrix_fn = make_pure_qfim_matrix_fn_for_layer(int(num_layers))
     elif representation == "reduced":
@@ -1720,6 +1706,8 @@ def make_qfim_analysis_batch_runner(
         )
     else:
         raise ValueError("representation must be 'pure_full' or 'reduced'.")
+    if eigenvalues_only:
+        return _make_psd_eigenvalue_batch_runner(matrix_fn)
     return _make_psd_analysis_batch_runner(matrix_fn)
 
 
@@ -1729,8 +1717,9 @@ def make_hs_analysis_batch_runner(
     keep_wires=KEEP_WIRES,
     jvp_chunk: int = RED_JVP_CHUNK,
     representation: str = "reduced",
+    eigenvalues_only: bool = False,
 ):
-    """Create a fixed-shape HS ``jit(vmap(...))`` metrics runner."""
+    """Create a fixed-shape HS ``jit(vmap(...))`` analysis runner."""
     if representation == "pure_full":
         matrix_fn = make_pure_full_hs_matrix_fn_for_layer(
             num_layers=int(num_layers),
@@ -1744,6 +1733,8 @@ def make_hs_analysis_batch_runner(
         )
     else:
         raise ValueError("representation must be 'pure_full' or 'reduced'.")
+    if eigenvalues_only:
+        return _make_psd_eigenvalue_batch_runner(matrix_fn)
     return _make_psd_analysis_batch_runner(matrix_fn)
 
 
@@ -1778,7 +1769,7 @@ def make_hessian_analysis_batch_runner(num_layers: int):
     return jax.jit(jax.vmap(metrics_one))
 
 
-def compute_qfim_rank_history_by_layer(
+def compute_qfim_eigenvalue_history_by_layer(
     theta_samples_by_layer: dict,
     layers,
     *,
@@ -1787,13 +1778,11 @@ def compute_qfim_rank_history_by_layer(
     representation: str = "reduced",
     batch_size: Optional[int] = None,
 ):
-    rank_history_by_layer = {}
     eigs_history_by_layer = {}
-    thresh_history_by_layer = {}
 
     for L in tqdm(
         layers,
-        desc="QFIM rank history along optimization path",
+        desc="QFIM eigenvalue history along optimization path",
         unit="layer",
     ):
         L_int = int(L)
@@ -1817,40 +1806,30 @@ def compute_qfim_rank_history_by_layer(
             keep_wires=keep_wires,
             jvp_chunk=jvp_chunk,
             representation=representation,
+            eigenvalues_only=True,
         )
-        ranks_flat, _, eigs_flat, thresholds_flat = (
-            _evaluate_analysis_in_batches(
-                theta_samples.reshape((-1, num_params)),
-                batch_runner,
-                batch_size=batch_size,
-                description=(
-                    f"QFIM batches ({representation}, L={L_int}, "
-                    f"batch={_resolve_analysis_batch_size(batch_size)})"
-                ),
-            )
-        )
-        ranks_L = np.asarray(ranks_flat, dtype=NP_REAL_DTYPE).reshape(
-            (num_runs, num_times)
+        (eigs_flat,) = _evaluate_analysis_in_batches(
+            theta_samples.reshape((-1, num_params)),
+            batch_runner,
+            batch_size=batch_size,
+            description=(
+                f"QFIM eigenvalue batches ({representation}, L={L_int}, "
+                f"batch={_resolve_analysis_batch_size(batch_size)})"
+            ),
         )
         eigs_L = np.asarray(eigs_flat, dtype=NP_REAL_DTYPE).reshape(
             (num_runs, num_times, num_params)
         )
-        thresh_L = np.asarray(
-            thresholds_flat,
-            dtype=NP_REAL_DTYPE,
-        ).reshape((num_runs, num_times))
 
-        rank_history_by_layer[L_int] = ranks_L
         eigs_history_by_layer[L_int] = eigs_L
-        thresh_history_by_layer[L_int] = thresh_L
 
         del batch_runner
         _release_jax_compilation_cache()
 
-    return rank_history_by_layer, eigs_history_by_layer, thresh_history_by_layer
+    return eigs_history_by_layer
 
 
-def compute_hs_rank_history_by_layer(
+def compute_hs_eigenvalue_history_by_layer(
     theta_samples_by_layer: dict,
     layers,
     *,
@@ -1859,13 +1838,11 @@ def compute_hs_rank_history_by_layer(
     representation: str = "reduced",
     batch_size: Optional[int] = None,
 ):
-    rank_history_by_layer = {}
     eigs_history_by_layer = {}
-    thresh_history_by_layer = {}
 
     for L in tqdm(
         layers,
-        desc="HS rank history along optimization path",
+        desc="HS eigenvalue history along optimization path",
         unit="layer",
     ):
         L_int = int(L)
@@ -1889,232 +1866,33 @@ def compute_hs_rank_history_by_layer(
             keep_wires=keep_wires,
             jvp_chunk=jvp_chunk,
             representation=representation,
+            eigenvalues_only=True,
         )
-        ranks_flat, _, eigs_flat, thresholds_flat = (
-            _evaluate_analysis_in_batches(
-                theta_samples.reshape((-1, num_params)),
-                batch_runner,
-                batch_size=batch_size,
-                description=(
-                    f"HS batches ({representation}, L={L_int}, "
-                    f"batch={_resolve_analysis_batch_size(batch_size)})"
-                ),
-            )
-        )
-        ranks_L = np.asarray(ranks_flat, dtype=NP_REAL_DTYPE).reshape(
-            (num_runs, num_times)
+        (eigs_flat,) = _evaluate_analysis_in_batches(
+            theta_samples.reshape((-1, num_params)),
+            batch_runner,
+            batch_size=batch_size,
+            description=(
+                f"HS eigenvalue batches ({representation}, L={L_int}, "
+                f"batch={_resolve_analysis_batch_size(batch_size)})"
+            ),
         )
         eigs_L = np.asarray(eigs_flat, dtype=NP_REAL_DTYPE).reshape(
             (num_runs, num_times, num_params)
         )
-        thresh_L = np.asarray(
-            thresholds_flat,
-            dtype=NP_REAL_DTYPE,
-        ).reshape((num_runs, num_times))
 
-        rank_history_by_layer[L_int] = ranks_L
         eigs_history_by_layer[L_int] = eigs_L
-        thresh_history_by_layer[L_int] = thresh_L
 
         del batch_runner
         _release_jax_compilation_cache()
 
-    return rank_history_by_layer, eigs_history_by_layer, thresh_history_by_layer
+    return eigs_history_by_layer
 
 def _qfim_history_plot_iterations(sample_iters_for_plot) -> np.ndarray:
     x = np.asarray(sample_iters_for_plot, dtype=NP_REAL_DTYPE).copy()
     if x.size > 0 and int(x[-1]) == int(steps) - 1:
         x[-1] = NP_REAL_DTYPE(steps)
     return x
-
-def _finite_mean_sem_over_runs_by_time(values_2d: np.ndarray):
-    values = np.asarray(values_2d, dtype=NP_REAL_DTYPE)
-    if values.ndim != 2:
-        raise ValueError("values_2d must have shape (num_runs, num_times).")
-
-    valid = np.isfinite(values)
-    counts = np.sum(valid, axis=0)
-    sums = np.sum(np.where(valid, values, 0.0), axis=0)
-
-    means = np.full(values.shape[1], np.nan, dtype=NP_REAL_DTYPE)
-    np.divide(sums, counts, out=means, where=counts > 0)
-
-    centered = np.where(valid, values - means[None, :], 0.0)
-    denom = np.maximum(counts - 1, 1)
-    var = np.sum(centered**2, axis=0) / denom
-    std = np.sqrt(var)
-
-    sems = np.full(values.shape[1], np.nan, dtype=NP_REAL_DTYPE)
-    np.divide(std, np.sqrt(counts), out=sems, where=counts > 1)
-    sems = np.where(counts == 1, 0.0, sems)
-
-    return means, sems, counts
-
-def _rank_history_for_plot(rank_history_by_layer: dict, L: int, x: np.ndarray):
-    ranks = np.asarray(rank_history_by_layer[int(L)], dtype=NP_REAL_DTYPE)
-
-    if ranks.ndim != 2:
-        raise ValueError(
-            "Each rank history array must be 2D: "
-            "(num_runs, num_sample_iters)."
-        )
-
-    if ranks.shape[1] != x.size and ranks.shape[0] == x.size:
-        ranks = ranks.T
-
-    if ranks.shape[1] != x.size:
-        raise ValueError(
-            f"Shape mismatch for L={L}: "
-            f"ranks.shape={ranks.shape}, len(sample_iters)={x.size}."
-        )
-
-    return ranks
-
-def plot_qfim_rank_history_mean_by_layer(
-    rank_history_by_layer: dict,
-    layers,
-    sample_iters_for_plot,
-    *,
-    title: str,
-    outpath: str,
-    ylabel: str = r"Mean QFIM effective rank $(\lambda_k > 10^{-12})$",
-    cmap=None,
-):
-    valid_layers = [
-        int(L)
-        for L in layers
-        if rank_history_by_layer.get(int(L)) is not None
-    ]
-
-    if not valid_layers:
-        return
-
-    x = _qfim_history_plot_iterations(sample_iters_for_plot)
-    cmap = matplotlib.colormaps.get_cmap("viridis") if cmap is None else cmap
-
-    new_prx_figure(width="double")
-    ax = plt.gca()
-    num_layers = len(valid_layers)
-
-    for layer_idx, L in enumerate(valid_layers):
-        ranks = _rank_history_for_plot(rank_history_by_layer, L, x)
-        means, sems, counts = _finite_mean_sem_over_runs_by_time(ranks)
-        finite_mask = np.isfinite(means) & (counts > 0)
-
-        if not np.any(finite_mask):
-            continue
-
-        color = cmap(layer_idx / max(num_layers - 1, 1))
-
-        ax.errorbar(
-            x[finite_mask],
-            means[finite_mask],
-            yerr=sems[finite_mask],
-            marker="o",
-            linestyle="-",
-            linewidth=1.2,
-            markersize=4.5,
-            capsize=3.0,
-            elinewidth=0.8,
-            color=color,
-            label=f"L={L}",
-        )
-
-    ax.set_xlabel("Iterations")
-    ax.set_ylabel(ylabel)
-    set_prx_title(title, ax=ax)
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(int(t)) for t in x], rotation=45, ha="right")
-    ax.set_ylim(bottom=0.0)
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.00),
-        borderaxespad=0.0,
-        frameon=True,
-        framealpha=0.9,
-    )
-
-    save_current_figure(
-        outpath,
-        outside_legend=True,
-        legend_space_frac=0.26,
-    )
-
-def plot_qfim_rank_history_min_by_layer(
-    rank_history_by_layer: dict,
-    layers,
-    sample_iters_for_plot,
-    *,
-    title: str,
-    outpath: str,
-    ylabel: str = r"Minimum QFIM effective rank $(\lambda_k > 10^{-12})$",
-    cmap=None,
-    integer_y_axis: bool = True,
-):
-    valid_layers = [
-        int(L)
-        for L in layers
-        if rank_history_by_layer.get(int(L)) is not None
-    ]
-
-    if not valid_layers:
-        return
-
-    x = _qfim_history_plot_iterations(sample_iters_for_plot)
-    cmap = matplotlib.colormaps.get_cmap("viridis") if cmap is None else cmap
-
-    new_prx_figure(width="double")
-    ax = plt.gca()
-    num_layers = len(valid_layers)
-
-    for layer_idx, L in enumerate(valid_layers):
-        ranks = _rank_history_for_plot(rank_history_by_layer, L, x)
-        valid = np.isfinite(ranks)
-        counts = np.sum(valid, axis=0)
-        ranks_for_min = np.where(valid, ranks, np.inf)
-        min_ranks = np.min(ranks_for_min, axis=0)
-        min_ranks = np.where(counts > 0, min_ranks, np.nan)
-        finite_mask = np.isfinite(min_ranks) & (counts > 0)
-
-        if not np.any(finite_mask):
-            continue
-
-        color = cmap(layer_idx / max(num_layers - 1, 1))
-
-        ax.plot(
-            x[finite_mask],
-            min_ranks[finite_mask],
-            marker="o",
-            linestyle=":",
-            linewidth=1.2,
-            markersize=4.5,
-            color=color,
-            label=f"L={L}",
-        )
-
-    ax.set_xlabel("Iterations")
-    ax.set_ylabel(ylabel)
-    set_prx_title(title, ax=ax)
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(int(t)) for t in x], rotation=45, ha="right")
-    ax.set_ylim(bottom=0.0)
-    if integer_y_axis:
-        ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.00),
-        borderaxespad=0.0,
-        frameon=True,
-        framealpha=0.9,
-    )
-
-    save_current_figure(
-        outpath,
-        outside_legend=True,
-        legend_space_frac=0.26,
-    )
 
 def configure_unitary_pqc_overparam(
     *,
@@ -2134,11 +1912,9 @@ def configure_unitary_pqc_overparam(
     global circuit_dir, numerical_results_dir, energy_results_dir, qfim_results_dir
     global hs_results_dir, hessian_results_dir
     global qfim_eigs_dir, qfim_eigs_pure_dir, qfim_eigs_reduced_0123_dir
-    global qfim_rank_dir, qfim_rank_random_dir, qfim_rank_optimization_path_dir
-    global qfim_rank_optimization_path_mean_dir, qfim_rank_optimization_path_min_dir
+    global qfim_rank_dir, qfim_rank_random_dir
     global hs_eigs_dir, hs_eigs_reduced_0123_dir
-    global hs_rank_dir, hs_rank_random_dir, hs_rank_optimization_path_dir
-    global hs_rank_optimization_path_mean_dir, hs_rank_optimization_path_min_dir
+    global hs_rank_dir, hs_rank_random_dir
     # ============================================================
     # DPQC optimization + plots + QFIM rank (pure + reduced)
     #
@@ -2271,28 +2047,10 @@ def configure_unitary_pqc_overparam(
     qfim_eigs_reduced_0123_dir = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
     qfim_rank_dir = os.path.join(qfim_fig_dir, "rank")
     qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
-    qfim_rank_optimization_path_dir = os.path.join(qfim_rank_dir, "optimization_path")
-    qfim_rank_optimization_path_mean_dir = os.path.join(
-        qfim_rank_optimization_path_dir,
-        "mean",
-    )
-    qfim_rank_optimization_path_min_dir = os.path.join(
-        qfim_rank_optimization_path_dir,
-        "min",
-    )
     hs_eigs_dir = os.path.join(hs_fig_dir, "eigs")
     hs_eigs_reduced_0123_dir = os.path.join(hs_eigs_dir, "reduced_keep_0123")
     hs_rank_dir = os.path.join(hs_fig_dir, "rank")
     hs_rank_random_dir = os.path.join(hs_rank_dir, "random_points")
-    hs_rank_optimization_path_dir = os.path.join(hs_rank_dir, "optimization_path")
-    hs_rank_optimization_path_mean_dir = os.path.join(
-        hs_rank_optimization_path_dir,
-        "mean",
-    )
-    hs_rank_optimization_path_min_dir = os.path.join(
-        hs_rank_optimization_path_dir,
-        "min",
-    )
     _ensure_unitary_result_dirs()
     
     # Block structure constants
@@ -2552,11 +2310,9 @@ def run_vqe_optimization(
     global success_rates_history, energy_mean_history, energy_std_history, final_stats, dense_until_layer, max_layer
     global sparse_step, dense_end, layer_list, save_dir, figures_dir, energy_fig_dir, qfim_fig_dir, hs_fig_dir, hessian_fig_dir, circuit_dir, optimizer
     global qfim_eigs_dir, qfim_eigs_pure_dir, qfim_eigs_reduced_0123_dir
-    global qfim_rank_dir, qfim_rank_random_dir, qfim_rank_optimization_path_dir
-    global qfim_rank_optimization_path_mean_dir, qfim_rank_optimization_path_min_dir
+    global qfim_rank_dir, qfim_rank_random_dir
     global hs_eigs_dir, hs_eigs_reduced_0123_dir
-    global hs_rank_dir, hs_rank_random_dir, hs_rank_optimization_path_dir
-    global hs_rank_optimization_path_mean_dir, hs_rank_optimization_path_min_dir
+    global hs_rank_dir, hs_rank_random_dir
     global theta_history, best_theta_by_layer, final_theta_wrapped_rmsdist_by_layer, energy_traces_by_layer, grad_norm_traces_by_layer, sample_every
     global sample_iters, sample_iter_set, theta_sample_traces_by_layer, cmap
     global numerical_results_dir, energy_results_dir, qfim_results_dir, hs_results_dir, hessian_results_dir
@@ -2606,28 +2362,10 @@ def run_vqe_optimization(
     qfim_eigs_reduced_0123_dir = os.path.join(qfim_eigs_dir, "reduced_keep_0123")
     qfim_rank_dir = os.path.join(qfim_fig_dir, "rank")
     qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
-    qfim_rank_optimization_path_dir = os.path.join(qfim_rank_dir, "optimization_path")
-    qfim_rank_optimization_path_mean_dir = os.path.join(
-        qfim_rank_optimization_path_dir,
-        "mean",
-    )
-    qfim_rank_optimization_path_min_dir = os.path.join(
-        qfim_rank_optimization_path_dir,
-        "min",
-    )
     hs_eigs_dir = os.path.join(hs_fig_dir, "eigs")
     hs_eigs_reduced_0123_dir = os.path.join(hs_eigs_dir, "reduced_keep_0123")
     hs_rank_dir = os.path.join(hs_fig_dir, "rank")
     hs_rank_random_dir = os.path.join(hs_rank_dir, "random_points")
-    hs_rank_optimization_path_dir = os.path.join(hs_rank_dir, "optimization_path")
-    hs_rank_optimization_path_mean_dir = os.path.join(
-        hs_rank_optimization_path_dir,
-        "mean",
-    )
-    hs_rank_optimization_path_min_dir = os.path.join(
-        hs_rank_optimization_path_dir,
-        "min",
-    )
     _ensure_unitary_result_dirs()
     
     optimizer = optax.adam(learning_rate=lr)
@@ -4272,20 +4010,17 @@ def run_random_qfim_analysis(
 
 def run_optimization_path_qfim_analysis(
     *,
-    make_plots: bool = False,
     analysis_batch_size: Optional[int] = None,
 ) -> None:
-    """Compute trajectory matrix metrics with fixed-size JAX batches."""
-    global qfim_rank_history_by_layer, qfim_eigs_history_by_layer, qfim_thresh_history_by_layer, qfim_rank_history_npz
-    global hs_rank_history_by_layer, hs_eigs_history_by_layer, hs_thresh_history_by_layer, hs_rank_history_npz
+    """Compute trajectory QFIM/HS eigenspectra with fixed-size JAX batches."""
+    global qfim_eigs_history_by_layer, hs_eigs_history_by_layer
     global qfim_optimization_path_result_paths_by_keep
     effective_analysis_batch_size = _resolve_analysis_batch_size(
         analysis_batch_size
     )
-    # QFIM rank/eigenvalues along the Unitary-PQC VQE optimization path
-    #   x-axis: sampled optimization iteration
-    #   y-axis: run-mean/run-min QFIM effective rank at theta(iteration)
-    #   color: layer number
+    # QFIM/HS eigenspectra along the Unitary-PQC VQE optimization path.
+    # Rank metrics are intentionally excluded; the saved spectra support the
+    # separate QFIM Trace and eigenvalue-count visualizations.
     # ============================================================
     
     
@@ -4301,131 +4036,56 @@ def run_optimization_path_qfim_analysis(
     
     
     
-    qfim_rank_history_by_layer, qfim_eigs_history_by_layer, qfim_thresh_history_by_layer = (
-        compute_qfim_rank_history_by_layer(
-            theta_sample_traces_by_layer,
-            layer_list,
-            keep_wires=KEEP_WIRES,
-            jvp_chunk=RED_JVP_CHUNK,
-            batch_size=effective_analysis_batch_size,
-        )
+    qfim_eigs_history_by_layer = compute_qfim_eigenvalue_history_by_layer(
+        theta_sample_traces_by_layer,
+        layer_list,
+        keep_wires=KEEP_WIRES,
+        jvp_chunk=RED_JVP_CHUNK,
+        batch_size=effective_analysis_batch_size,
     )
-    
-    qfim_rank_history_npz = {
-        "sample_iters": np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        "plot_iters": _qfim_history_plot_iterations(sample_iters),
-        "layers": np.asarray(layer_list, dtype=NP_INT_DTYPE),
-        "analysis_batch_size": np.asarray(
-            effective_analysis_batch_size,
-            dtype=NP_INT_DTYPE,
-        ),
-    }
-    qfim_rank_history_npz.update(
-        {
-            f"L{int(L)}_rank": arr
-            for L, arr in qfim_rank_history_by_layer.items()
-        }
-    )
-    qfim_rank_history_npz.update(
-        {
-            f"L{int(L)}_eigs": arr
-            for L, arr in qfim_eigs_history_by_layer.items()
-        }
-    )
-    qfim_rank_history_npz.update(
-        {
-            f"L{int(L)}_rank_threshold": arr
-            for L, arr in qfim_thresh_history_by_layer.items()
-        }
-    )
-    
-    save_npz_result(
-        os.path.join(qfim_results_dir, "qfim_rank_history_optimization_path_reduced_0123.npz"),
-        **qfim_rank_history_npz,
+    qfim_eigs_history_pure = compute_qfim_eigenvalue_history_by_layer(
+        theta_sample_traces_by_layer,
+        layer_list,
+        jvp_chunk=RED_JVP_CHUNK,
+        representation="pure_full",
+        batch_size=effective_analysis_batch_size,
     )
 
-    qfim_rank_history_pure, qfim_eigs_history_pure, qfim_thresh_history_pure = (
-        compute_qfim_rank_history_by_layer(
-            theta_sample_traces_by_layer,
-            layer_list,
-            jvp_chunk=RED_JVP_CHUNK,
-            representation="pure_full",
-            batch_size=effective_analysis_batch_size,
-        )
-    )
-    save_npz_result(
-        os.path.join(qfim_results_dir, "qfim_rank_history_optimization_path_pure_full.npz"),
-        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        plot_iters=_qfim_history_plot_iterations(sample_iters),
-        layers=np.asarray(layer_list, dtype=NP_INT_DTYPE),
-        representation=np.asarray("pure_full"),
-        analysis_batch_size=np.asarray(
-            effective_analysis_batch_size,
-            dtype=NP_INT_DTYPE,
-        ),
-        **{f"L{int(L)}_rank": arr for L, arr in qfim_rank_history_pure.items()},
-        **{f"L{int(L)}_eigs": arr for L, arr in qfim_eigs_history_pure.items()},
-        **{f"L{int(L)}_rank_threshold": arr for L, arr in qfim_thresh_history_pure.items()},
-    )
-
-    # Save DPQC-style rank/eigenvalue/trace archives for each kept state.  The
-    # existing reduced_0123 and pure_full archives above remain compatibility
-    # views over the same in-memory arrays.
+    # Save the canonical eigenvalue/trace archives consumed by the visualizer.
     qfim_optimization_path_result_paths_by_keep = (
         save_qfim_optimization_path_results_by_keep(
             layers=layer_list,
             sample_iterations=sample_iters,
-            rank_keep0123_by_layer=qfim_rank_history_by_layer,
             eigs_keep0123_by_layer=qfim_eigs_history_by_layer,
-            threshold_keep0123_by_layer=qfim_thresh_history_by_layer,
-            rank_keep01234_by_layer=qfim_rank_history_pure,
             eigs_keep01234_by_layer=qfim_eigs_history_pure,
-            threshold_keep01234_by_layer=qfim_thresh_history_pure,
             analysis_batch_size=effective_analysis_batch_size,
         )
     )
 
-    hs_rank_history_by_layer, hs_eigs_history_by_layer, hs_thresh_history_by_layer = (
-        compute_hs_rank_history_by_layer(
-            theta_sample_traces_by_layer,
-            layer_list,
-            keep_wires=KEEP_WIRES,
-            jvp_chunk=RED_JVP_CHUNK,
-            batch_size=effective_analysis_batch_size,
-        )
+    hs_eigs_history_by_layer = compute_hs_eigenvalue_history_by_layer(
+        theta_sample_traces_by_layer,
+        layer_list,
+        keep_wires=KEEP_WIRES,
+        jvp_chunk=RED_JVP_CHUNK,
+        batch_size=effective_analysis_batch_size,
     )
-
-    hs_rank_history_npz = {
-        "sample_iters": np.asarray(sample_iters, dtype=NP_INT_DTYPE),
-        "plot_iters": _qfim_history_plot_iterations(sample_iters),
-        "layers": np.asarray(layer_list, dtype=NP_INT_DTYPE),
-        "analysis_batch_size": np.asarray(
+    save_npz_result(
+        os.path.join(
+            hs_results_dir,
+            "hs_eigs_history_optimization_path_reduced_0123.npz",
+        ),
+        sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
+        plot_iters=_qfim_history_plot_iterations(sample_iters),
+        layers=np.asarray(layer_list, dtype=NP_INT_DTYPE),
+        representation=np.asarray("reduced_mixed"),
+        analysis_batch_size=np.asarray(
             effective_analysis_batch_size,
             dtype=NP_INT_DTYPE,
         ),
-    }
-    hs_rank_history_npz.update(
-        {
-            f"L{int(L)}_rank": arr
-            for L, arr in hs_rank_history_by_layer.items()
-        }
-    )
-    hs_rank_history_npz.update(
-        {
+        **{
             f"L{int(L)}_eigs": arr
             for L, arr in hs_eigs_history_by_layer.items()
-        }
-    )
-    hs_rank_history_npz.update(
-        {
-            f"L{int(L)}_rank_threshold": arr
-            for L, arr in hs_thresh_history_by_layer.items()
-        }
-    )
-
-    save_npz_result(
-        os.path.join(hs_results_dir, "hs_rank_history_optimization_path_reduced_0123.npz"),
-        **hs_rank_history_npz,
+        },
     )
 
     # Reuse the already-batched pure QFIM spectra: G_HS = F_Q / 2.
@@ -4433,25 +4093,11 @@ def run_optimization_path_qfim_analysis(
         int(L): 0.5 * np.asarray(eigs, dtype=NP_REAL_DTYPE)
         for L, eigs in qfim_eigs_history_pure.items()
     }
-    hs_thresh_history_pure = {
-        int(L): np.full(
-            np.asarray(eigs).shape[:2],
-            QFIM_EFFECTIVE_RANK_THRESHOLD,
-            dtype=NP_REAL_DTYPE,
-        )
-        for L, eigs in hs_eigs_history_pure.items()
-    }
-    hs_rank_history_pure = {
-        int(L): np.sum(
-            np.asarray(eigs, dtype=NP_REAL_DTYPE)
-            > hs_thresh_history_pure[int(L)][..., None],
-            axis=-1,
-            dtype=NP_INT_DTYPE,
-        ).astype(NP_REAL_DTYPE)
-        for L, eigs in hs_eigs_history_pure.items()
-    }
     save_npz_result(
-        os.path.join(hs_results_dir, "hs_rank_history_optimization_path_pure_full.npz"),
+        os.path.join(
+            hs_results_dir,
+            "hs_eigs_history_optimization_path_pure_full.npz",
+        ),
         sample_iters=np.asarray(sample_iters, dtype=NP_INT_DTYPE),
         plot_iters=_qfim_history_plot_iterations(sample_iters),
         layers=np.asarray(layer_list, dtype=NP_INT_DTYPE),
@@ -4461,65 +4107,8 @@ def run_optimization_path_qfim_analysis(
             effective_analysis_batch_size,
             dtype=NP_INT_DTYPE,
         ),
-        **{f"L{int(L)}_rank": arr for L, arr in hs_rank_history_pure.items()},
         **{f"L{int(L)}_eigs": arr for L, arr in hs_eigs_history_pure.items()},
-        **{f"L{int(L)}_rank_threshold": arr for L, arr in hs_thresh_history_pure.items()},
     )
-
-    if not make_plots:
-        return
-
-    plot_qfim_rank_history_mean_by_layer(
-        qfim_rank_history_by_layer,
-        layer_list,
-        sample_iters,
-        title="Mean QFIM effective rank along optimization path (keep=(0,1,2,3))",
-        outpath=os.path.join(
-            qfim_rank_optimization_path_mean_dir,
-            "qfim_rank_mean_history_optimization_path_reduced_0123.pdf",
-        ),
-        cmap=cmap,
-    )
-    
-    plot_qfim_rank_history_min_by_layer(
-        qfim_rank_history_by_layer,
-        layer_list,
-        sample_iters,
-        title="Minimum QFIM effective rank along optimization path (keep=(0,1,2,3))",
-        outpath=os.path.join(
-            qfim_rank_optimization_path_min_dir,
-            "qfim_rank_min_history_optimization_path_reduced_0123.pdf",
-        ),
-        cmap=cmap,
-    )
-
-    plot_qfim_rank_history_mean_by_layer(
-        hs_rank_history_by_layer,
-        layer_list,
-        sample_iters,
-        title="Mean HS tangent Gram effective rank along optimization path (keep=(0,1,2,3))",
-        outpath=os.path.join(
-            hs_rank_optimization_path_mean_dir,
-            "hs_rank_mean_history_optimization_path_reduced_0123.pdf",
-        ),
-        ylabel=r"Mean HS effective rank $(\lambda_k > 10^{-12})$",
-        cmap=cmap,
-    )
-
-    plot_qfim_rank_history_min_by_layer(
-        hs_rank_history_by_layer,
-        layer_list,
-        sample_iters,
-        title="Minimum HS tangent Gram effective rank along optimization path (keep=(0,1,2,3))",
-        outpath=os.path.join(
-            hs_rank_optimization_path_min_dir,
-            "hs_rank_min_history_optimization_path_reduced_0123.pdf",
-        ),
-        ylabel=r"Minimum HS effective rank $(\lambda_k > 10^{-12})$",
-        cmap=cmap,
-    )
-
-    # ============================================================
 
 def collect_unitary_pqc_result() -> dict:
     """Return the compact summary shown by the notebook after execution."""
@@ -4586,7 +4175,6 @@ def run_unitary_pqc_qfim_stage(
         analysis_batch_size=effective_analysis_batch_size,
     )
     run_optimization_path_qfim_analysis(
-        make_plots=False,
         analysis_batch_size=effective_analysis_batch_size,
     )
     result = collect_unitary_pqc_result()
@@ -4617,7 +4205,6 @@ def run_unitary_pqc_overparam(
         analysis_batch_size=effective_analysis_batch_size,
     )
     run_optimization_path_qfim_analysis(
-        make_plots=False,
         analysis_batch_size=effective_analysis_batch_size,
     )
     result = collect_unitary_pqc_result()

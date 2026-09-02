@@ -2618,7 +2618,7 @@ plot_qfim_random_eigcount_threshold_overlay(
 
 
 # ============================================================
-# Maximum QFIM trace + mean ± SEM by layer
+# QFIM trace mean ± SEM, minimum, and maximum by layer
 #   The plotted value is the sum of QFIM eigenvalues at or above the rank
 #   threshold at each random parameter point.
 #   reduced keep=(0,1,2,3) only
@@ -2646,6 +2646,7 @@ def _qfim_metric_max_mean_sem_xy(metric_by_layer: dict, layers):
             np.asarray([], dtype=NP_REAL_DTYPE),
             np.asarray([], dtype=NP_REAL_DTYPE),
             np.asarray([], dtype=NP_REAL_DTYPE),
+            np.asarray([], dtype=NP_REAL_DTYPE),
             [],
         )
 
@@ -2654,6 +2655,11 @@ def _qfim_metric_max_mean_sem_xy(metric_by_layer: dict, layers):
 
     max_values = np.asarray(
         [np.max(values_arr) for _, values_arr in valid_items],
+        dtype=NP_REAL_DTYPE,
+    )
+
+    min_values = np.asarray(
+        [np.min(values_arr) for _, values_arr in valid_items],
         dtype=NP_REAL_DTYPE,
     )
 
@@ -2672,7 +2678,7 @@ def _qfim_metric_max_mean_sem_xy(metric_by_layer: dict, layers):
         dtype=NP_REAL_DTYPE,
     )
 
-    return x, max_values, mean_values, sem_values, valid_layers
+    return x, max_values, mean_values, sem_values, min_values, valid_layers
 
 
 def plot_qfim_trace_max_mean_sem_by_layer(
@@ -2681,10 +2687,12 @@ def plot_qfim_trace_max_mean_sem_by_layer(
     *,
     title: str,
     outpath: str,
-    color_max="C0",
-    color_mean="C1",
-    marker_max: str = "o",
-    marker_mean: str = "s",
+    color_max="C3",
+    color_mean="C0",
+    color_min="C2",
+    marker_max: str = "^",
+    marker_mean: str = "o",
+    marker_min: str = "v",
     lw: float = 1.4,
     log_scale: bool = False,
 ):
@@ -2693,6 +2701,7 @@ def plot_qfim_trace_max_mean_sem_by_layer(
         max_values,
         mean_values,
         sem_values,
+        min_values,
         valid_layers,
     ) = _qfim_metric_max_mean_sem_xy(trace_by_layer, layers)
 
@@ -2701,17 +2710,6 @@ def plot_qfim_trace_max_mean_sem_by_layer(
 
     fig, ax = new_fig_ax(outside_legend=False)
 
-    ax.plot(
-        x,
-        max_values,
-        marker=marker_max,
-        linestyle="-",
-        linewidth=lw,
-        markersize=6.0,
-        color=color_max,
-        label="Maximum QFIM trace",
-    )
-
     ax.errorbar(
         x,
         mean_values,
@@ -2719,11 +2717,34 @@ def plot_qfim_trace_max_mean_sem_by_layer(
         marker=marker_mean,
         linestyle="-",
         linewidth=lw,
-        markersize=5.0,
-        capsize=4.0,
-        elinewidth=1.0,
+        markersize=5.5,
+        capsize=3.0,
+        elinewidth=0.9,
         color=color_mean,
-        label=r"Mean QFIM trace $\pm$ SEM",
+        label=r"Mean $\pm$ SEM",
+        zorder=3,
+    )
+
+    ax.plot(
+        x,
+        min_values,
+        marker=marker_min,
+        linestyle="--",
+        linewidth=1.2,
+        markersize=5.0,
+        color=color_min,
+        label="Minimum",
+    )
+
+    ax.plot(
+        x,
+        max_values,
+        marker=marker_max,
+        linestyle="--",
+        linewidth=1.2,
+        markersize=5.0,
+        color=color_max,
+        label="Maximum",
     )
 
     ax.set_xlabel("Number of Layers")
@@ -2734,6 +2755,8 @@ def plot_qfim_trace_max_mean_sem_by_layer(
 
     if log_scale:
         ax.set_yscale("log")
+    else:
+        ax.set_ylim(bottom=0.0)
 
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(loc="best", frameon=True, framealpha=0.9)
@@ -2746,17 +2769,18 @@ if INCLUDE_QFIM_TRACE_FIGURES:
         qfim_thresholded_trace_reduced_0123_by_layer,
         qfim_layer_list,
         title=(
-            rf"QFIM trace maximum and mean $\pm$ SEM at "
-            rf"{NUM_QFIM_SAMPLES} random points"
+            rf"QFIM trace over {NUM_QFIM_SAMPLES} random points"
         ),
         outpath=os.path.join(
             qfim_trace_dir,
             "qfim_trace_max_mean_sem_random_points_reduced_0123.pdf",
         ),
-        color_max="C0",
-        color_mean="C1",
-        marker_max="o",
-        marker_mean="s",
+        color_max="C3",
+        color_mean="C0",
+        color_min="C2",
+        marker_max="^",
+        marker_mean="o",
+        marker_min="v",
         lw=1.4,
         log_scale=False,
     )
@@ -3844,8 +3868,8 @@ def render_qfim_keep01234_core_figures() -> None:
                     trace_by_layer,
                     random_layers,
                     title=(
-                        rf"QFIM trace maximum and mean $\pm$ SEM at "
-                        rf"{num_random_samples} random points ({keep_label_5})"
+                        rf"QFIM trace over {num_random_samples} random points "
+                        rf"({keep_label_5})"
                     ),
                     outpath=os.path.join(
                         qfim_trace_dir,
@@ -3854,10 +3878,12 @@ def render_qfim_keep01234_core_figures() -> None:
                             "reduced_01234.pdf"
                         ),
                     ),
-                    color_max="C0",
-                    color_mean="C1",
-                    marker_max="o",
-                    marker_mean="s",
+                    color_max="C3",
+                    color_mean="C0",
+                    color_min="C2",
+                    marker_max="^",
+                    marker_mean="o",
+                    marker_min="v",
                     lw=1.4,
                     log_scale=False,
                 )
