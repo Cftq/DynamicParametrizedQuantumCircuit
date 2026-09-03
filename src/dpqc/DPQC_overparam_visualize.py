@@ -8,6 +8,8 @@ those saved results and generates figures without recomputing VQE/QFIM.
 QFIM trace figures sum only eigenvalues at or above the configured QFIM rank
 threshold (1e-12 by default).  The same active spectrum is normalized to
 compute its Shannon entropy in nats directly from the saved eigenvalues.
+Random-point QFIM rank figures count eigenvalues at or above that threshold
+and show the layerwise mean with SEM together with the minimum and maximum.
 
 Example::
 
@@ -1826,6 +1828,8 @@ qfim_eigcount_optimization_path_min_dir = os.path.join(
     qfim_eigcount_optimization_path_dir,
     "min",
 )
+qfim_rank_dir = os.path.join(qfim_fig_dir, "rank")
+qfim_rank_random_dir = os.path.join(qfim_rank_dir, "random_points")
 qfim_effective_rank_dir = os.path.join(qfim_fig_dir, "effective_rank")
 qfim_shannon_entropy_dir = os.path.join(qfim_fig_dir, "shannon_entropy")
 circuit_dir = os.path.join(save_dir, "optimized_circuits")
@@ -1910,6 +1914,8 @@ _output_dirs = (
     qfim_eigs_dir_red5,
     qfim_eigcount_dir,
     qfim_eigcount_random_dir,
+    qfim_rank_dir,
+    qfim_rank_random_dir,
     qfim_effective_rank_dir,
     qfim_shannon_entropy_dir,
     circuit_dir,
@@ -2179,17 +2185,33 @@ render_success_probability_multiple_tolerances_figure(
 # ============================================================
 # Load random-parameter QFIM results and generate QFIM figures
 # ============================================================
-# QFIM eigenvalue, trace, and eigenvalue-count plots for both retained subsystems.
+# QFIM eigenvalue, rank, trace, and eigenvalue-count plots for both retained
+# subsystems.
 # ============================================================
 QFIM_EIG_PLOT_EPS = cfg.QFIM_EIG_PLOT_EPS
 NUM_QFIM_SAMPLES = cfg.NUM_QFIM_SAMPLES
-QFIM_TRACE_EIGENVALUE_THRESHOLD = NP_REAL_DTYPE(
+QFIM_RANK_EIGENVALUE_THRESHOLD = NP_REAL_DTYPE(
     cfg.QFIM_EFFECTIVE_RANK_THRESHOLD
 )
+QFIM_TRACE_EIGENVALUE_THRESHOLD = QFIM_RANK_EIGENVALUE_THRESHOLD
 
 QFIM_PATH_EIGCOUNT_THRESHOLDS = tuple(
     float(t) for t in cfg.QFIM_PATH_EIGCOUNT_THRESHOLDS
 )
+
+
+def qfim_rank_at_or_above_threshold(eigenvalues: np.ndarray) -> np.ndarray:
+    """Count finite-spectrum eigenvalues at/above the QFIM rank cutoff."""
+    eigs = np.asarray(eigenvalues, dtype=NP_REAL_DTYPE)
+    if eigs.ndim == 0:
+        raise ValueError("QFIM eigenvalues must have an eigenvalue axis.")
+
+    rank = np.sum(
+        eigs >= QFIM_RANK_EIGENVALUE_THRESHOLD,
+        axis=-1,
+    ).astype(NP_REAL_DTYPE)
+    finite_spectrum = np.all(np.isfinite(eigs), axis=-1)
+    return np.where(finite_spectrum, rank, NP_REAL_DTYPE(np.nan))
 
 
 def qfim_trace_at_or_above_rank_threshold(eigenvalues: np.ndarray) -> np.ndarray:
@@ -2438,6 +2460,15 @@ qfim_random_points_result_path = os.path.join(
 )
 
 qfim_random_points_results = load_npz_result(qfim_random_points_result_path)
+qfim_num_random_samples = int(
+    np.asarray(
+        qfim_random_points_results.get(
+            "num_qfim_samples",
+            NUM_QFIM_SAMPLES,
+        ),
+        dtype=NP_INT_DTYPE,
+    ).reshape(-1)[0]
+)
 qfim_layer_list = [
     int(L)
     for L in np.asarray(qfim_random_points_results["layers"], dtype=NP_INT_DTYPE)
@@ -2448,6 +2479,10 @@ qfim_eigs_reduced_0123_by_layer = _load_layer_arrays_from_npz(
     "eigs_desc",
     dtype=NP_REAL_DTYPE,
 )
+qfim_rank_reduced_0123_by_layer = {
+    int(L): qfim_rank_at_or_above_threshold(eigs)
+    for L, eigs in qfim_eigs_reduced_0123_by_layer.items()
+}
 qfim_thresholded_trace_reduced_0123_by_layer = {
     int(L): qfim_trace_at_or_above_rank_threshold(eigs)
     for L, eigs in qfim_eigs_reduced_0123_by_layer.items()
@@ -2500,7 +2535,13 @@ def _qfim_threshold_tex_for_label(threshold: float) -> str:
 
 
 QFIM_TRACE_THRESHOLD_TEX = _qfim_threshold_tex_for_label(
-    QFIM_TRACE_EIGENVALUE_THRESHOLD
+    QFIM_RANK_EIGENVALUE_THRESHOLD
+)
+QFIM_RANK_THRESHOLD_TAG = (
+    f"ge_{_thr_tag(QFIM_RANK_EIGENVALUE_THRESHOLD)}"
+)
+QFIM_RANK_YLABEL = (
+    rf"QFIM rank ($\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}$)"
 )
 QFIM_TRACE_YLABEL = (
     rf"QFIM trace ($\lambda_i \geq {QFIM_TRACE_THRESHOLD_TEX}$)"
@@ -2519,7 +2560,7 @@ QFIM_SHANNON_ENTROPY_LABEL = (
     rf"$H_{{\mathrm{{Sh}}}}(F)=-\sum_i p_i\ln p_i$"
 )
 QFIM_SHANNON_ENTROPY_THRESHOLD_TAG = (
-    f"ge_{_thr_tag(QFIM_TRACE_EIGENVALUE_THRESHOLD)}"
+    QFIM_RANK_THRESHOLD_TAG
 )
 
 
@@ -2757,6 +2798,7 @@ def plot_qfim_trace_max_mean_sem_by_layer(
     lw: float = 1.4,
     log_scale: bool = False,
     ylabel: str = QFIM_TRACE_YLABEL,
+    integer_y_ticks: bool = False,
 ):
     (
         x,
@@ -2819,11 +2861,56 @@ def plot_qfim_trace_max_mean_sem_by_layer(
         ax.set_yscale("log")
     else:
         ax.set_ylim(bottom=0.0)
+    if integer_y_ticks:
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(loc="best", frameon=True, framealpha=0.9)
 
     save_fig(fig, ax, outpath, outside_legend=False)
+
+
+def plot_qfim_rank_max_mean_sem_by_layer(
+    rank_by_layer: dict,
+    layers,
+    *,
+    title: str,
+    outpath: str,
+):
+    """Plot random-point threshold-rank mean/SEM and extrema by layer."""
+    plot_qfim_trace_max_mean_sem_by_layer(
+        rank_by_layer,
+        layers,
+        title=title,
+        outpath=outpath,
+        color_max="C3",
+        color_mean="C0",
+        color_min="C2",
+        marker_max="^",
+        marker_mean="o",
+        marker_min="v",
+        lw=1.4,
+        log_scale=False,
+        ylabel=QFIM_RANK_YLABEL,
+        integer_y_ticks=True,
+    )
+
+
+plot_qfim_rank_max_mean_sem_by_layer(
+    qfim_rank_reduced_0123_by_layer,
+    qfim_layer_list,
+    title=(
+        rf"QFIM rank over {qfim_num_random_samples} random parameter points "
+        rf"({keep_label})"
+    ),
+    outpath=os.path.join(
+        qfim_rank_random_dir,
+        (
+            "qfim_rank_mean_sem_min_max_random_points_"
+            f"{QFIM_RANK_THRESHOLD_TAG}_{keep_key}.pdf"
+        ),
+    ),
+)
 
 
 if INCLUDE_QFIM_TRACE_FIGURES:
@@ -3956,6 +4043,10 @@ def render_qfim_keep01234_core_figures() -> None:
                 "eigs_desc",
                 dtype=NP_REAL_DTYPE,
             )
+            rank_by_layer = {
+                int(L): qfim_rank_at_or_above_threshold(eigs)
+                for L, eigs in eigs_by_layer.items()
+            }
             trace_by_layer = {
                 int(L): qfim_trace_at_or_above_rank_threshold(eigs)
                 for L, eigs in eigs_by_layer.items()
@@ -4016,6 +4107,22 @@ def render_qfim_keep01234_core_figures() -> None:
                     ),
                 ),
                 cmap=cmap,
+            )
+
+            plot_qfim_rank_max_mean_sem_by_layer(
+                rank_by_layer,
+                random_layers,
+                title=(
+                    f"QFIM rank over {num_random_samples} random parameter "
+                    f"points ({keep_label_5})"
+                ),
+                outpath=os.path.join(
+                    qfim_rank_random_dir,
+                    (
+                        "qfim_rank_mean_sem_min_max_random_points_"
+                        f"{QFIM_RANK_THRESHOLD_TAG}_{keep_key_5}.pdf"
+                    ),
+                ),
             )
 
             if INCLUDE_QFIM_TRACE_FIGURES:

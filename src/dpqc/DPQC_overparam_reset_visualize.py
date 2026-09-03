@@ -12,12 +12,13 @@ saved by the compute stage, plus Trace figures computed as
 ``sum(lambda[lambda >= 1e-12])`` and spectral Shannon entropy figures computed
 as ``-sum(p * log(p))`` in nats from those same saved eigenvalues.  Here the
 probabilities normalize the active spectrum ``lambda >= 1e-12``; a zero active
-trace gives entropy zero.  For each retained subsystem, the random-parameter
-figures use the number of layers on the x-axis.  The effective-rank, Trace, and
-Shannon-entropy figures show their means with SEM error bars together with
-explicit minimum and maximum curves.
+trace gives entropy zero.  Threshold QFIM rank is computed directly from the
+saved spectra as ``count(lambda >= 1e-12)``.  For each retained subsystem, the
+random-parameter figures use the number of layers on the x-axis.  The
+effective-rank, threshold-rank, Trace, and Shannon-entropy figures show their
+means with SEM error bars together with explicit minimum and maximum curves.
 Optimization-path effective rank is neither computed nor rendered.  Random-
-point threshold rank is retained as numerical data but is not rendered.
+point threshold rank is rendered only for the saved random parameter points.
 
 The plotting implementation is shared with ``DPQC_overparam_visualize.py``.
 It is launched in a separate Python process with the result family fixed to
@@ -92,8 +93,8 @@ def _parse_cli_args(
         description=(
             "Visualize saved fixed-Rx(pi) reset-DPQC VQE and random-point "
             "QFIM results without recomputation, including layerwise "
-            "participation-effective-rank, thresholded-Trace, and spectral "
-            "Shannon-entropy summaries."
+            "participation-effective-rank, threshold QFIM rank, "
+            "thresholded-Trace, and spectral Shannon-entropy summaries."
         )
     )
     parser.add_argument(
