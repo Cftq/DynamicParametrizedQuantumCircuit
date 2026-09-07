@@ -19,8 +19,10 @@ inspected explicitly.
 The default ``all`` stage runs VQE, random-point QFIM, and random-point energy
 Hessian analysis in separate processes.  The Hessian stage uses the reset model
 in ``DPQC_overparam_hessian.py`` and the QFIM layer/sample/seed settings from
-``config_overparam.py``.  It saves rank and active condition number samples to
-``numerical_results/hessian/hessian_random_points.npz``.
+``config_overparam.py``. It saves full signed Hessian matrices and their sampled
+parameter vectors to ``numerical_results/hessian/hessian_random_points.npz``.
+Rank and condition numbers are derived from those matrices by the visualization
+code, where thresholds can be changed without rerunning the Hessian stage.
 
 Results are isolated below ``figs/dpqc_reset`` and never share archives with
 the original 14-parameters-per-layer DPQC model.

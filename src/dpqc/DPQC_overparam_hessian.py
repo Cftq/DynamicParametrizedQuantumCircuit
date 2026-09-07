@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
-"""Compute DPQC energy-Hessian rank and condition at random parameters.
+"""Compute and save full DPQC energy Hessians at random parameters.
 
 For every requested circuit depth, this program regenerates exactly the
 random-parameter convention used by ``DPQC_overparam_qfim.py``: one batched
@@ -8,22 +8,14 @@ random-parameter convention used by ``DPQC_overparam_qfim.py``: one batched
 parameters drawn uniformly from ``[-pi, pi)`` in float64. It then computes
 the full signed energy Hessian at every point.
 
-The Hessian is generally indefinite and has exact structural zero modes, so
-both reported quantities use the absolute spectrum at the fixed QFIM rank
-threshold ``tau = cfg.QFIM_EFFECTIVE_RANK_THRESHOLD``:
-
-    rank_tau(H) = number of eigenvalues with |lambda_i| >= tau,
-    kappa_tau(H) = max_active |lambda_i| / min_active |lambda_i|.
-
-The condition number is NaN only when the active spectrum is empty. This is
-the condition number on the threshold-active subspace, rather than the
-ordinary full-space condition number (which is infinite in the presence of
-exact zero modes).
-
 Both the original 14-parameters-per-layer DPQC channel and the fixed-Rx(pi)
-12-parameters-per-layer reset-DPQC channel are supported.  Only the rank and
-active condition number samples needed by the corresponding plots are saved,
-in one ``hessian_random_points.npz`` archive.
+12-parameters-per-layer reset-DPQC channel are supported. The schema-version-2
+``hessian_random_points.npz`` archive contains one float64 signed symmetric
+matrix per random point as ``L{L}_hessian`` with shape ``(samples, P, P)``,
+and its sampled parameter vector as ``L{L}_theta`` with shape ``(samples, P)``.
+Matrix rows and columns follow the saved theta order. Rank thresholds,
+eigenvalues, and condition numbers are evaluated later by visualization code,
+so changing an analysis convention does not require recomputing Hessians.
 """
 
 from __future__ import annotations
@@ -87,15 +79,11 @@ LAYER_PAIRS = (
     (TOP, CENTRE),
 )
 
-HESSIAN_RANK_THRESHOLD = float(cfg.QFIM_EFFECTIVE_RANK_THRESHOLD)
 DEFAULT_NUM_SAMPLES = int(cfg.NUM_QFIM_SAMPLES)
 DEFAULT_SEED_BASE = int(cfg.QFIM_SAMPLE_SEED_BASE)
 DEFAULT_HVP_CHUNK_SIZE = 8
 HESSIAN_METHOD = "chunked_forward_over_reverse_hvp"
-SCHEMA_VERSION = 1
-
-if not math.isfinite(HESSIAN_RANK_THRESHOLD) or HESSIAN_RANK_THRESHOLD <= 0.0:
-    raise ValueError("QFIM_EFFECTIVE_RANK_THRESHOLD must be finite and positive.")
+SCHEMA_VERSION = 2
 
 
 def _validated_output_family(output_family: str) -> str:
@@ -467,33 +455,8 @@ def assemble_hessian_from_hvp_chunks(
 
 
 # ---------------------------------------------------------------------------
-# Fixed-threshold spectrum and QFIM-matched random samples
+# QFIM-matched random samples
 # ---------------------------------------------------------------------------
-
-
-def hessian_rank_and_condition_from_eigenvalues(
-    eigenvalues: np.ndarray,
-) -> tuple[int, NP_REAL_DTYPE]:
-    """Return inclusive-threshold rank and active-spectrum condition number."""
-
-    eigenvalues = np.asarray(eigenvalues, dtype=NP_REAL_DTYPE)
-    if eigenvalues.ndim != 1:
-        raise ValueError("eigenvalues must be a one-dimensional array.")
-    if not np.all(np.isfinite(eigenvalues)):
-        raise FloatingPointError("Hessian eigenvalues contain non-finite values.")
-
-    absolute_eigenvalues = np.abs(eigenvalues)
-    active = absolute_eigenvalues >= HESSIAN_RANK_THRESHOLD
-    rank = int(np.count_nonzero(active))
-    if rank == 0:
-        return rank, NP_REAL_DTYPE(np.nan)
-
-    active_absolute_eigenvalues = absolute_eigenvalues[active]
-    condition_number = NP_REAL_DTYPE(
-        np.max(active_absolute_eigenvalues)
-        / np.min(active_absolute_eigenvalues)
-    )
-    return rank, condition_number
 
 
 def generate_qfim_random_theta_samples(
@@ -630,7 +593,7 @@ def _atomic_savez(path: Path, **arrays) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
     with temporary.open("wb") as handle:
-        np.savez(handle, **arrays)
+        np.savez_compressed(handle, **arrays)
     os.replace(temporary, path)
 
 
@@ -649,7 +612,7 @@ def run_hessian_analysis(
     hvp_chunk_size: int = DEFAULT_HVP_CHUNK_SIZE,
     output_family: str = OUTPUT_FAMILY_DPQC,
 ) -> dict[str, Path]:
-    """Compute random-point Hessian rank/condition samples and save one NPZ."""
+    """Save random-point Hessian matrices and theta samples in one NPZ."""
 
     h_param = float(h_param)
     if not math.isfinite(h_param):
@@ -674,16 +637,26 @@ def run_hessian_analysis(
         "layers": np.asarray(selected_layers, dtype=NP_INT_DTYPE),
         "num_hessian_samples": np.asarray(num_samples, dtype=NP_INT_DTYPE),
         "hessian_sample_seed_base": np.asarray(seed_base, dtype=NP_INT_DTYPE),
-        "hessian_rank_threshold": np.asarray(
-            HESSIAN_RANK_THRESHOLD,
-            dtype=NP_REAL_DTYPE,
+        "hessian_definition": np.asarray(
+            "signed energy Hessian d2E / (dtheta_i dtheta_j), "
+            "symmetrized as (H + H.T) / 2"
         ),
-        "hessian_rank_definition": np.asarray(
-            "count(abs(eigenvalue) >= hessian_rank_threshold)"
+        "hessian_axes": np.asarray(
+            ["sample", "theta_row", "theta_column"]
         ),
-        "hessian_condition_number_definition": np.asarray(
-            "max(active abs(eigenvalue)) / min(active abs(eigenvalue)); "
-            "NaN when rank is zero"
+        "theta_axes": np.asarray(["sample", "parameter"]),
+        "parameter_ordering": np.asarray(
+            "layer-major; within each layer, blocks follow block_wire_pairs "
+            "with unitary_block_parameter_order, then channel_parameter_order; "
+            "Hessian rows and columns follow the corresponding saved theta"
+        ),
+        "block_wire_pairs": np.asarray(LAYER_PAIRS, dtype=NP_INT_DTYPE),
+        "unitary_block_parameter_order": np.asarray(
+            ["Rz(first_wire)", "Rz(second_wire)", "Rxx(first_wire,second_wire)"]
+        ),
+        "channel_parameter_order": np.asarray(
+            ["varphi", "phi"] if output_family == OUTPUT_FAMILY_DPQC else [],
+            dtype=np.str_,
         ),
         "parameter_distribution": np.asarray(
             "jax.random.uniform[-pi, pi), float64, "
@@ -698,10 +671,10 @@ def run_hessian_analysis(
     }
 
     print(
-        "Random-point Hessian analysis: "
+        "Random-point Hessian matrix computation: "
         f"model={output_family}, h={h_param}, layers={selected_layers}, "
         f"samples={num_samples}, "
-        f"seed_base={seed_base}, threshold={HESSIAN_RANK_THRESHOLD:.3e}, "
+        f"seed_base={seed_base}, "
         f"hvp_chunk_size={hvp_chunk_size}",
         flush=True,
     )
@@ -722,8 +695,10 @@ def run_hessian_analysis(
         hessian_vector_chunk_function = make_hessian_vector_chunk_function(
             energy_function
         )
-        ranks = np.empty(num_samples, dtype=NP_INT_DTYPE)
-        condition_numbers = np.empty(num_samples, dtype=NP_REAL_DTYPE)
+        hessian_samples = np.empty(
+            (num_samples, n_params, n_params),
+            dtype=NP_REAL_DTYPE,
+        )
 
         print(
             f"[{layer_number}/{len(selected_layers)}] L={layer}: "
@@ -741,16 +716,9 @@ def run_hessian_analysis(
                 raise FloatingPointError(
                     f"Non-finite Hessian at L={layer}, sample={sample_index}."
                 )
-            hessian = 0.5 * (raw_hessian + raw_hessian.T)
-            eigenvalues = np.linalg.eigvalsh(hessian).astype(
-                NP_REAL_DTYPE,
-                copy=False,
+            hessian_samples[sample_index] = 0.5 * (
+                raw_hessian + raw_hessian.T
             )
-            rank, condition_number = (
-                hessian_rank_and_condition_from_eigenvalues(eigenvalues)
-            )
-            ranks[sample_index] = rank
-            condition_numbers[sample_index] = condition_number
 
             completed = sample_index + 1
             if completed == num_samples or completed % progress_interval == 0:
@@ -759,8 +727,11 @@ def run_hessian_analysis(
                     flush=True,
                 )
 
-        arrays[f"L{layer}_rank"] = ranks
-        arrays[f"L{layer}_condition_number"] = condition_numbers
+        arrays[f"L{layer}_hessian"] = hessian_samples
+        arrays[f"L{layer}_theta"] = np.asarray(
+            jax.device_get(theta_samples),
+            dtype=NP_REAL_DTYPE,
+        )
 
         del theta_samples
         del energy_function
@@ -769,7 +740,10 @@ def run_hessian_analysis(
         gc.collect()
 
     _atomic_savez(output_path, **arrays)
-    print(f"Saved random-point Hessian results to: {output_path}", flush=True)
+    print(
+        f"Saved random-point Hessian matrices and parameters to: {output_path}",
+        flush=True,
+    )
     return {"random_points": output_path}
 
 

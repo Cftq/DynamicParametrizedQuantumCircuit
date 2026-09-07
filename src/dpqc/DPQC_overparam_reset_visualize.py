@@ -4,11 +4,16 @@
 
 Run ``DPQC_overparam_reset_compute.py`` first from the project directory that
 should contain the ``figs`` output tree.  This entry point then renders the
-saved VQE and random-point QFIM results below
-``figs/dpqc_reset/h_<h_param>`` without recomputing either quantity.  The
-optional Hessian workflow computes or reuses random-point Hessian rank and
-active-spectrum condition-number samples and renders their layerwise extrema
-and mean with SEM.
+saved VQE, random-point QFIM, and random-point Hessian results below
+``figs/dpqc_reset/h_<h_param>`` without recomputing them.  Hessian rank and
+active-spectrum condition-number figures show the layerwise minimum, maximum,
+and mean with SEM, and are saved under ``hessian_figures``.  Explicit
+``--hessian-only`` or ``--with-hessian`` requests compute fresh Hessian samples
+unless ``--reuse-hessian-results`` is also supplied.
+Rank and condition numbers are computed from saved Hessian matrices at plot
+time. Use ``--hessian-rank-threshold`` to change their active absolute-spectrum
+threshold without rerunning the Hessian calculation. Legacy summary archives
+remain readable at their saved threshold.
 The shared QFIM figures include the participation effective rank
 ``(sum(lambda[lambda > 1e-12]))**2 / sum(lambda[lambda > 1e-12]**2)``
 saved by the compute stage, plus Trace figures computed as
@@ -150,9 +155,9 @@ def _parse_cli_args(
     default_hessian_samples, default_hessian_seed = _default_hessian_settings()
     parser = argparse.ArgumentParser(
         description=(
-            "Visualize saved fixed-Rx(pi) reset-DPQC VQE and random-point "
-            "QFIM results and optionally compute/reuse random-point Hessian "
-            "rank and condition-number results."
+            "Visualize saved fixed-Rx(pi) reset-DPQC VQE, random-point QFIM, "
+            "and random-point Hessian rank and condition-number results. "
+            "Hessian results are reused by default."
         )
     )
     parser.add_argument(
@@ -191,7 +196,9 @@ def _parse_cli_args(
         action="store_true",
         help=(
             "Run the reset-DPQC Hessian workflow after the existing "
-            "energy/QFIM figures."
+            "energy/QFIM figures, recomputing Hessians unless "
+            "--reuse-hessian-results is supplied. Without a Hessian mode "
+            "option, saved Hessian results are plotted without recomputing."
         ),
     )
     parser.add_argument(
@@ -221,6 +228,16 @@ def _parse_cli_args(
         help=(
             "Comma-separated layers to analyze "
             "(default: QFIM layer schedule)."
+        ),
+    )
+    parser.add_argument(
+        "--hessian-rank-threshold",
+        type=_positive_float,
+        default=None,
+        help=(
+            "Positive absolute-eigenvalue threshold for Hessian rank and "
+            "condition number, applied to saved matrices at plot time "
+            "(default: QFIM_EFFECTIVE_RANK_THRESHOLD from config_overparam.py)."
         ),
     )
     parser.add_argument(
@@ -263,6 +280,7 @@ def _build_visualizer_command(
     hessian_results_dir: Path | None = None,
     hessian_figures_dir: Path | None = None,
     hessian_layers: Sequence[int] | None = None,
+    hessian_rank_threshold: float | None = None,
     hessian_num_samples: int | None = None,
     hessian_seed_base: int | None = None,
     hessian_hvp_chunk_size: int | None = None,
@@ -296,6 +314,11 @@ def _build_visualizer_command(
             raise ValueError("convergence tolerances must be finite and positive")
         command.extend(("--convergence-tolerance", repr(tolerance)))
 
+    # A plain visualization command renders the saved Hessian archive too.
+    # Keep fresh (potentially expensive) analysis opt-in via the mode flags.
+    if not hessian_only and not with_hessian:
+        with_hessian = True
+        reuse_hessian_results = True
     hessian_requested = bool(hessian_only or with_hessian)
     if hessian_only:
         command.append("--hessian-only")
@@ -326,6 +349,13 @@ def _build_visualizer_command(
             (
                 "--hessian-num-samples",
                 str(_positive_int(str(hessian_num_samples))),
+            )
+        )
+    if hessian_requested and hessian_rank_threshold is not None:
+        command.extend(
+            (
+                "--hessian-rank-threshold",
+                repr(_positive_float(str(hessian_rank_threshold))),
             )
         )
     if hessian_requested and hessian_seed_base is not None:
@@ -377,6 +407,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         hessian_results_dir=args.hessian_results_dir,
         hessian_figures_dir=args.hessian_figures_dir,
         hessian_layers=args.hessian_layers,
+        hessian_rank_threshold=args.hessian_rank_threshold,
         hessian_num_samples=args.hessian_num_samples,
         hessian_seed_base=args.hessian_seed_base,
         hessian_hvp_chunk_size=args.hessian_hvp_chunk_size,
