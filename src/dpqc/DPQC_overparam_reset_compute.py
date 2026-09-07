@@ -16,6 +16,12 @@ channel directly.  A Qiskit builder is exposed by
 :func:`build_reset_circuit` so the requested gate sequence can also be
 inspected explicitly.
 
+The default ``all`` stage runs VQE, random-point QFIM, and random-point energy
+Hessian analysis in separate processes.  The Hessian stage uses the reset model
+in ``DPQC_overparam_hessian.py`` and the QFIM layer/sample/seed settings from
+``config_overparam.py``.  It saves rank and active condition number samples to
+``numerical_results/hessian/hessian_random_points.npz``.
+
 Results are isolated below ``figs/dpqc_reset`` and never share archives with
 the original 14-parameters-per-layer DPQC model.
 
@@ -28,6 +34,7 @@ Examples::
     python DPQC_overparam_reset_compute.py --stage all
     python DPQC_overparam_reset_compute.py --stage vqe --vqe-batch-size 20
     python DPQC_overparam_reset_compute.py --stage qfim --h-param 0.10
+    python DPQC_overparam_reset_compute.py --stage hessian --h-param 0.10
 """
 
 from __future__ import annotations
@@ -131,12 +138,12 @@ def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage",
-        choices=("all", "vqe", "qfim"),
+        choices=("all", "vqe", "qfim", "hessian"),
         default="all",
         help=(
-            "all: run VQE and then random-point QFIM in separate processes; "
-            "vqe/qfim: run only the selected stage (the QFIM stage excludes "
-            "optimization-path diagnostics)"
+            "all: run VQE, random-point QFIM, and random-point Hessian in "
+            "separate processes; vqe/qfim/hessian: run only the selected "
+            "stage (the QFIM stage excludes optimization-path diagnostics)"
         ),
     )
     parser.add_argument(
@@ -498,6 +505,12 @@ def _validate_model_metadata(save_dir: Path, h_param: float) -> None:
 
 
 def _run_numerical_stage(stage: str, args: argparse.Namespace) -> int:
+    if stage == "hessian":
+        from DPQC_overparam_hessian import run_hessian_analysis
+
+        run_hessian_analysis(h_param=args.h_param, output_family=OUTPUT_FAMILY)
+        return 0
+
     module = _load_base_stage_module(
         stage,
         h_param=args.h_param,
@@ -547,10 +560,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Running reset-DPQC with P(L)=12L and fixed Rx(pi).",
             flush=True,
         )
-        return_code = _launch_stage_subprocess("vqe", args)
-        if return_code:
-            return return_code
-        return _launch_stage_subprocess("qfim", args)
+        for stage in ("vqe", "qfim", "hessian"):
+            return_code = _launch_stage_subprocess(stage, args)
+            if return_code:
+                return return_code
+        return 0
     return _run_numerical_stage(args.stage, args)
 
 

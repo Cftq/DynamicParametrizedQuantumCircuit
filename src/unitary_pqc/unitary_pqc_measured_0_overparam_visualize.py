@@ -1562,6 +1562,7 @@ def _plot_hessian_random_summary_by_layer(
     ylabel: str,
     title: str,
     outpath: str,
+    integer_y_axis: bool = False,
 ) -> None:
     """Plot maximum, mean +/- SEM, and minimum across random points."""
     valid_layers, maxima, means, sems, minima = [], [], [], [], []
@@ -1623,6 +1624,9 @@ def _plot_hessian_random_summary_by_layer(
     ax.set_title(title)
     ax.set_xticks(x)
     ax.set_xticklabels([str(L) for L in valid_layers])
+    if integer_y_axis:
+        ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+        ax.set_ylim(bottom=0.0)
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(loc="best", frameon=True, framealpha=0.9)
     Path(outpath).parent.mkdir(parents=True, exist_ok=True)
@@ -2371,6 +2375,7 @@ def _plot_random_qfim_results() -> None:
             upqc.hessian_fig_dir,
             "hessian_rank_random_points.pdf",
         ),
+        integer_y_axis=True,
     )
     _plot_hessian_random_summary_by_layer(
         upqc.hessian_condition_by_layer,
@@ -2384,6 +2389,7 @@ def _plot_random_qfim_results() -> None:
             upqc.hessian_fig_dir,
             "hessian_condition_number_random_points.pdf",
         ),
+        integer_y_axis=False,
     )
 
     spectral_random_summaries = (

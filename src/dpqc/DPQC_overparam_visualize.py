@@ -10,12 +10,17 @@ threshold (1e-12 by default).  The same active spectrum is normalized to
 compute its Shannon entropy in nats directly from the saved eigenvalues.
 Random-point QFIM rank figures count eigenvalues at or above that threshold
 and show the layerwise mean with SEM together with the minimum and maximum.
+The optional Hessian workflow provides the same layerwise summary for the
+absolute-spectrum rank and active-spectrum condition number for both the
+original DPQC and fixed-Rx(pi) reset-DPQC models.
 
 Example::
 
     python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1
     python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1 --output-family dpqc_reset
     python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1 --hessian-only
+    python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1 \
+        --output-family dpqc_reset --hessian-only
 """
 
 
@@ -246,18 +251,6 @@ INCLUDE_QFIM_EIGS_BY_INDEX_LAYERS = not bool(
 INCLUDE_QFIM_TRACE_FIGURES = not bool(
     getattr(_CLI_ARGS, "skip_qfim_trace_figures", False)
 )
-if output_family == "dpqc_reset" and (
-    getattr(_CLI_ARGS, "hessian_only", False)
-    or getattr(_CLI_ARGS, "with_hessian", False)
-):
-    raise ValueError(
-        "Reset-DPQC Hessian visualization is not supported by the "
-        "14L-parameter dynamic-channel Hessian workflow. Run without "
-        "--hessian-only or "
-        "--with-hessian."
-    )
-
-
 # ============================================================
 # Random-parameter Hessian rank and condition-number analysis
 # ============================================================
@@ -265,6 +258,14 @@ if output_family == "dpqc_reset" and (
 _HESSIAN_RANDOM_RESULT_NAME = "hessian_random_points.npz"
 _HESSIAN_RANDOM_SCHEMA_VERSION = 1
 _HESSIAN_PARAMETERS_PER_LAYER = 14
+_HESSIAN_PARAMETERS_PER_LAYER_BY_FAMILY = {
+    "dpqc": _HESSIAN_PARAMETERS_PER_LAYER,
+    "dpqc_reset": 12,
+}
+_HESSIAN_MODEL_ID_BY_FAMILY = {
+    "dpqc": "dpqc_dynamic_channel",
+    "dpqc_reset": "dpqc_reset_fixed_rx_pi",
+}
 _HESSIAN_RANK_THRESHOLD = float(cfg.QFIM_EFFECTIVE_RANK_THRESHOLD)
 
 
@@ -300,9 +301,17 @@ def _load_random_hessian_result(
     *,
     expected_h_param: float,
     requested_layers=None,
+    expected_output_family: str = "dpqc",
 ):
     """Load and validate the minimal random-point Hessian archive."""
     import numpy as hnp
+
+    expected_output_family = str(expected_output_family)
+    if expected_output_family not in _HESSIAN_PARAMETERS_PER_LAYER_BY_FAMILY:
+        raise ValueError(
+            "Unsupported Hessian output family: "
+            f"{expected_output_family!r}."
+        )
 
     path = Path(results_dir) / _HESSIAN_RANDOM_RESULT_NAME
     if not path.is_file():
@@ -365,13 +374,46 @@ def _load_random_hessian_result(
             f"{_HESSIAN_RANK_THRESHOLD}."
         )
 
-    parameters_per_layer = int(
-        hnp.asarray(data["parameters_per_layer"]).item()
-    )
-    if parameters_per_layer != _HESSIAN_PARAMETERS_PER_LAYER:
+    parameters_per_layer = int(hnp.asarray(data["parameters_per_layer"]).item())
+    expected_parameters_per_layer = _HESSIAN_PARAMETERS_PER_LAYER_BY_FAMILY[
+        expected_output_family
+    ]
+    if parameters_per_layer != expected_parameters_per_layer:
         raise ValueError(
             "Unexpected Hessian parameter count per layer: "
-            f"{parameters_per_layer}."
+            f"{parameters_per_layer}; expected {expected_parameters_per_layer} "
+            f"for {expected_output_family}."
+        )
+
+    if "output_family" in data:
+        archived_output_family_array = hnp.asarray(data["output_family"])
+        if archived_output_family_array.size != 1:
+            raise ValueError("Hessian archive output_family must be scalar.")
+        archived_output_family = str(archived_output_family_array.item())
+        if archived_output_family != expected_output_family:
+            raise ValueError(
+                "Hessian archive output_family mismatch: "
+                f"{archived_output_family!r} != {expected_output_family!r}."
+            )
+    elif expected_output_family != "dpqc":
+        raise KeyError(
+            "Reset-DPQC Hessian archives must contain output_family metadata."
+        )
+
+    if "model_id" in data:
+        archived_model_id_array = hnp.asarray(data["model_id"])
+        if archived_model_id_array.size != 1:
+            raise ValueError("Hessian archive model_id must be scalar.")
+        archived_model_id = str(archived_model_id_array.item())
+        expected_model_id = _HESSIAN_MODEL_ID_BY_FAMILY[expected_output_family]
+        if archived_model_id != expected_model_id:
+            raise ValueError(
+                "Hessian archive model_id mismatch: "
+                f"{archived_model_id!r} != {expected_model_id!r}."
+            )
+    elif expected_output_family != "dpqc":
+        raise KeyError(
+            "Reset-DPQC Hessian archives must contain model_id metadata."
         )
 
     num_samples = int(hnp.asarray(data["num_hessian_samples"]).item())
@@ -385,18 +427,27 @@ def _load_random_hessian_result(
         or hnp.unique(archived_layers).size != archived_layers.size
     ):
         raise ValueError("Hessian archive layers must be unique positive integers.")
-    available_layers = [int(layer) for layer in archived_layers]
+    available_layers = sorted(int(layer) for layer in archived_layers)
 
     if requested_layers is None:
         layers = available_layers
     else:
         layers = [int(layer) for layer in requested_layers]
+        if (
+            not layers
+            or any(layer <= 0 for layer in layers)
+            or len(set(layers)) != len(layers)
+        ):
+            raise ValueError(
+                "Requested Hessian layers must be unique positive integers."
+            )
         missing_layers = [layer for layer in layers if layer not in available_layers]
         if missing_layers:
             raise KeyError(
                 "Requested Hessian layers are absent from the archive: "
                 + ", ".join(str(layer) for layer in missing_layers)
             )
+        layers.sort()
 
     rank_by_layer = {}
     condition_by_layer = {}
@@ -445,6 +496,7 @@ def _load_random_hessian_result(
 
     return {
         "path": path,
+        "output_family": expected_output_family,
         "layers": layers,
         "num_samples": num_samples,
         "threshold": threshold,
@@ -555,6 +607,9 @@ def _plot_random_hessian_summary(
     ax.set_xticks(x)
     ax.set_xticklabels([str(layer) for layer in valid_layers])
     if lower_bound_zero:
+        from matplotlib.ticker import MaxNLocator
+
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
         ax.set_ylim(bottom=0.0)
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(loc="best", frameon=True, framealpha=0.9)
@@ -573,12 +628,14 @@ def visualize_hessian_results(
     *,
     expected_h_param: float,
     layers=None,
+    expected_output_family: str = "dpqc",
 ):
     """Render only the random-point Hessian rank and condition figures."""
     result = _load_random_hessian_result(
         results_dir,
         expected_h_param=expected_h_param,
         requested_layers=layers,
+        expected_output_family=expected_output_family,
     )
     threshold_tex = _hessian_threshold_tex(result["threshold"])
     figures_dir = Path(figures_dir)
@@ -627,12 +684,14 @@ def run_hessian_workflow(args):
             num_samples=int(args.hessian_num_samples),
             seed_base=int(args.hessian_seed_base),
             hvp_chunk_size=int(args.hessian_hvp_chunk_size),
+            output_family=str(args.output_family),
         )
     return visualize_hessian_results(
         results_dir,
         figures_dir,
         expected_h_param=float(args.h_param),
         layers=args.hessian_layers,
+        expected_output_family=str(args.output_family),
     )
 
 

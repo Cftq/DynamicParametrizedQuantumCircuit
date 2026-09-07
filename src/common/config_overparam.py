@@ -15,7 +15,7 @@ SAMPLE_EVERY = 1000
 # Supported values are:
 #   "adam": Adam (the historical default),
 #   "gradient_descent": deterministic full-batch gradient descent.
-DPQC_VQE_OPTIMIZER = "gradient_descent"
+DPQC_VQE_OPTIMIZER = "adam"
 LEARNING_RATE = 1e-3
 TOLERANCE = 1e-2
 VQE_SEED_BASE = 0

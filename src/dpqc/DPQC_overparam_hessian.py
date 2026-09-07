@@ -20,8 +20,10 @@ the condition number on the threshold-active subspace, rather than the
 ordinary full-space condition number (which is infinite in the presence of
 exact zero modes).
 
-Only the rank and active condition number samples needed by the corresponding
-plots are saved, in one ``hessian_random_points.npz`` archive.
+Both the original 14-parameters-per-layer DPQC channel and the fixed-Rx(pi)
+12-parameters-per-layer reset-DPQC channel are supported.  Only the rank and
+active condition number samples needed by the corresponding plots are saved,
+in one ``hessian_random_points.npz`` archive.
 """
 
 from __future__ import annotations
@@ -67,6 +69,15 @@ NUM_BLOCKS = 4
 PARAMS_PER_BLOCK = 3
 NUM_CHANNEL_PARAMS = 2
 NUM_PARAMS_PER_LAYER = NUM_BLOCKS * PARAMS_PER_BLOCK + NUM_CHANNEL_PARAMS
+RESET_NUM_PARAMS_PER_LAYER = NUM_BLOCKS * PARAMS_PER_BLOCK
+
+OUTPUT_FAMILY_DPQC = "dpqc"
+OUTPUT_FAMILY_RESET = "dpqc_reset"
+SUPPORTED_OUTPUT_FAMILIES = (OUTPUT_FAMILY_DPQC, OUTPUT_FAMILY_RESET)
+MODEL_ID_BY_OUTPUT_FAMILY = {
+    OUTPUT_FAMILY_DPQC: "dpqc_dynamic_channel",
+    OUTPUT_FAMILY_RESET: "dpqc_reset_fixed_rx_pi",
+}
 
 TOP, LEFT, RIGHT, BOTTOM, CENTRE = 0, 1, 2, 3, 4
 LAYER_PAIRS = (
@@ -85,6 +96,24 @@ SCHEMA_VERSION = 1
 
 if not math.isfinite(HESSIAN_RANK_THRESHOLD) or HESSIAN_RANK_THRESHOLD <= 0.0:
     raise ValueError("QFIM_EFFECTIVE_RANK_THRESHOLD must be finite and positive.")
+
+
+def _validated_output_family(output_family: str) -> str:
+    """Return one supported result/model family name."""
+    normalized = str(output_family)
+    if normalized not in SUPPORTED_OUTPUT_FAMILIES:
+        raise ValueError(
+            f"output_family must be one of {SUPPORTED_OUTPUT_FAMILIES}, "
+            f"got {normalized!r}."
+        )
+    return normalized
+
+
+def _parameters_per_layer(output_family: str) -> int:
+    output_family = _validated_output_family(output_family)
+    if output_family == OUTPUT_FAMILY_RESET:
+        return RESET_NUM_PARAMS_PER_LAYER
+    return NUM_PARAMS_PER_LAYER
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +240,26 @@ def _apply_dynamic_delay(
     return jnp.reshape(output, (kept_dimension, kept_dimension))
 
 
+def _apply_reset_channel(rho: jnp.ndarray) -> jnp.ndarray:
+    """Reset the retained centre qubit to zero after tracing its input state.
+
+    This is the exact reduced channel induced by a fresh ``|0>`` wire followed
+    by ``CX(centre -> fresh)`` and ``CRX(fresh -> centre, pi)``.
+    """
+    kept_dimension = 2**NUM_KEPT_QUBITS
+    if rho.shape != (kept_dimension, kept_dimension):
+        raise ValueError(
+            f"Expected rho shape {(kept_dimension, kept_dimension)}, "
+            f"got {rho.shape}."
+        )
+
+    rest_dimension = 2 ** (NUM_KEPT_QUBITS - 1)
+    blocks = jnp.reshape(rho, (rest_dimension, 2, rest_dimension, 2))
+    reduced_rest_state = blocks[:, 0, :, 0] + blocks[:, 1, :, 1]
+    output = jnp.einsum("rs,ab->rasb", reduced_rest_state, ZERO_RHO)
+    return jnp.reshape(output, (kept_dimension, kept_dimension))
+
+
 def _hermitian(matrix: jnp.ndarray) -> jnp.ndarray:
     return 0.5 * (matrix + jnp.conjugate(matrix.T))
 
@@ -227,31 +276,62 @@ def _one_layer(rho: jnp.ndarray, layer_theta: jnp.ndarray) -> jnp.ndarray:
     return _apply_dynamic_delay(rho, layer_theta[-2], layer_theta[-1])
 
 
-def full_state(theta: jnp.ndarray, layer: int) -> jnp.ndarray:
-    """Return the five-retained-qubit DPQC state at one fixed depth."""
+def _one_reset_layer(
+    rho: jnp.ndarray,
+    layer_theta: jnp.ndarray,
+) -> jnp.ndarray:
+    """Apply one 12-parameter unitary layer and the fixed-Rx(pi) reset."""
+    blocks = jnp.reshape(
+        layer_theta,
+        (NUM_BLOCKS, PARAMS_PER_BLOCK),
+    )
+    for (left_wire, right_wire), block in zip(LAYER_PAIRS, blocks):
+        rho = _apply_unitary(rho, _rz(block[0]), (left_wire,))
+        rho = _apply_unitary(rho, _rz(block[1]), (right_wire,))
+        rho = _apply_unitary(rho, _rxx(block[2]), (left_wire, right_wire))
+    return _apply_reset_channel(rho)
+
+
+def full_state(
+    theta: jnp.ndarray,
+    layer: int,
+    output_family: str = OUTPUT_FAMILY_DPQC,
+) -> jnp.ndarray:
+    """Return the five-retained-qubit state for one DPQC model and depth."""
 
     layer = int(layer)
     if layer <= 0:
         raise ValueError("layer must be positive.")
+    output_family = _validated_output_family(output_family)
+    parameters_per_layer = _parameters_per_layer(output_family)
+    layer_function = (
+        _one_reset_layer
+        if output_family == OUTPUT_FAMILY_RESET
+        else _one_layer
+    )
     theta = jnp.asarray(theta, dtype=REAL_DTYPE)
-    expected_parameters = layer * NUM_PARAMS_PER_LAYER
+    expected_parameters = layer * parameters_per_layer
     if theta.shape != (expected_parameters,):
         raise ValueError(
             f"Expected theta shape {(expected_parameters,)}, got {theta.shape}."
         )
-    layer_parameters = jnp.reshape(theta, (layer, NUM_PARAMS_PER_LAYER))
+    layer_parameters = jnp.reshape(theta, (layer, parameters_per_layer))
 
     def scan_layer(rho: jnp.ndarray, parameters: jnp.ndarray):
-        return _one_layer(rho, parameters), None
+        return layer_function(rho, parameters), None
 
     endpoint, _ = jax.lax.scan(scan_layer, INITIAL_STATE, layer_parameters)
     return _hermitian(endpoint)
 
 
-def reduced_state(theta: jnp.ndarray, layer: int) -> jnp.ndarray:
+def reduced_state(
+    theta: jnp.ndarray,
+    layer: int,
+    output_family: str = OUTPUT_FAMILY_DPQC,
+) -> jnp.ndarray:
     """Trace the retained centre qubit and return the observed state."""
 
-    rho5 = full_state(theta, layer)
+    rho5 = full_state(theta, layer, output_family=output_family)
     observed_dimension = 2**NUM_OBSERVED_QUBITS
     tensor = jnp.reshape(rho5, (observed_dimension, 2, observed_dimension, 2))
     return _hermitian(jnp.trace(tensor, axis1=1, axis2=3))
@@ -290,14 +370,23 @@ def hamiltonian4(h_param: float) -> jnp.ndarray:
     return jnp.einsum("a,aij->ij", coefficients, HAMILTONIAN_PAULI_MATRICES)
 
 
-def make_energy_function(layer: int, h_param: float):
-    """Construct the exact scalar objective for one fixed DPQC depth."""
+def make_energy_function(
+    layer: int,
+    h_param: float,
+    output_family: str = OUTPUT_FAMILY_DPQC,
+):
+    """Construct the exact scalar objective for one model and fixed depth."""
 
     layer = int(layer)
+    output_family = _validated_output_family(output_family)
     hamiltonian = hamiltonian4(float(h_param))
 
     def energy_function(theta: jnp.ndarray) -> jnp.ndarray:
-        rho4 = reduced_state(theta, layer)
+        rho4 = reduced_state(
+            theta,
+            layer,
+            output_family=output_family,
+        )
         return jnp.real(jnp.einsum("ij,ji->", hamiltonian, rho4))
 
     return energy_function
@@ -412,13 +501,15 @@ def generate_qfim_random_theta_samples(
     *,
     num_samples: int,
     seed_base: int,
+    output_family: str = OUTPUT_FAMILY_DPQC,
 ) -> jnp.ndarray:
     """Regenerate exactly the random-theta convention used by the QFIM stage."""
 
     layer = _require_positive_int(layer, "layer")
     num_samples = _require_positive_int(num_samples, "num_samples")
     seed_base = _require_nonnegative_int(seed_base, "seed_base")
-    n_params = NUM_PARAMS_PER_LAYER * layer
+    parameters_per_layer = _parameters_per_layer(output_family)
+    n_params = parameters_per_layer * layer
     return jax.random.uniform(
         jax.random.PRNGKey(seed_base + layer),
         shape=(num_samples, n_params),
@@ -520,11 +611,15 @@ def _validated_layers(layers: Sequence[int] | None) -> list[int]:
     return sorted(normalized)
 
 
-def _default_output_dir(h_param: float) -> Path:
+def _default_output_dir(
+    h_param: float,
+    output_family: str = OUTPUT_FAMILY_DPQC,
+) -> Path:
+    output_family = _validated_output_family(output_family)
     return (
         Path.cwd()
         / "figs"
-        / "dpqc"
+        / output_family
         / f"h_{float(h_param)}"
         / "numerical_results"
         / "hessian"
@@ -552,24 +647,29 @@ def run_hessian_analysis(
     num_samples: int = DEFAULT_NUM_SAMPLES,
     seed_base: int = DEFAULT_SEED_BASE,
     hvp_chunk_size: int = DEFAULT_HVP_CHUNK_SIZE,
+    output_family: str = OUTPUT_FAMILY_DPQC,
 ) -> dict[str, Path]:
     """Compute random-point Hessian rank/condition samples and save one NPZ."""
 
     h_param = float(h_param)
     if not math.isfinite(h_param):
         raise ValueError("h_param must be finite.")
+    output_family = _validated_output_family(output_family)
+    parameters_per_layer = _parameters_per_layer(output_family)
     selected_layers = _validated_layers(layers)
     num_samples = _require_positive_int(num_samples, "num_samples")
     seed_base = _require_nonnegative_int(seed_base, "seed_base")
     hvp_chunk_size = _require_positive_int(hvp_chunk_size, "hvp_chunk_size")
 
     if output_dir is None:
-        output_dir = _default_output_dir(h_param)
+        output_dir = _default_output_dir(h_param, output_family)
     output_dir = Path(output_dir).expanduser().resolve()
     output_path = output_dir / "hessian_random_points.npz"
 
     arrays: dict[str, np.ndarray] = {
         "schema_version": np.asarray(SCHEMA_VERSION, dtype=NP_INT_DTYPE),
+        "output_family": np.asarray(output_family),
+        "model_id": np.asarray(MODEL_ID_BY_OUTPUT_FAMILY[output_family]),
         "h_param": np.asarray(h_param, dtype=NP_REAL_DTYPE),
         "layers": np.asarray(selected_layers, dtype=NP_INT_DTYPE),
         "num_hessian_samples": np.asarray(num_samples, dtype=NP_INT_DTYPE),
@@ -590,7 +690,7 @@ def run_hessian_analysis(
             "PRNGKey(hessian_sample_seed_base + layer)"
         ),
         "parameters_per_layer": np.asarray(
-            NUM_PARAMS_PER_LAYER,
+            parameters_per_layer,
             dtype=NP_INT_DTYPE,
         ),
         "hessian_method": np.asarray(HESSIAN_METHOD),
@@ -599,20 +699,26 @@ def run_hessian_analysis(
 
     print(
         "Random-point Hessian analysis: "
-        f"h={h_param}, layers={selected_layers}, samples={num_samples}, "
+        f"model={output_family}, h={h_param}, layers={selected_layers}, "
+        f"samples={num_samples}, "
         f"seed_base={seed_base}, threshold={HESSIAN_RANK_THRESHOLD:.3e}, "
         f"hvp_chunk_size={hvp_chunk_size}",
         flush=True,
     )
 
     for layer_number, layer in enumerate(selected_layers, start=1):
-        n_params = NUM_PARAMS_PER_LAYER * layer
+        n_params = parameters_per_layer * layer
         theta_samples = generate_qfim_random_theta_samples(
             layer,
             num_samples=num_samples,
             seed_base=seed_base,
+            output_family=output_family,
         )
-        energy_function = make_energy_function(layer, h_param)
+        energy_function = make_energy_function(
+            layer,
+            h_param,
+            output_family=output_family,
+        )
         hessian_vector_chunk_function = make_hessian_vector_chunk_function(
             energy_function
         )
@@ -670,12 +776,21 @@ def run_hessian_analysis(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--output-family",
+        choices=SUPPORTED_OUTPUT_FAMILIES,
+        default=OUTPUT_FAMILY_DPQC,
+        help=(
+            "DPQC model/result family to analyze "
+            f"(default: {OUTPUT_FAMILY_DPQC})."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
         help=(
-            "Output directory. By default, use "
-            "./figs/dpqc/h_<h>/numerical_results/hessian."
+            "Output directory. By default, use ./figs/<output-family>/"
+            "h_<h>/numerical_results/hessian."
         ),
     )
     parser.add_argument(
@@ -732,6 +847,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_samples=args.num_samples,
         seed_base=args.seed_base,
         hvp_chunk_size=args.hvp_chunk_size,
+        output_family=args.output_family,
     )
     return 0
 
