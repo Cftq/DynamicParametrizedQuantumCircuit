@@ -9,6 +9,9 @@ are handled independently by unitary_pqc_overparam_draw_circuits.py.
 QFIM traces and spectral Shannon entropies are reconstructed from the saved
 raw eigenspectra and include only eigenvalues at or above the configured
 effective-rank threshold.
+Saved Hessian matrices also yield energy-width-normalized diagonal and total
+squared curvature, curvature effective rank, and negative-curvature fraction.
+These four quantities use all eigenvalues, without an effective-rank cutoff.
 
     python src/unitary_pqc/unitary_pqc_overparam_visualize.py --h-param 0.1
 """
@@ -80,6 +83,10 @@ from matplotlib.patches import Patch
 
 import unitary_pqc_overparam_compute as upqc
 from dpqc_overparam_common import load_npz_result as _load_npz_result_unchecked
+from hessian_curvature import (
+    load_optional_hessian_matrices,
+    save_hessian_curvature_figures,
+)
 
 
 NP_REAL_DTYPE = np.float64
@@ -1229,7 +1236,7 @@ def _validated_nonnegative_integer_scalar(value, *, name: str) -> int:
 
 
 def _load_random_hessian_result(layers) -> None:
-    """Load and validate the minimal random-point Hessian archive."""
+    """Load random-point Hessian summaries and optional raw matrices."""
     path = os.path.join(
         upqc.hessian_results_dir,
         "hessian_random_points.npz",
@@ -1351,9 +1358,17 @@ def _load_random_hessian_result(layers) -> None:
         for L in archive_layers
         for key in (f"L{L}_rank", f"L{L}_condition_number")
     }
+    optional_data_keys = {
+        key
+        for L in archive_layers
+        for key in (f"L{L}_hessian", f"L{L}_theta")
+    }
     actual_layer_keys = {key for key in result if key.startswith("L")}
-    if actual_layer_keys != expected_data_keys:
-        unexpected = sorted(actual_layer_keys - expected_data_keys)
+    if (
+        not expected_data_keys.issubset(actual_layer_keys)
+        or actual_layer_keys - expected_data_keys - optional_data_keys
+    ):
+        unexpected = sorted(actual_layer_keys - expected_data_keys - optional_data_keys)
         missing_data = sorted(expected_data_keys - actual_layer_keys)
         details = []
         if missing_data:
@@ -1404,7 +1419,32 @@ def _load_random_hessian_result(layers) -> None:
 
     upqc.hessian_rank_by_layer = rank_by_layer
     upqc.hessian_condition_by_layer = condition_by_layer
+    upqc.hessian_by_layer = load_optional_hessian_matrices(
+        result, archive_layers, num_samples, params_per_layer,
+    )
     upqc.HESSIAN_RANK_THRESHOLD = NP_REAL_DTYPE(threshold)
+
+
+def _plot_hessian_curvature_results() -> None:
+    """Derive the four unthresholded curvature measures from saved matrices."""
+    if not upqc.hessian_by_layer:
+        upqc.hessian_curvature_result = None
+        compute_name = Path(__file__).name.replace("_visualize", "_compute")
+        warnings.warn(
+            "The saved Hessian archive contains no raw matrices; the four "
+            "curvature figures cannot be computed. Refresh the archive with "
+            f"python src/unitary_pqc/{compute_name} --stage qfim "
+            f"--h-param {upqc.h_param}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+    upqc.hessian_curvature_result = save_hessian_curvature_figures(
+        upqc.hessian_by_layer,
+        h_param=upqc.h_param,
+        figures_dir=upqc.hessian_fig_dir,
+        hamiltonian_matrix=upqc.H_matrix,
+    )
 
 
 def _plot_random_hessian_summary(
@@ -2289,6 +2329,7 @@ def _plot_random_qfim_results() -> None:
             ),
         )
 
+    _plot_hessian_curvature_results()
     threshold_tex = _qfim_threshold_tex(float(upqc.HESSIAN_RANK_THRESHOLD))
     _plot_random_hessian_summary(
         upqc.hessian_rank_by_layer,

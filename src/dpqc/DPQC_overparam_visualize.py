@@ -2,24 +2,38 @@
 # coding: utf-8
 """Visualize saved DPQC overparameterization numerical results.
 
-Run DPQC_overparam_vqe.py followed by DPQC_overparam_qfim.py to create the
-.npz files under figs/dpqc/h_<h_param>/numerical_results. This script loads
-those saved results and generates figures without recomputing VQE/QFIM.
+Run ``DPQC_overparam_compute.py --h-param <h>`` to create the VQE, QFIM, and
+random-point Hessian .npz files under figs/dpqc/h_<h>/numerical_results, then
+run this script with the same ``--h-param`` from the same working directory.
+The split VQE, QFIM, and Hessian commands produce the same archives. Normal
+visualization loads those saved results without recomputing them; older
+VQE/QFIM results can still be plotted when no Hessian archive is present.
+Layer counts, trial counts, and the VQE success tolerance come from the
+saved results, so changing the compute configuration does not relabel them.
 QFIM trace figures sum only eigenvalues at or above the configured QFIM rank
 threshold (1e-12 by default).  The same active spectrum is normalized to
 compute its Shannon entropy in nats directly from the saved eigenvalues.
 Random-point QFIM rank figures count eigenvalues at or above that threshold
 and show the layerwise mean with SEM together with the minimum and maximum.
-The optional Hessian workflow provides the same layerwise summary for the
+The ordinary compute launcher includes random-point Hessians in its default
+``all`` stage. The saved ``hessian_random_points.npz`` for the selected model
+is visualized automatically. Historical ``hessian_final_points_L*.npz`` files
+are not inputs to this random-point analysis. The Hessian workflow provides
+the same layerwise summary for the
 absolute-spectrum rank and active-spectrum condition number for both the
 original DPQC and fixed-Rx(pi) reset-DPQC models.
 Hessian rank and condition numbers are derived from saved signed matrices at
 visualization time. Use ``--hessian-rank-threshold`` to change the active
 absolute-eigenvalue threshold without recomputing Hessians. Legacy summary
 archives can still be plotted at their original threshold.
+When a saved matrix archive is available, normal visualization also writes
+four energy-width-normalized curvature figures: diagonal square sum, total
+square sum, curvature effective rank, and negative-curvature square fraction.
+These four diagnostics use the full signed spectrum without a rank cutoff.
 
 Example::
 
+    python src/dpqc/DPQC_overparam_compute.py --h-param 0.1
     python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1
     python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1 --output-family dpqc_reset
     python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1 --hessian-only
@@ -104,9 +118,10 @@ def _comma_separated_ints(value: str) -> tuple[int, ...]:
 def _parse_cli_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
-            "Visualize saved DPQC results for one Hamiltonian parameter h. "
-            "Run this command from the same project directory used by the "
-            "DPQC compute programs."
+            "Visualize the VQE/QFIM/Hessian results saved by "
+            "DPQC_overparam_compute.py for one Hamiltonian parameter h. "
+            "Run from the same project directory with the same --h-param. "
+            "Saved random-point Hessians are optional and reused when present."
         )
     )
     parser.add_argument(
@@ -167,8 +182,8 @@ def _parse_cli_args(argv=None):
         "--hessian-only",
         action="store_true",
         help=(
-            "Compute/load random-point Hessians and render the rank and "
-            "condition-number figures only. "
+            "Compute/load random-point Hessians and render only the rank, "
+            "condition-number, and normalized curvature figures. "
             "This path does not require TensorCircuit."
         ),
     )
@@ -277,7 +292,7 @@ def _hessian_h_tag(value: float) -> str:
 
 
 def _resolve_hessian_paths(args):
-    """Resolve the random-point Hessian result and two-figure output dirs."""
+    """Resolve the random-point Hessian results and figure output dirs."""
     h_tags = list(
         dict.fromkeys((str(float(args.h_param)), _hessian_h_tag(args.h_param)))
     )
@@ -455,7 +470,7 @@ def visualize_hessian_results(
     expected_output_family: str = "dpqc",
     rank_threshold: float | None = None,
 ):
-    """Render only the random-point Hessian rank and condition figures."""
+    """Render Hessian rank/condition and four normalized curvature figures."""
     result = _load_random_hessian_result(
         results_dir,
         expected_h_param=expected_h_param,
@@ -490,6 +505,23 @@ def visualize_hessian_results(
         lower_bound_zero=False,
         empty_message="Condition number undefined\n(no active Hessian eigenvalues)",
     )
+    if result["hessian_by_layer"]:
+        from hessian_curvature import save_hessian_curvature_figures
+
+        save_hessian_curvature_figures(
+            result["hessian_by_layer"],
+            h_param=expected_h_param,
+            figures_dir=figures_dir,
+            eigenvalues_by_layer=result["eigenvalues_by_layer"],
+        )
+    else:
+        print(
+            "Skipping the four normalized Hessian curvature figures: "
+            f"{result['path']} contains only legacy rank/condition summaries. "
+            "Re-run the Hessian compute stage to save full matrices; "
+            "these four quantities cannot be recovered from summaries.",
+            flush=True,
+        )
     print(
         "Hessian visualization: saved rank and condition-number figures to "
         f"{figures_dir}",
@@ -499,7 +531,7 @@ def visualize_hessian_results(
 
 
 def run_hessian_workflow(args):
-    """Compute/reuse Hessian matrices and derive the two summary plots."""
+    """Compute/reuse Hessian matrices and derive the summary plots."""
     results_dir, figures_dir = _resolve_hessian_paths(args)
     if not args.reuse_hessian_results:
         from DPQC_overparam_hessian import run_hessian_analysis
@@ -1787,6 +1819,7 @@ else:
 
 vqe_optimizer_label = dpqc_vqe_optimizer_display_name(vqe_optimizer_name)
 vqe_optimizer_title_suffix = f" ({vqe_optimizer_label})"
+print(f"Loaded {output_family} numerical results from: {Path(numerical_results_dir).resolve()}")
 print(f"Loaded VQE optimizer: {vqe_optimizer_label}")
 
 # Create output directories only after confirming that the selected h has a
@@ -1829,6 +1862,9 @@ qfim_layer_list = [
 sample_iters = np.asarray(vqe_optimization_results["sample_iters"], dtype=NP_INT_DTYPE)
 steps = int(np.asarray(vqe_optimization_results["steps"]).item())
 num_runs = int(np.asarray(vqe_optimization_results["num_runs"]).item())
+tolerance = NP_REAL_DTYPE(
+    np.asarray(vqe_optimization_results.get("tolerance", tolerance)).item()
+)
 smallest_eigval = NP_REAL_DTYPE(
     np.asarray(vqe_optimization_results["smallest_eigval"]).item()
 )
@@ -2388,7 +2424,7 @@ qfim_abs_entry_sum_reduced_0123_by_layer = _load_layer_arrays_from_npz(
 for L in qfim_layer_list:
     save_qfim_eigs_by_index(
         qfim_eigs_reduced_0123_by_layer[L],
-        title=rf"QFIM eigenvalues at {NUM_QFIM_SAMPLES} random points (L={L})",
+        title=rf"QFIM eigenvalues at {qfim_num_random_samples} random points (L={L})",
         outpath=os.path.join(qfim_eigs_dir_red4, f"L{L}_reduced_0123.pdf"),
     )
 
@@ -2397,7 +2433,7 @@ if INCLUDE_QFIM_EIGS_BY_INDEX_LAYERS:
     save_qfim_eigs_by_index_colored_by_layer(
         qfim_eigs_reduced_0123_by_layer,
         qfim_layer_list,
-        title=rf"QFIM eigenvalues at {NUM_QFIM_SAMPLES} random points",
+        title=rf"QFIM eigenvalues at {qfim_num_random_samples} random points",
         outpath=os.path.join(
             qfim_eigs_dir,
             "qfim_eigs_by_index_layers_reduced_keep_0123.pdf",
@@ -2805,7 +2841,7 @@ if INCLUDE_QFIM_TRACE_FIGURES:
         qfim_thresholded_trace_reduced_0123_by_layer,
         qfim_layer_list,
         title=(
-            rf"QFIM trace over {NUM_QFIM_SAMPLES} random points"
+            rf"QFIM trace over {qfim_num_random_samples} random points"
         ),
         outpath=os.path.join(
             qfim_trace_dir,
@@ -2826,7 +2862,7 @@ plot_qfim_trace_max_mean_sem_by_layer(
     qfim_shannon_entropy_reduced_0123_by_layer,
     qfim_layer_list,
     title=(
-        rf"QFIM spectral Shannon entropy over {NUM_QFIM_SAMPLES} random "
+        rf"QFIM spectral Shannon entropy over {qfim_num_random_samples} random "
         rf"points ({keep_label})"
     ),
     outpath=os.path.join(
@@ -3559,7 +3595,7 @@ plot_metric_mean_sem_by_layer(
     qfim_abs_entry_sum_reduced_0123_by_layer,
     qfim_layer_list,
     ylabel="Mean elementwise absolute sum",
-    title=rf"QFIM elementwise-absolute-sum mean $\pm$ SEM vs Layers ({keep_label}) at {NUM_QFIM_SAMPLES} random points",
+    title=rf"QFIM elementwise-absolute-sum mean $\pm$ SEM vs Layers ({keep_label}) at {qfim_num_random_samples} random points",
     outpath=os.path.join(
         qfim_fig_dir,
         f"qfim_abs_entry_sum_mean_errorbar_{keep_key}.pdf",
@@ -4274,8 +4310,29 @@ render_qfim_participation_effective_rank_figures(keep_key_5, keep_label_5)
 render_qfim_keep01234_core_figures()
 
 
-if __name__ == "__main__" and _CLI_ARGS.with_hessian:
-    run_hessian_workflow(_CLI_ARGS)
+if __name__ == "__main__":
+    if _CLI_ARGS.with_hessian:
+        run_hessian_workflow(_CLI_ARGS)
+    else:
+        # Ordinary visualization only reads saved Hessians. Explicit Hessian
+        # workflow flags retain their existing compute/reuse behavior.
+        _saved_hessian_dir, _saved_hessian_figures_dir = _resolve_hessian_paths(_CLI_ARGS)
+        if (_saved_hessian_dir / "hessian_random_points.npz").is_file():
+            visualize_hessian_results(
+                _saved_hessian_dir,
+                _saved_hessian_figures_dir,
+                expected_h_param=float(_CLI_ARGS.h_param),
+                layers=_CLI_ARGS.hessian_layers,
+                expected_output_family=str(_CLI_ARGS.output_family),
+                rank_threshold=_CLI_ARGS.hessian_rank_threshold,
+            )
+        else:
+            print(
+                "VQE/QFIM visualization complete. No optional saved "
+                f"random-point Hessian results for {output_family} "
+                f"in {_saved_hessian_dir}.",
+                flush=True,
+            )
 
 print(f"Visualized Hamiltonian parameter h: {h_param}")
 print(f"Saved figures to: {save_dir}")

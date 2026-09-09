@@ -14,6 +14,11 @@ Rank and condition numbers are computed from saved Hessian matrices at plot
 time. Use ``--hessian-rank-threshold`` to change their active absolute-spectrum
 threshold without rerunning the Hessian calculation. Legacy summary archives
 remain readable at their saved threshold.
+Saved matrices also produce four energy-width-normalized curvature figures:
+diagonal square sum D, total square sum S, curvature effective rank r_curv,
+and negative-curvature square fraction nu_minus. All four use the full signed
+spectrum without the Hessian rank threshold. Zero matrices give D=S=0 and
+undefined (NaN) r_curv/nu_minus.
 The shared QFIM figures include the participation effective rank
 ``(sum(lambda[lambda > 1e-12]))**2 / sum(lambda[lambda > 1e-12]**2)``
 saved by the compute stage, plus Trace figures computed as
@@ -156,7 +161,8 @@ def _parse_cli_args(
     parser = argparse.ArgumentParser(
         description=(
             "Visualize saved fixed-Rx(pi) reset-DPQC VQE, random-point QFIM, "
-            "and random-point Hessian rank and condition-number results. "
+            "and random-point Hessian rank, condition number, and four "
+            "energy-width-normalized curvature diagnostics. "
             "Hessian results are reused by default."
         )
     )
@@ -188,7 +194,7 @@ def _parse_cli_args(
         action="store_true",
         help=(
             "Compute/load random-point reset-DPQC Hessians and render only "
-            "the rank and condition-number figures."
+            "the rank, condition-number, and normalized curvature figures."
         ),
     )
     hessian_mode.add_argument(

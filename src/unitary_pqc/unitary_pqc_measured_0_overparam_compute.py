@@ -389,6 +389,7 @@ hs_rank_reduced_by_layer = {}
 hs_eigs_reduced_by_layer = {}
 hs_thresh_reduced_by_layer = {}
 hs_eigs_history_by_layer = {}
+hessian_by_layer = {}
 hessian_rank_by_layer = {}
 hessian_condition_by_layer = {}
 
@@ -1573,9 +1574,21 @@ def make_hs_rank_fn_for_layer(
     return hs_rank
 
 
-def make_energy_hessian_eigvals_fn_for_layer(num_layers: int):
+def make_energy_hessian_fn_for_layer(num_layers: int):
+    """Return the signed energy Hessian, symmetrized before storage."""
     energy_fn = make_energy_fn_for_layer(num_layers)
-    hessian_fn = jax.jit(jax.hessian(energy_fn))
+    raw_hessian_fn = jax.hessian(energy_fn)
+
+    @jit
+    def energy_hessian(theta: jnp.ndarray):
+        matrix = jnp.asarray(raw_hessian_fn(theta), dtype=REAL_DTYPE)
+        return (matrix + matrix.T) * 0.5
+
+    return energy_hessian
+
+
+def make_energy_hessian_eigvals_fn_for_layer(num_layers: int):
+    hessian_fn = make_energy_hessian_fn_for_layer(num_layers)
 
     @jit
     def hessian_eigvals(theta: jnp.ndarray):
@@ -1760,11 +1773,19 @@ def hessian_rank_and_condition_from_eigvals(eigenvalues: jnp.ndarray):
 
 
 def make_hessian_analysis_batch_runner(num_layers: int):
-    """Return fixed-cutoff rank and active-spectrum condition number."""
-    eigvals_fn = make_energy_hessian_eigvals_fn_for_layer(int(num_layers))
+    """Return rank, active-spectrum condition number, and the full Hessian.
+
+    Raw signed matrices permit threshold-free curvature analysis at plotting
+    time. Existing summary metrics are computed from the same matrix.
+    """
+    hessian_fn = make_energy_hessian_fn_for_layer(int(num_layers))
 
     def metrics_one(theta: jnp.ndarray):
-        return hessian_rank_and_condition_from_eigvals(eigvals_fn(theta))
+        matrix = hessian_fn(theta)
+        rank_value, condition_number = hessian_rank_and_condition_from_eigvals(
+            hermitian_eigvals_desc(matrix)
+        )
+        return rank_value, condition_number, matrix
 
     return jax.jit(jax.vmap(metrics_one))
 
@@ -3255,7 +3276,7 @@ def run_random_qfim_analysis(
     global qfim_rank_dir, qfim_rank_random_dir
     global hs_rank_reduced_by_layer, hs_eigs_reduced_by_layer, hs_thresh_reduced_by_layer, hs_eigs_dir, hs_eigs_reduced_0123_dir
     global hs_rank_dir, hs_rank_random_dir
-    global hessian_rank_by_layer, hessian_condition_by_layer
+    global hessian_by_layer, hessian_rank_by_layer, hessian_condition_by_layer
     global qfim_random_result_paths_by_keep
     global qfim_dense_until_layer, qfim_max_layer, qfim_sparse_step
     global qfim_layer_list
@@ -3371,6 +3392,7 @@ def run_random_qfim_analysis(
     hs_rank_pure_by_layer = {}
     hs_eigs_pure_by_layer = {}
     hs_thresh_pure_by_layer = {}
+    hessian_by_layer = {}              # L -> (NUM_QFIM_SAMPLES, P_L, P_L)
     hessian_rank_by_layer = {}             # L -> (NUM_QFIM_SAMPLES,)
     hessian_condition_by_layer = {}        # L -> (NUM_QFIM_SAMPLES,)
     
@@ -3595,11 +3617,10 @@ def run_random_qfim_analysis(
         # --------------------------
         # Energy Hessian
         #   H_ij = partial_i partial_j E(theta)
-        #   Signed eigenvalues are reduced immediately to the two requested
-        #   random-point metrics using the fixed inclusive QFIM cutoff.
+        #   Retain full signed matrices as well as the fixed-cutoff metrics.
         # --------------------------
         hessian_batch_runner = make_hessian_analysis_batch_runner(L)
-        hessian_ranks, hessian_condition_numbers = _evaluate_analysis_in_batches(
+        hessian_ranks, hessian_condition_numbers, hessian_matrices = _evaluate_analysis_in_batches(
             qfim_random_thetas_by_layer[L],
             hessian_batch_runner,
             batch_size=effective_analysis_batch_size,
@@ -3607,6 +3628,9 @@ def run_random_qfim_analysis(
                 f"Hessian batches (L={L}, "
                 f"batch={effective_analysis_batch_size})"
             ),
+        )
+        hessian_by_layer[L] = np.asarray(
+            hessian_matrices, dtype=NP_REAL_DTYPE
         )
         hessian_rank_by_layer[L] = np.asarray(
             hessian_ranks,
@@ -3770,6 +3794,17 @@ def run_random_qfim_analysis(
             effective_analysis_batch_size,
             dtype=NP_INT_DTYPE,
         ),
+        hessian_matrix_definition=np.asarray("d2 E(theta) / dtheta_i dtheta_j"),
+        **{
+            f"L{int(L)}_hessian": arr
+            for L, arr in hessian_by_layer.items()
+        },
+        **{
+            f"L{int(L)}_theta": np.asarray(
+                qfim_random_thetas_by_layer[L], dtype=NP_REAL_DTYPE
+            )
+            for L in hessian_by_layer
+        },
         **{
             f"L{int(L)}_rank": arr
             for L, arr in hessian_rank_by_layer.items()

@@ -11,6 +11,9 @@ are handled independently by
 QFIM eigenvalue, Trace, and spectral-Shannon-entropy figures use the canonical
 unmasked spectra. Trace sums finite eigenvalues satisfying the inclusive fixed
 rank cutoff; entropy normalizes that active spectrum and uses the natural log.
+Saved Hessian matrices also yield energy-width-normalized diagonal and total
+squared curvature, curvature effective rank, and negative-curvature fraction.
+These four quantities use all eigenvalues, without an effective-rank cutoff.
 
     python src/unitary_pqc/unitary_pqc_measured_1_overparam_visualize.py --h-param 0.1
 """
@@ -102,6 +105,10 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from convergence_time import generate_convergence_time_outputs
+from hessian_curvature import (
+    load_optional_hessian_matrices,
+    save_hessian_curvature_figures,
+)
 
 if __package__:
     from . import unitary_pqc_measured_1_overparam_compute as upqc
@@ -1906,7 +1913,7 @@ def _load_random_hessian_results(
     expected_layers,
     expected_num_samples: int,
 ) -> None:
-    """Load the minimal fixed-threshold random-point Hessian archive."""
+    """Load random-point Hessian summaries and optional raw matrices."""
     result_path = os.path.join(
         upqc.hessian_results_dir,
         "hessian_random_points.npz",
@@ -2073,7 +2080,32 @@ def _load_random_hessian_results(
 
     upqc.hessian_rank_by_layer = rank_by_layer
     upqc.hessian_condition_by_layer = condition_by_layer
+    upqc.hessian_by_layer = load_optional_hessian_matrices(
+        result, layers, num_samples, int(upqc.num_params_per_layer),
+    )
     upqc.HESSIAN_RANK_THRESHOLD = threshold
+
+
+def _plot_hessian_curvature_results() -> None:
+    """Derive the four unthresholded curvature measures from saved matrices."""
+    if not upqc.hessian_by_layer:
+        upqc.hessian_curvature_result = None
+        compute_name = Path(__file__).name.replace("_visualize", "_compute")
+        warnings.warn(
+            "The saved Hessian archive contains no raw matrices; the four "
+            "curvature figures cannot be computed. Refresh the archive with "
+            f"python src/unitary_pqc/{compute_name} --stage qfim "
+            f"--h-param {upqc.h_param}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+    upqc.hessian_curvature_result = save_hessian_curvature_figures(
+        upqc.hessian_by_layer,
+        h_param=upqc.h_param,
+        figures_dir=upqc.hessian_fig_dir,
+        hamiltonian_matrix=upqc.H_matrix,
+    )
 
 
 def _finite_max_mean_sem_min(values) -> tuple[float, float, float, float]:
@@ -2165,7 +2197,8 @@ def _plot_random_hessian_summary(
 
 
 def _plot_random_hessian_results() -> None:
-    """Render exactly the two requested random-point Hessian figures."""
+    """Render random-point rank, condition number, and curvature figures."""
+    _plot_hessian_curvature_results()
     threshold_tex = _qfim_threshold_tex(upqc.HESSIAN_RANK_THRESHOLD)
     _plot_random_hessian_summary(
         upqc.hessian_rank_by_layer,

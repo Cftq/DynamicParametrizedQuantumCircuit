@@ -1,10 +1,24 @@
 #!/usr/bin/env python
 # coding: utf-8
-"""Compatibility launcher for the split DPQC VQE and QFIM programs.
+"""Run the DPQC VQE, QFIM, and random-point energy Hessian programs.
 
-New workflows should invoke DPQC_overparam_vqe.py and
-DPQC_overparam_qfim.py directly. This launcher keeps the former --stage
-interface available without retaining a second copy of either calculation.
+The default ``all`` stage runs VQE, QFIM, and Hessian analysis in separate
+processes, stopping if a stage fails. The Hessian stage uses the DPQC QFIM
+layer schedule, ``NUM_QFIM_SAMPLES``, and ``QFIM_SAMPLE_SEED_BASE`` from
+``config_overparam.py``. It saves full signed energy Hessians and their random
+parameter points below the current working directory at
+``figs/dpqc/h_<h>/numerical_results/hessian/hessian_random_points.npz``.
+For depth L, ``L{L}_hessian`` has shape ``(samples, 14*L, 14*L)`` and
+``L{L}_theta`` has shape ``(samples, 14*L)``.
+
+``DPQC_overparam_visualize.py --h-param <h>`` reads these saved results.
+Use ``--stage hessian`` to compute only Hessians when VQE/QFIM are already
+complete. Each stage can also be run through its own split program.
+
+Examples::
+
+    python src/dpqc/DPQC_overparam_compute.py --h-param 0.1
+    python src/dpqc/DPQC_overparam_compute.py --h-param 0.1 --stage hessian
 """
 
 import argparse
@@ -46,8 +60,8 @@ def _parse_cli_args(argv=None):
     default_h_param, default_vqe_batch_size = _default_config_values()
     parser = argparse.ArgumentParser(
         description=(
-            "Compatibility launcher. Prefer DPQC_overparam_vqe.py and "
-            "DPQC_overparam_qfim.py as separate commands."
+            "Run DPQC VQE, QFIM, and random-point Hessian analysis in "
+            "separate processes and save their numerical results."
         )
     )
     parser.add_argument(
@@ -58,11 +72,11 @@ def _parse_cli_args(argv=None):
     )
     parser.add_argument(
         "--stage",
-        choices=("all", "vqe", "qfim"),
+        choices=("all", "vqe", "qfim", "hessian"),
         default="all",
         help=(
-            "all: run the VQE program and then the QFIM program; "
-            "vqe/qfim: run only the selected program"
+            "all: run VQE, then QFIM, then random-point Hessian analysis; "
+            "vqe/qfim/hessian: run only the selected program"
         ),
     )
     parser.add_argument(
@@ -97,7 +111,17 @@ def main(argv=None) -> int:
             return return_code
 
     if args.stage in ("all", "qfim"):
-        return _run_script("DPQC_overparam_qfim.py", *h_arguments)
+        return_code = _run_script("DPQC_overparam_qfim.py", *h_arguments)
+        if return_code:
+            return return_code
+
+    if args.stage in ("all", "hessian"):
+        return _run_script(
+            "DPQC_overparam_hessian.py",
+            *h_arguments,
+            "--output-family",
+            "dpqc",
+        )
 
     return 0
 
