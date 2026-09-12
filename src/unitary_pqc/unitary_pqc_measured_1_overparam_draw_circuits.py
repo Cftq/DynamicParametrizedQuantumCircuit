@@ -2,7 +2,8 @@
 # coding: utf-8
 """Draw optimized measurement-outcome-1 Unitary-PQC circuits.
 
-Run ``unitary_pqc_measured_1_overparam_compute.py`` first. This script reads
+Run ``unitary_pqc_measured_1_overparam_vqe.py`` once if training is needed.
+This script reads
 the saved
 ``vqe_optimization_results.npz`` archive and writes circuit figures without
 rerunning VQE, QFIM, or any other numerical calculation.

@@ -2,18 +2,32 @@
 # coding: utf-8
 """Visualize saved fixed-Rx(pi) reset-DPQC results.
 
-Run ``DPQC_overparam_reset_compute.py`` first from the project directory that
-should contain the ``figs`` output tree.  This entry point then renders the
+Run ``DPQC_overparam_reset_vqe.py`` once for training results and use
+``DPQC_overparam_reset_compute.py`` for the independent QFIM/Hessian analyses,
+from the project directory that should contain the ``figs`` output tree.
+Existing training results can be reused; visualization never runs VQE.
+This entry point then renders the
 saved VQE, random-point QFIM, and random-point Hessian results below
-``figs/dpqc_reset/h_<h_param>`` without recomputing them.  Hessian rank and
-active-spectrum condition-number figures show the layerwise minimum, maximum,
-and mean with SEM, and are saved under ``hessian_figures``.  Explicit
+``figs/dpqc_reset/h_<h_param>`` without recomputing them. Hessian figures are
+saved under ``hessian_figures`` (override with ``--hessian-figures-dir``).
+QFIM-style Hessian statistics include rank, condition number, participation
+effective rank, absolute spectral sum, signed trace, Shannon entropy, matrix
+absolute-entry sum, threshold-count overlays, and per-layer spectra. Scalar
+figures show the layerwise minimum, maximum, and mean with SEM. Explicit
 ``--hessian-only`` or ``--with-hessian`` requests compute fresh Hessian samples
 unless ``--reuse-hessian-results`` is also supplied.
 Rank and condition numbers are computed from saved Hessian matrices at plot
 time. Use ``--hessian-rank-threshold`` to change their active absolute-spectrum
 threshold without rerunning the Hessian calculation. Legacy summary archives
 remain readable at their saved threshold.
+Participation rank uses ``abs(lambda) > threshold``; rank, absolute spectral
+sum, and entropy use ``abs(lambda) >= threshold``. Entropy normalizes those
+absolute eigenvalues (nats). A zero active spectrum gives zero participation
+rank and entropy. The signed trace uses all eigenvalues without a cutoff.
+Signed spectra use a symmetric log scale; absolute spectra use a log scale.
+These energy-Hessian figures have no QFIM retained-subsystem duplication.
+The sampled statistics and their definitions are also saved in
+``hessian_statistics_random_points.npz`` under the figure directory.
 Saved matrices also produce four energy-width-normalized curvature figures:
 diagonal square sum D, total square sum S, curvature effective rank r_curv,
 and negative-curvature square fraction nu_minus. All four use the full signed
@@ -46,6 +60,7 @@ Examples::
     python src/dpqc/DPQC_overparam_reset_visualize.py
     python src/dpqc/DPQC_overparam_reset_visualize.py --h-param 0.1
     python src/dpqc/DPQC_overparam_reset_visualize.py --h-param 0.1 --hessian-only
+    python src/dpqc/DPQC_overparam_reset_visualize.py --h-param 0.1 --hessian-only --reuse-hessian-results
 
 In a Jupyter notebook::
 
@@ -161,8 +176,8 @@ def _parse_cli_args(
     parser = argparse.ArgumentParser(
         description=(
             "Visualize saved fixed-Rx(pi) reset-DPQC VQE, random-point QFIM, "
-            "and random-point Hessian rank, condition number, and four "
-            "energy-width-normalized curvature diagnostics. "
+            "and QFIM-style random-point Hessian statistics, spectra, and "
+            "four energy-width-normalized curvature diagnostics. "
             "Hessian results are reused by default."
         )
     )
@@ -194,7 +209,7 @@ def _parse_cli_args(
         action="store_true",
         help=(
             "Compute/load random-point reset-DPQC Hessians and render only "
-            "the rank, condition-number, and normalized curvature figures."
+            "their statistics, spectra, and normalized curvature figures."
         ),
     )
     hessian_mode.add_argument(
@@ -241,8 +256,9 @@ def _parse_cli_args(
         type=_positive_float,
         default=None,
         help=(
-            "Positive absolute-eigenvalue threshold for Hessian rank and "
-            "condition number, applied to saved matrices at plot time "
+            "Positive absolute-eigenvalue threshold for Hessian rank, condition "
+            "number, participation rank, absolute trace, and entropy, "
+            "applied to saved matrices at plot time "
             "(default: QFIM_EFFECTIVE_RANK_THRESHOLD from config_overparam.py)."
         ),
     )

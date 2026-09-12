@@ -1,9 +1,12 @@
 #!/usr/bin/env python
 # coding: utf-8
-"""Run the DPQC VQE, QFIM, and random-point energy Hessian programs.
+"""Launch independent DPQC training and analysis programs.
 
-The default ``all`` stage runs VQE, QFIM, and Hessian analysis in separate
-processes, stopping if a stage fails. The Hessian stage uses the DPQC QFIM
+The default ``analysis`` stage runs QFIM and Hessian analysis without VQE
+training, stopping if a stage fails. QFIM reuses saved VQE parameter histories
+for its optimization-path diagnostics; it never reruns their optimization.
+Training is run only by DPQC_overparam_vqe.py or an explicit --stage vqe/all.
+The Hessian stage needs no VQE archive and uses the DPQC QFIM
 layer schedule, ``NUM_QFIM_SAMPLES``, and ``QFIM_SAMPLE_SEED_BASE`` from
 ``config_overparam.py``. It saves full signed energy Hessians and their random
 parameter points below the current working directory at
@@ -12,12 +15,15 @@ For depth L, ``L{L}_hessian`` has shape ``(samples, 14*L, 14*L)`` and
 ``L{L}_theta`` has shape ``(samples, 14*L)``.
 
 ``DPQC_overparam_visualize.py --h-param <h>`` reads these saved results.
-Use ``--stage hessian`` to compute only Hessians when VQE/QFIM are already
-complete. Each stage can also be run through its own split program.
+Each stage can also be run through its own split program. Saved-data plotting
+does not rerun training. Unlike the former default, omitting --stage now
+selects analysis, not all.
 
 Examples::
 
     python src/dpqc/DPQC_overparam_compute.py --h-param 0.1
+    python src/dpqc/DPQC_overparam_vqe.py --h-param 0.1
+    python src/dpqc/DPQC_overparam_qfim.py --h-param 0.1
     python src/dpqc/DPQC_overparam_compute.py --h-param 0.1 --stage hessian
 """
 
@@ -60,8 +66,9 @@ def _parse_cli_args(argv=None):
     default_h_param, default_vqe_batch_size = _default_config_values()
     parser = argparse.ArgumentParser(
         description=(
-            "Run DPQC VQE, QFIM, and random-point Hessian analysis in "
-            "separate processes and save their numerical results."
+            "Run DPQC QFIM and random-point Hessian analysis in separate "
+            "processes using saved training results. VQE training is run "
+            "only when explicitly selected."
         )
     )
     parser.add_argument(
@@ -72,9 +79,10 @@ def _parse_cli_args(argv=None):
     )
     parser.add_argument(
         "--stage",
-        choices=("all", "vqe", "qfim", "hessian"),
-        default="all",
+        choices=("analysis", "all", "vqe", "qfim", "hessian"),
+        default="analysis",
         help=(
+            "analysis (default): run QFIM, then Hessian without training; "
             "all: run VQE, then QFIM, then random-point Hessian analysis; "
             "vqe/qfim/hessian: run only the selected program"
         ),
@@ -83,7 +91,10 @@ def _parse_cli_args(argv=None):
         "--vqe-batch-size",
         type=_positive_int,
         default=default_vqe_batch_size,
-        help="Number of independent VQE trials evaluated by each vmap call.",
+        help=(
+            "Number of independent VQE trials evaluated by each vmap call; "
+            "used only with --stage vqe/all."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -110,12 +121,12 @@ def main(argv=None) -> int:
         if return_code:
             return return_code
 
-    if args.stage in ("all", "qfim"):
+    if args.stage in ("analysis", "all", "qfim"):
         return_code = _run_script("DPQC_overparam_qfim.py", *h_arguments)
         if return_code:
             return return_code
 
-    if args.stage in ("all", "hessian"):
+    if args.stage in ("analysis", "all", "hessian"):
         return _run_script(
             "DPQC_overparam_hessian.py",
             *h_arguments,

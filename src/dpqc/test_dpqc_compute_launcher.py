@@ -19,6 +19,7 @@ _SPEC.loader.exec_module(_LAUNCHER)
 
 class DPQCComputeLauncherTests(unittest.TestCase):
     STAGES = ("vqe", "qfim", "hessian")
+    ANALYSIS_STAGES = ("qfim", "hessian")
 
     def setUp(self):
         config_patch = patch.object(
@@ -49,7 +50,7 @@ class DPQCComputeLauncherTests(unittest.TestCase):
                 expected["--output-family"] = "dpqc"
             self.assertEqual(parsed_options, expected)
 
-    def test_default_all_runs_vqe_qfim_and_dpqc_hessian_in_order(self):
+    def test_default_analysis_runs_qfim_and_hessian_without_training(self):
         with patch.object(
             _LAUNCHER.subprocess,
             "run",
@@ -57,9 +58,9 @@ class DPQCComputeLauncherTests(unittest.TestCase):
         ) as run:
             result = _LAUNCHER.main(["--h-param", "0.1", "--vqe-batch-size", "3"])
         self.assertEqual(result, 0)
-        self.assert_stage_calls(run, self.STAGES)
+        self.assert_stage_calls(run, self.ANALYSIS_STAGES)
 
-    def test_no_arguments_forward_configuration_defaults_to_all_stages(self):
+    def test_no_arguments_forward_configuration_defaults_without_training(self):
         with patch.object(
             _LAUNCHER.subprocess,
             "run",
@@ -67,10 +68,10 @@ class DPQCComputeLauncherTests(unittest.TestCase):
         ) as run:
             result = _LAUNCHER.main([])
         self.assertEqual(result, 0)
-        self.assert_stage_calls(run, self.STAGES, h_param="0.25", batch_size="17")
+        self.assert_stage_calls(run, self.ANALYSIS_STAGES, h_param="0.25")
 
     def test_explicit_stage_selection_runs_only_requested_stages(self):
-        for selection in ("all", *self.STAGES):
+        for selection in ("analysis", "all", *self.STAGES):
             with self.subTest(stage=selection), patch.object(
                 _LAUNCHER.subprocess,
                 "run",
@@ -79,7 +80,12 @@ class DPQCComputeLauncherTests(unittest.TestCase):
                 result = _LAUNCHER.main(
                     ["--stage", selection, "--h-param", "0.1", "--vqe-batch-size", "3"]
                 )
-                expected_stages = self.STAGES if selection == "all" else (selection,)
+                if selection == "all":
+                    expected_stages = self.STAGES
+                elif selection == "analysis":
+                    expected_stages = self.ANALYSIS_STAGES
+                else:
+                    expected_stages = (selection,)
                 self.assertEqual(result, 0)
                 self.assert_stage_calls(run, expected_stages)
 
@@ -93,10 +99,25 @@ class DPQCComputeLauncherTests(unittest.TestCase):
                 _LAUNCHER.subprocess, "run", side_effect=completions
             ) as run:
                 result = _LAUNCHER.main(
-                    ["--h-param", "0.1", "--vqe-batch-size", "3"]
+                    ["--stage", "all", "--h-param", "0.1", "--vqe-batch-size", "3"]
                 )
                 self.assertEqual(result, exit_code)
                 self.assert_stage_calls(run, self.STAGES[: failed_index + 1])
+
+    def test_analysis_failure_stops_pipeline_without_attempting_training(self):
+        for failed_index, failed_stage in enumerate(self.ANALYSIS_STAGES):
+            exit_code = 11 + failed_index
+            completions = [
+                subprocess.CompletedProcess([], 0) for _ in range(failed_index)
+            ] + [subprocess.CompletedProcess([], exit_code)]
+            with self.subTest(stage=failed_stage), patch.object(
+                _LAUNCHER.subprocess, "run", side_effect=completions
+            ) as run:
+                result = _LAUNCHER.main(["--h-param", "0.1"])
+                self.assertEqual(result, exit_code)
+                self.assert_stage_calls(
+                    run, self.ANALYSIS_STAGES[: failed_index + 1]
+                )
 
     def test_selected_stage_failure_propagates_exit_code(self):
         for stage in self.STAGES:

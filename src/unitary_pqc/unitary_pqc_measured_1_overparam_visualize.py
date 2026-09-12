@@ -2,7 +2,9 @@
 # coding: utf-8
 """Visualize saved measurement-outcome-1 Unitary-PQC numerical results.
 
-Run ``unitary_pqc_measured_1_overparam_compute.py`` first. This script loads
+Train once with ``unitary_pqc_measured_1_overparam_vqe.py`` when needed, then
+calculate QFIM/HS and Hessian with their separate programs (or the default
+``unitary_pqc_measured_1_overparam_compute.py`` analysis stage). This script loads
 saved .npz results under
 ``figs/unitary_pqc_measured_1/h_<h_param>/numerical_results`` and generates
 numerical figures without recomputing VQE or QFIM quantities. Circuit drawings
@@ -14,8 +16,18 @@ rank cutoff; entropy normalizes that active spectrum and uses the natural log.
 Saved Hessian matrices also yield energy-width-normalized diagonal and total
 squared curvature, curvature effective rank, and negative-curvature fraction.
 These four quantities use all eigenvalues, without an effective-rank cutoff.
+Hessian output also includes the same statistics as reset-DPQC: participation
+rank, absolute spectral sum, signed trace, spectral Shannon entropy, matrix
+absolute-entry sum, threshold-count overlays, and signed/absolute per-layer
+spectra. Scalar summaries show mean +/- SEM, minimum, and maximum. Magnitude
+spectra define participation rank (strict cutoff) and entropy (inclusive
+cutoff); the signed trace uses all eigenvalues. Sampled values and definitions
+are saved in ``figures/hessian/hessian_statistics_random_points.npz``.
+Use ``--hessian-only`` to render a saved Hessian archive independently of
+VQE/QFIM results, without importing JAX, Optax, or the compute program.
 
     python src/unitary_pqc/unitary_pqc_measured_1_overparam_visualize.py --h-param 0.1
+    python src/unitary_pqc/unitary_pqc_measured_1_overparam_visualize.py --h-param 0.1 --hessian-only
 """
 from __future__ import annotations
 
@@ -86,7 +98,105 @@ def _parse_cli_args(argv=None):
             "(default: 1.0)."
         ),
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--hessian-only", action="store_true",
+        help="Render only saved random-point Hessian statistics; no recomputation.",
+    )
+    parser.add_argument(
+        "--hessian-results-dir", type=Path, default=None,
+        help="Optional numerical-results directory for --hessian-only.",
+    )
+    parser.add_argument(
+        "--hessian-figures-dir", type=Path, default=None,
+        help="Optional figure output directory for --hessian-only.",
+    )
+    args = parser.parse_args(argv)
+    if not args.hessian_only and (
+        args.hessian_results_dir is not None or args.hessian_figures_dir is not None
+    ):
+        parser.error("Hessian directory overrides require --hessian-only.")
+    return args
+
+
+def _render_unitary_hessian_result(
+    result, *, h_param, figures_dir, hamiltonian_matrix=None,
+):
+    """Render a validated unitary archive with the reset-DPQC definitions."""
+    from hessian_plot import (
+        _threshold_tex, plot_hessian_summary, save_hessian_statistic_figures,
+    )
+    from hessian_curvature import save_hessian_curvature_figures
+
+    figures_dir = Path(figures_dir)
+    threshold_tex = _threshold_tex(result["threshold"])
+    figure_paths = {}
+    for key, label, integer_ticks in (
+        ("rank", "Hessian rank", True),
+        ("condition", "Hessian condition number", False),
+    ):
+        filename = "rank" if key == "rank" else "condition_number"
+        label_separator = " " if integer_ticks else "\n"
+        figure_paths[key] = plot_hessian_summary(
+            result[f"{key}_by_layer"], result["layers"],
+            ylabel=rf"{label}{label_separator}($|\lambda_i| \geq {threshold_tex}$)",
+            title=f"{label} at {result['num_samples']} random parameter points",
+            outpath=figures_dir / f"hessian_{filename}_random_points.pdf",
+            lower_bound_zero=integer_ticks, integer_ticks=integer_ticks,
+            empty_message=(
+                None if integer_ticks else
+                "Condition number undefined\n(no active Hessian eigenvalues)"
+            ),
+        )
+    statistics, curvature = None, None
+    if result["hessian_by_layer"]:
+        statistics = save_hessian_statistic_figures(
+            result, figures_dir=figures_dir,
+            count_thresholds=cfg.QFIM_PATH_EIGCOUNT_THRESHOLDS, h_param=h_param,
+        )
+        curvature = save_hessian_curvature_figures(
+            result["hessian_by_layer"], h_param=h_param, figures_dir=figures_dir,
+            hamiltonian_matrix=hamiltonian_matrix,
+            eigenvalues_by_layer=result["eigenvalues_by_layer"],
+        )
+        figure_paths.update(statistics["figure_paths"])
+        figure_paths.update(curvature["figure_paths"])
+    else:
+        warnings.warn(
+            "The saved Hessian archive contains only rank/condition summaries; "
+            "spectrum-dependent statistics and curvature figures require raw "
+            "matrices. Refresh the archive with "
+            "unitary_pqc_measured_1_overparam_hessian.py "
+            f"--h-param {h_param}.",
+            RuntimeWarning, stacklevel=2,
+        )
+    return {"figure_paths": figure_paths, "statistics": statistics, "curvature": curvature}
+
+
+def run_unitary_hessian_visualization(
+    *, h_param=None, results_dir=None, figures_dir=None,
+):
+    """Render saved outcome-1 Hessians independently of other result archives."""
+    from unitary_hessian_results import load_measured_unitary_hessian_result
+
+    selected_h = _finite_float(str(cfg.H_PARAM if h_param is None else h_param))
+    save_dir = _SRC_DIR.parent / "figs" / "unitary_pqc_measured_1" / f"h_{selected_h}"
+    results_dir = (
+        save_dir / "numerical_results" / "hessian" if results_dir is None
+        else Path(results_dir).expanduser().resolve()
+    )
+    figures_dir = (
+        save_dir / "figures" / "hessian" if figures_dir is None
+        else Path(figures_dir).expanduser().resolve()
+    )
+    result = load_measured_unitary_hessian_result(
+        results_dir, expected_h_param=selected_h,
+        rank_threshold=float(cfg.QFIM_EFFECTIVE_RANK_THRESHOLD),
+    )
+    output = _render_unitary_hessian_result(
+        result, h_param=selected_h, figures_dir=figures_dir,
+    )
+    output.update(h_param=selected_h, save_dir=save_dir, hessian_fig_dir=figures_dir)
+    return output
 
 
 if __name__ == "__main__":
@@ -101,19 +211,25 @@ _SELECTED_H_PARAM = float(_CLI_ARGS.h_param)
 if not math.isfinite(_SELECTED_H_PARAM):
     raise ValueError("h_param must be a finite number.")
 
+# Exit before importing the compute module or any quantum/optimizer runtime.
+if __name__ == "__main__" and _CLI_ARGS.hessian_only:
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    _hessian_output = run_unitary_hessian_visualization(
+        h_param=_CLI_ARGS.h_param, results_dir=_CLI_ARGS.hessian_results_dir,
+        figures_dir=_CLI_ARGS.hessian_figures_dir,
+    )
+    print(f"Saved Hessian figures to: {_hessian_output['hessian_fig_dir']}")
+    raise SystemExit(0)
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from convergence_time import generate_convergence_time_outputs
-from hessian_curvature import (
-    load_optional_hessian_matrices,
-    save_hessian_curvature_figures,
-)
 
 if __package__:
-    from . import unitary_pqc_measured_1_overparam_compute as upqc
+    from . import unitary_pqc_measured_1_overparam_common as upqc
 else:
-    import unitary_pqc_measured_1_overparam_compute as upqc
+    import unitary_pqc_measured_1_overparam_common as upqc
 
 
 NP_REAL_DTYPE = np.float64
@@ -145,12 +261,7 @@ QFIM_KEEP_LABELS = {
     "keep0123": "reduced keep=(0,1,2,3)",
     "keep01234": "pure full state keep=(0,1,2,3,4)",
 }
-HESSIAN_RANDOM_SCHEMA_VERSION = int(upqc.HESSIAN_RANDOM_SCHEMA_VERSION)
 HESSIAN_RANK_THRESHOLD = NP_REAL_DTYPE(upqc.QFIM_EFFECTIVE_RANK_THRESHOLD)
-HESSIAN_RANK_DEFINITION = str(upqc.HESSIAN_RANK_DEFINITION)
-HESSIAN_CONDITION_NUMBER_DEFINITION = str(
-    upqc.HESSIAN_CONDITION_NUMBER_DEFINITION
-)
 
 
 def _load_npz_result_unchecked(inpath: str) -> dict:
@@ -264,14 +375,15 @@ def _load_required_result(
         upqc.h_param if expected_h_param is None else expected_h_param
     )
     if not result_path.is_file():
-        compute_script = (
-            _MODULE_DIR / "unitary_pqc_measured_1_overparam_compute.py"
-        )
+        stage = {
+            "energy": "vqe", "qfim": "qfim", "hs": "qfim", "hessian": "hessian",
+        }.get(result_path.parent.name, "compute")
+        compute_script = _MODULE_DIR / f"unitary_pqc_measured_1_overparam_{stage}.py"
         raise FileNotFoundError(
             "Required Unitary-PQC numerical result is missing:\n"
             f"  {result_path}\n"
-            "Run the numerical pipeline to successful completion before "
-            "visualizing:\n"
+            "Generate this saved result with its dedicated program before "
+            "visualizing (existing training results can be reused):\n"
             f'  "{sys.executable}" "{compute_script}" '
             f"--h-param {selected_h_param}"
         )
@@ -1913,323 +2025,32 @@ def _load_random_hessian_results(
     expected_layers,
     expected_num_samples: int,
 ) -> None:
-    """Load random-point Hessian summaries and optional raw matrices."""
-    result_path = os.path.join(
+    """Validate the outcome-1 archive and reuse its signed eigendecomposition."""
+    from unitary_hessian_results import load_measured_unitary_hessian_result
+
+    result = load_measured_unitary_hessian_result(
         upqc.hessian_results_dir,
-        "hessian_random_points.npz",
+        expected_h_param=upqc.h_param,
+        expected_layers=expected_layers,
+        expected_num_samples=expected_num_samples,
+        expected_seed_base=upqc.QFIM_SAMPLE_SEED_BASE,
+        rank_threshold=float(HESSIAN_RANK_THRESHOLD),
     )
-    result = _load_required_result(
-        result_path,
-        require_h_param=True,
-        require_variant=True,
-    )
-    required_metadata = {
-        "schema_version",
-        "analysis_kind",
-        "ansatz",
-        "measurement_outcome",
-        "h_param",
-        "layers",
-        "num_hessian_samples",
-        "hessian_sample_seed_base",
-        "hessian_rank_threshold",
-        "hessian_rank_definition",
-        "hessian_condition_number_definition",
-        "num_params_per_layer",
-        "analysis_batch_size",
-    }
-    missing = sorted(required_metadata.difference(result))
-    if missing:
-        raise KeyError(
-            f"Hessian archive {Path(result_path).resolve()} is missing: "
-            + ", ".join(missing)
-        )
-
-    schema_version = int(
-        _required_archive_scalar(result, "schema_version", result_path)
-    )
-    if schema_version != HESSIAN_RANDOM_SCHEMA_VERSION:
-        raise ValueError(
-            f"Unsupported Hessian schema_version {schema_version}; expected "
-            f"{HESSIAN_RANDOM_SCHEMA_VERSION}."
-        )
-    analysis_kind = str(
-        _required_archive_scalar(result, "analysis_kind", result_path)
-    )
-    if analysis_kind != "random_points":
-        raise ValueError(
-            "Hessian analysis_kind must be 'random_points', got "
-            f"{analysis_kind!r}."
-        )
-    rank_definition = str(
-        _required_archive_scalar(
-            result,
-            "hessian_rank_definition",
-            result_path,
-        )
-    )
-    if rank_definition != HESSIAN_RANK_DEFINITION:
-        raise ValueError(
-            "Unexpected Hessian rank definition: "
-            f"{rank_definition!r}."
-        )
-    condition_definition = str(
-        _required_archive_scalar(
-            result,
-            "hessian_condition_number_definition",
-            result_path,
-        )
-    )
-    if condition_definition != HESSIAN_CONDITION_NUMBER_DEFINITION:
-        raise ValueError(
-            "Unexpected Hessian condition-number definition: "
-            f"{condition_definition!r}."
-        )
-
-    layers = np.asarray(result["layers"], dtype=NP_INT_DTYPE).reshape(-1)
-    expected_layers_array = np.asarray(
-        [int(L) for L in expected_layers],
-        dtype=NP_INT_DTYPE,
-    )
-    if not np.array_equal(layers, expected_layers_array):
-        raise ValueError(
-            "Hessian layers do not match the random-point QFIM layers: "
-            f"{layers.tolist()} != {expected_layers_array.tolist()}."
-        )
-    num_samples = int(
-        _required_archive_scalar(result, "num_hessian_samples", result_path)
-    )
-    if num_samples != int(expected_num_samples):
-        raise ValueError(
-            "Hessian and QFIM random-point sample counts differ: "
-            f"{num_samples} != {int(expected_num_samples)}."
-        )
-    seed_base = int(
-        _required_archive_scalar(
-            result,
-            "hessian_sample_seed_base",
-            result_path,
-        )
-    )
-    if seed_base != int(upqc.QFIM_SAMPLE_SEED_BASE):
-        raise ValueError(
-            "Hessian and QFIM random-point seed bases differ: "
-            f"{seed_base} != {int(upqc.QFIM_SAMPLE_SEED_BASE)}."
-        )
-    threshold = float(
-        _required_archive_scalar(result, "hessian_rank_threshold", result_path)
-    )
-    if threshold != float(HESSIAN_RANK_THRESHOLD):
-        raise ValueError(
-            "Hessian rank threshold differs from the fixed QFIM threshold: "
-            f"{threshold} != {float(HESSIAN_RANK_THRESHOLD)}."
-        )
-    analysis_batch_size = int(
-        _required_archive_scalar(result, "analysis_batch_size", result_path)
-    )
-    if analysis_batch_size <= 0:
-        raise ValueError("Hessian analysis_batch_size must be positive.")
-
-    rank_by_layer = {}
-    condition_by_layer = {}
-    for L in layers:
-        layer = int(L)
-        rank_key = f"L{layer}_rank"
-        condition_key = f"L{layer}_condition_number"
-        missing_data = [
-            key for key in (rank_key, condition_key) if key not in result
-        ]
-        if missing_data:
-            raise KeyError(
-                f"Hessian archive {Path(result_path).resolve()} is missing: "
-                + ", ".join(missing_data)
-            )
-
-        raw_ranks = np.asarray(result[rank_key])
-        if (
-            raw_ranks.shape != (num_samples,)
-            or np.iscomplexobj(raw_ranks)
-            or not np.issubdtype(raw_ranks.dtype, np.number)
-            or not np.all(np.isfinite(raw_ranks))
-            or not np.all(raw_ranks == np.rint(raw_ranks))
-        ):
-            raise ValueError(f"Invalid Hessian rank samples in {rank_key}.")
-        ranks = raw_ranks.astype(NP_INT_DTYPE)
-        max_rank = int(upqc.num_params_per_layer) * layer
-        if np.any(ranks < 0) or np.any(ranks > max_rank):
-            raise ValueError(f"Out-of-range Hessian ranks in {rank_key}.")
-
-        conditions = np.asarray(result[condition_key], dtype=NP_REAL_DTYPE)
-        if conditions.shape != (num_samples,) or np.any(np.isinf(conditions)):
-            raise ValueError(
-                f"Invalid Hessian condition-number samples in {condition_key}."
-            )
-        finite = np.isfinite(conditions)
-        if not np.array_equal(finite, ranks > 0):
-            raise ValueError(
-                "Hessian condition number must be finite iff rank is positive "
-                f"at L={layer}."
-            )
-        if np.any(conditions[finite] < NP_REAL_DTYPE(1.0 - 1e-12)):
-            raise ValueError(
-                f"Hessian condition numbers below one in {condition_key}."
-            )
-
-        rank_by_layer[layer] = ranks
-        condition_by_layer[layer] = conditions
-
-    upqc.hessian_rank_by_layer = rank_by_layer
-    upqc.hessian_condition_by_layer = condition_by_layer
-    upqc.hessian_by_layer = load_optional_hessian_matrices(
-        result, layers, num_samples, int(upqc.num_params_per_layer),
-    )
-    upqc.HESSIAN_RANK_THRESHOLD = threshold
-
-
-def _plot_hessian_curvature_results() -> None:
-    """Derive the four unthresholded curvature measures from saved matrices."""
-    if not upqc.hessian_by_layer:
-        upqc.hessian_curvature_result = None
-        compute_name = Path(__file__).name.replace("_visualize", "_compute")
-        warnings.warn(
-            "The saved Hessian archive contains no raw matrices; the four "
-            "curvature figures cannot be computed. Refresh the archive with "
-            f"python src/unitary_pqc/{compute_name} --stage qfim "
-            f"--h-param {upqc.h_param}.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return
-    upqc.hessian_curvature_result = save_hessian_curvature_figures(
-        upqc.hessian_by_layer,
-        h_param=upqc.h_param,
-        figures_dir=upqc.hessian_fig_dir,
-        hamiltonian_matrix=upqc.H_matrix,
-    )
-
-
-def _finite_max_mean_sem_min(values) -> tuple[float, float, float, float]:
-    """Return max, mean, SEM, and min over finite random-point samples."""
-    samples = np.asarray(values, dtype=NP_REAL_DTYPE).reshape(-1)
-    samples = samples[np.isfinite(samples)]
-    if samples.size == 0:
-        return (np.nan, np.nan, np.nan, np.nan)
-    sem = (
-        float(np.std(samples, ddof=1) / np.sqrt(samples.size))
-        if samples.size > 1
-        else 0.0
-    )
-    return (
-        float(np.max(samples)),
-        float(np.mean(samples)),
-        sem,
-        float(np.min(samples)),
-    )
-
-
-def _plot_random_hessian_summary(
-    values_by_layer: dict,
-    layers,
-    *,
-    ylabel: str,
-    title: str,
-    outpath: str,
-    integer_y_axis: bool,
-) -> None:
-    """Plot maximum, mean +/- SEM, and minimum versus layer count."""
-    valid_layers = [int(L) for L in layers if int(L) in values_by_layer]
-    if not valid_layers:
-        raise ValueError(f"No Hessian samples are available for {title}.")
-    statistics = [
-        _finite_max_mean_sem_min(values_by_layer[L]) for L in valid_layers
-    ]
-    x = np.asarray(valid_layers, dtype=NP_REAL_DTYPE)
-    maxima = np.asarray([item[0] for item in statistics], dtype=NP_REAL_DTYPE)
-    means = np.asarray([item[1] for item in statistics], dtype=NP_REAL_DTYPE)
-    sems = np.asarray([item[2] for item in statistics], dtype=NP_REAL_DTYPE)
-    minima = np.asarray([item[3] for item in statistics], dtype=NP_REAL_DTYPE)
-
-    upqc.new_prx_figure(width="double")
-    ax = plt.gca()
-    color = METRIC_COLORS["hessian"]
-    ax.plot(
-        x,
-        maxima,
-        marker="^",
-        linestyle="--",
-        linewidth=1.2,
-        color=color,
-        label="Maximum",
-    )
-    ax.errorbar(
-        x,
-        means,
-        yerr=sems,
-        marker="o",
-        linestyle="-",
-        linewidth=1.5,
-        capsize=3.0,
-        color=color,
-        label=r"Mean $\pm$ SEM",
-        zorder=3,
-    )
-    ax.plot(
-        x,
-        minima,
-        marker="v",
-        linestyle=":",
-        linewidth=1.2,
-        color=color,
-        label="Minimum",
-    )
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(L) for L in valid_layers])
-    if integer_y_axis:
-        ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
-        ax.set_ylim(bottom=0.0)
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(loc="best", frameon=True, framealpha=0.9)
-    Path(outpath).parent.mkdir(parents=True, exist_ok=True)
-    upqc.save_current_figure(outpath, outside_legend=False)
+    upqc.hessian_result = result
+    upqc.hessian_rank_by_layer = result["rank_by_layer"]
+    upqc.hessian_condition_by_layer = result["condition_by_layer"]
+    upqc.hessian_by_layer = result["hessian_by_layer"]
+    upqc.HESSIAN_RANK_THRESHOLD = result["threshold"]
 
 
 def _plot_random_hessian_results() -> None:
-    """Render random-point rank, condition number, and curvature figures."""
-    _plot_hessian_curvature_results()
-    threshold_tex = _qfim_threshold_tex(upqc.HESSIAN_RANK_THRESHOLD)
-    _plot_random_hessian_summary(
-        upqc.hessian_rank_by_layer,
-        upqc.qfim_layer_list,
-        ylabel=rf"Hessian rank ($|\lambda_i| \geq {threshold_tex}$)",
-        title=(
-            f"Hessian rank at {upqc.NUM_QFIM_SAMPLES} random parameter points"
-        ),
-        outpath=os.path.join(
-            upqc.hessian_fig_dir,
-            "hessian_rank_random_points.pdf",
-        ),
-        integer_y_axis=True,
+    """Render the same Hessian statistics and spectra as reset-DPQC."""
+    output = _render_unitary_hessian_result(
+        upqc.hessian_result, h_param=upqc.h_param,
+        figures_dir=upqc.hessian_fig_dir, hamiltonian_matrix=upqc.H_matrix,
     )
-    _plot_random_hessian_summary(
-        upqc.hessian_condition_by_layer,
-        upqc.qfim_layer_list,
-        ylabel=(
-            "Thresholded Hessian condition number "
-            rf"($|\lambda_i| \geq {threshold_tex}$)"
-        ),
-        title=(
-            "Hessian condition number at "
-            f"{upqc.NUM_QFIM_SAMPLES} random parameter points"
-        ),
-        outpath=os.path.join(
-            upqc.hessian_fig_dir,
-            "hessian_condition_number_random_points.pdf",
-        ),
-        integer_y_axis=False,
-    )
+    upqc.hessian_statistics_result = output["statistics"]
+    upqc.hessian_curvature_result = output["curvature"]
 
 
 def _load_random_qfim_results() -> None:

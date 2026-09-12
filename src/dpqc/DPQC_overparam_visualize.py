@@ -30,6 +30,13 @@ When a saved matrix archive is available, normal visualization also writes
 four energy-width-normalized curvature figures: diagonal square sum, total
 square sum, curvature effective rank, and negative-curvature square fraction.
 These four diagnostics use the full signed spectrum without a rank cutoff.
+Matrix archives additionally produce QFIM-style participation rank, absolute
+spectral sum, signed trace, Shannon entropy, matrix absolute-entry sum,
+threshold-count overlays, and signed/absolute per-layer spectra. Participation
+uses absolute eigenvalues strictly above the cutoff; absolute trace and
+entropy include the cutoff. Entropy normalizes the active absolute spectrum
+in nats. The signed trace uses the full spectrum. Statistics and definitions
+are saved in hessian_figures/hessian_statistics_random_points.npz.
 
 Example::
 
@@ -182,8 +189,8 @@ def _parse_cli_args(argv=None):
         "--hessian-only",
         action="store_true",
         help=(
-            "Compute/load random-point Hessians and render only the rank, "
-            "condition-number, and normalized curvature figures. "
+            "Compute/load random-point Hessians and render only their QFIM-style "
+            "statistics, spectra, and normalized curvature figures. "
             "This path does not require TensorCircuit."
         ),
     )
@@ -220,8 +227,9 @@ def _parse_cli_args(argv=None):
         type=_positive_float,
         default=float(cfg.QFIM_EFFECTIVE_RANK_THRESHOLD),
         help=(
-            "Positive absolute-eigenvalue threshold for Hessian rank and "
-            "condition number, applied to saved matrices at plot time "
+            "Positive absolute-eigenvalue threshold for Hessian rank, condition "
+            "number, participation rank, absolute trace, and entropy, "
+            "applied to saved matrices at plot time "
             "(default: QFIM_EFFECTIVE_RANK_THRESHOLD)."
         ),
     )
@@ -336,27 +344,6 @@ def _load_random_hessian_result(
     )
 
 
-def _finite_hessian_statistics(values):
-    """Return maximum, mean, SEM, and minimum over finite random samples."""
-    import numpy as hnp
-
-    samples = hnp.asarray(values, dtype=float).reshape(-1)
-    samples = samples[hnp.isfinite(samples)]
-    if samples.size == 0:
-        return (hnp.nan, hnp.nan, hnp.nan, hnp.nan)
-    sem = (
-        float(hnp.std(samples, ddof=1) / hnp.sqrt(samples.size))
-        if samples.size > 1
-        else 0.0
-    )
-    return (
-        float(hnp.max(samples)),
-        float(hnp.mean(samples)),
-        sem,
-        float(hnp.min(samples)),
-    )
-
-
 def _hessian_threshold_tex(threshold: float) -> str:
     exponent = int(math.floor(math.log10(float(threshold))))
     mantissa = float(threshold) / (10.0**exponent)
@@ -375,90 +362,14 @@ def _plot_random_hessian_summary(
     lower_bound_zero: bool,
     empty_message: str | None = None,
 ) -> Path:
-    """Plot layerwise maximum, mean +/- SEM, and minimum in one figure."""
-    import matplotlib.pyplot as plt
-    import numpy as hnp
+    """Plot random-point summaries using the shared QFIM figure style."""
+    from hessian_plot import plot_hessian_summary
 
-    valid_layers = [int(layer) for layer in layers if int(layer) in values_by_layer]
-    statistics = [
-        _finite_hessian_statistics(values_by_layer[layer])
-        for layer in valid_layers
-    ]
-    x = hnp.asarray(valid_layers, dtype=float)
-    maxima = hnp.asarray([item[0] for item in statistics], dtype=float)
-    means = hnp.asarray([item[1] for item in statistics], dtype=float)
-    sems = hnp.asarray([item[2] for item in statistics], dtype=float)
-    minima = hnp.asarray([item[3] for item in statistics], dtype=float)
-    finite = (
-        hnp.isfinite(maxima)
-        & hnp.isfinite(means)
-        & hnp.isfinite(sems)
-        & hnp.isfinite(minima)
+    return plot_hessian_summary(
+        values_by_layer, layers, ylabel=ylabel, title=title, outpath=outpath,
+        lower_bound_zero=lower_bound_zero, integer_ticks=lower_bound_zero,
+        empty_message=empty_message,
     )
-    if not hnp.any(finite) and empty_message is None:
-        raise ValueError(f"No finite Hessian statistics are available for {title}.")
-
-    fig, ax = plt.subplots(figsize=(7.2, 4.6))
-    ax.plot(
-        x,
-        maxima,
-        marker="^",
-        linestyle="--",
-        linewidth=1.2,
-        markersize=5.0,
-        color="C3",
-        label="Maximum",
-    )
-    ax.errorbar(
-        x,
-        means,
-        yerr=sems,
-        marker="o",
-        linestyle="-",
-        linewidth=1.5,
-        markersize=5.5,
-        capsize=3.0,
-        elinewidth=0.9,
-        color="C0",
-        label=r"Mean $\pm$ SEM",
-        zorder=3,
-    )
-    ax.plot(
-        x,
-        minima,
-        marker="v",
-        linestyle="--",
-        linewidth=1.2,
-        markersize=5.0,
-        color="C2",
-        label="Minimum",
-    )
-    ax.set_xlabel("Number of Layers")
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(layer) for layer in valid_layers])
-    if lower_bound_zero:
-        from matplotlib.ticker import MaxNLocator
-
-        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-        ax.set_ylim(bottom=0.0)
-    ax.grid(True, axis="y", alpha=0.3)
-    if hnp.any(finite):
-        ax.legend(loc="best", frameon=True, framealpha=0.9)
-    else:
-        ax.text(
-            0.5, 0.5, empty_message,
-            ha="center", va="center", transform=ax.transAxes,
-        )
-        ax.set_yticks([])
-    fig.tight_layout()
-
-    outpath = Path(outpath)
-    outpath.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(outpath, bbox_inches="tight", pad_inches=0.02)
-    plt.close(fig)
-    return outpath
 
 
 def visualize_hessian_results(
@@ -470,7 +381,7 @@ def visualize_hessian_results(
     expected_output_family: str = "dpqc",
     rank_threshold: float | None = None,
 ):
-    """Render Hessian rank/condition and four normalized curvature figures."""
+    """Render QFIM-style Hessian statistics and normalized curvature figures."""
     result = _load_random_hessian_result(
         results_dir,
         expected_h_param=expected_h_param,
@@ -494,7 +405,7 @@ def visualize_hessian_results(
         result["condition_by_layer"],
         result["layers"],
         ylabel=(
-            rf"Thresholded Hessian condition number "
+            "Hessian condition number\n"
             rf"($|\lambda_i| \geq {threshold_tex}$)"
         ),
         title=(
@@ -507,7 +418,14 @@ def visualize_hessian_results(
     )
     if result["hessian_by_layer"]:
         from hessian_curvature import save_hessian_curvature_figures
+        from hessian_plot import save_hessian_statistic_figures
 
+        save_hessian_statistic_figures(
+            result,
+            figures_dir=figures_dir,
+            count_thresholds=cfg.QFIM_PATH_EIGCOUNT_THRESHOLDS,
+            h_param=expected_h_param,
+        )
         save_hessian_curvature_figures(
             result["hessian_by_layer"],
             h_param=expected_h_param,
@@ -516,14 +434,14 @@ def visualize_hessian_results(
         )
     else:
         print(
-            "Skipping the four normalized Hessian curvature figures: "
+            "Skipping spectrum-dependent Hessian statistics and curvature figures: "
             f"{result['path']} contains only legacy rank/condition summaries. "
             "Re-run the Hessian compute stage to save full matrices; "
-            "these four quantities cannot be recovered from summaries.",
+            "these quantities cannot be recovered from rank/condition summaries.",
             flush=True,
         )
     print(
-        "Hessian visualization: saved rank and condition-number figures to "
+        "Hessian visualization: saved available statistical figures to "
         f"{figures_dir}",
         flush=True,
     )
@@ -3687,7 +3605,7 @@ def _has_expected_participation_rank_threshold(
     """Reject legacy participation-rank archives without active-spectrum metadata."""
     metadata_key = "participation_effective_rank_threshold"
     recompute_command = (
-        "DPQC_overparam_reset_compute.py --stage qfim"
+        "DPQC_overparam_reset_qfim.py"
         if output_family == "dpqc_reset"
         else "DPQC_overparam_qfim.py"
     )

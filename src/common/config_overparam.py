@@ -8,7 +8,7 @@
 # ------------------------------------------------------------
 H_PARAM = 0.10
 # R: number of independent VQE optimization trials for every layer.
-NUM_RUNS = 10
+NUM_RUNS = 30
 STEPS = 3000
 SAMPLE_EVERY = 1000
 # Parameter update used by the DPQC and reset-DPQC VQE pipelines.
@@ -47,8 +47,8 @@ SUCCESS_PROBABILITY_FIGURE_THRESHOLDS = tuple(
 # ------------------------------------------------------------
 # Layer schedules
 # ------------------------------------------------------------
-# DPQC VQE optimization
-VQE_MAX_LAYER = 8
+# DPQC/reset VQE optimization (zero dense limit uses only sparse-step multiples)
+VQE_MAX_LAYER = 44
 VQE_DENSE_UNTIL_LAYER = 8
 VQE_SPARSE_STEP = 4
 
@@ -57,7 +57,7 @@ UNITARY_PQC_MAX_LAYER = 44
 UNITARY_PQC_DENSE_UNTIL_LAYER = 8
 UNITARY_PQC_SPARSE_STEP = 4
 
-# DPQC random-point QFIM/derivative analyses
+# DPQC/reset random-point QFIM/Hessian analyses (no dense initial layers)
 DPQC_QFIM_MAX_LAYER = 44
 DPQC_QFIM_DENSE_UNTIL_LAYER = 8
 DPQC_QFIM_SPARSE_STEP = 4

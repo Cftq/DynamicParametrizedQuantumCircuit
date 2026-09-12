@@ -602,9 +602,24 @@ def run_qfim(*, include_optimization_path: bool = True):
     if include_optimization_path:
         (
             theta_sample_traces_by_layer,
-            vqe_layer_list,
+            saved_vqe_layer_list,
             sample_iters,
         ) = _load_saved_vqe_samples(vqe_optimization_result_path)
+        # Apply the configured schedule even when reusing an older, denser archive.
+        vqe_layer_list = [
+            layer
+            for layer in build_layer_list(
+                cfg.VQE_MAX_LAYER,
+                cfg.VQE_DENSE_UNTIL_LAYER,
+                cfg.VQE_SPARSE_STEP,
+            )
+            if layer in saved_vqe_layer_list
+        ]
+        if not vqe_layer_list:
+            raise ValueError(
+                "Saved VQE results contain no layers in the configured VQE "
+                "schedule. Run the VQE stage for the configured layers first."
+            )
         print(
             "Loaded saved float64 VQE samples for the QFIM calculation: "
             f"{vqe_optimization_result_path}"
