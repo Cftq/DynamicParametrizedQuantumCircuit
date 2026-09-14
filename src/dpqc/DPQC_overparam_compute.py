@@ -35,6 +35,12 @@ from pathlib import Path
 
 
 _MODULE_DIR = Path(__file__).resolve().parent
+_COMMON_DIR = _MODULE_DIR.parent / "common"
+if str(_COMMON_DIR) not in sys.path:
+    sys.path.insert(0, str(_COMMON_DIR))
+
+import dpqc_backend
+import dpqc_wsl
 
 
 def _positive_int(value: str) -> int:
@@ -96,6 +102,7 @@ def _parse_cli_args(argv=None):
             "used only with --stage vqe/all."
         ),
     )
+    dpqc_backend.add_device_argument(parser)
     return parser.parse_args(argv)
 
 
@@ -109,12 +116,21 @@ def _run_script(script_name: str, *arguments: str) -> int:
 
 def main(argv=None) -> int:
     args = _parse_cli_args(argv)
-    h_arguments = ("--h-param", str(args.h_param))
+    routed_status = dpqc_wsl.maybe_relaunch_in_wsl(
+        __file__, argv, args.device, preserve_auto=True,
+    )
+    if routed_status is not None:
+        return routed_status
+    def stage_arguments(stage):
+        return (
+            "--h-param", str(args.h_param),
+            "--device", dpqc_backend.resolve_stage_device(args.device, stage),
+        )
 
     if args.stage in ("all", "vqe"):
         return_code = _run_script(
             "DPQC_overparam_vqe.py",
-            *h_arguments,
+            *stage_arguments("vqe"),
             "--vqe-batch-size",
             str(args.vqe_batch_size),
         )
@@ -122,14 +138,14 @@ def main(argv=None) -> int:
             return return_code
 
     if args.stage in ("analysis", "all", "qfim"):
-        return_code = _run_script("DPQC_overparam_qfim.py", *h_arguments)
+        return_code = _run_script("DPQC_overparam_qfim.py", *stage_arguments("qfim"))
         if return_code:
             return return_code
 
     if args.stage in ("analysis", "all", "hessian"):
         return _run_script(
             "DPQC_overparam_hessian.py",
-            *h_arguments,
+            *stage_arguments("hessian"),
             "--output-family",
             "dpqc",
         )

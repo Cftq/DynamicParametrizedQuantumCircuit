@@ -12,6 +12,9 @@ always independent of saved VQE/QFIM results. Each stage has its own file:
     python src/unitary_pqc/unitary_pqc_measured_1_overparam_hessian.py --h-param 0.1
 
 Unlike the former default, training now requires explicit --stage vqe/all.
+With --device auto (the default), VQE uses the available GPU and QFIM/HS
+and Hessian run on CPU. Windows uses the same configured WSL environment
+as DPQC. Explicit --device cpu/gpu applies to every selected stage.
 Archive names, circuit definition, and plotting commands are unchanged.
 Historical numerical functions and result reads are available through lazy
 delegates. Custom scripts that assign shared state should import the common
@@ -31,6 +34,8 @@ if str(_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(_MODULE_DIR))
 
 import unitary_pqc_measured_1_overparam_cli as _cli
+import dpqc_backend
+import dpqc_wsl
 
 _parse_cli_args = _cli.parse_compute_args
 _positive_int = _cli._positive_int
@@ -51,6 +56,7 @@ def _launch_stage_subprocess(stage, args) -> int:
         sys.executable,
         str(_MODULE_DIR / f"unitary_pqc_measured_1_overparam_{stage}.py"),
         "--h-param", str(args.h_param),
+        "--device", dpqc_backend.resolve_stage_device(args.device, stage),
     ]
     if stage == "vqe":
         command.extend(("--vqe-batch-size", str(args.vqe_batch_size)))
@@ -76,25 +82,36 @@ def _run_split_cli_pipeline(args) -> int:
 
 
 def main(argv=None) -> int:
-    return _run_split_cli_pipeline(_parse_cli_args(argv))
+    args = _parse_cli_args(argv)
+    routed_status = dpqc_wsl.maybe_relaunch_in_wsl(
+        __file__, argv, args.device, preserve_auto=True,
+    )
+    if routed_status is not None:
+        return routed_status
+    return _run_split_cli_pipeline(args)
 
 
 def run_unitary_pqc_overparam(
     *, h_param=None, vqe_batch_size=None, analysis_batch_size=None,
 ) -> dict:
-    """Explicit legacy Python API: train, then run all numerical analyses.
+    """Legacy in-process CPU API: train, then run all numerical analyses.
 
     For analysis without training, call the separate qfim/hessian stage
-    functions or use the default command-line launcher instead.
+    functions or use the default command-line launcher instead. Use the CLI
+    with --stage all for GPU training followed by CPU analyses in separate
+    processes; this compatibility API retains its original CPU execution.
     """
+    # Fail before training if the caller already initialized a GPU backend.
+    cli = _stage_module("cli")
+    cli.load_stage_common("vqe", "cpu")
     _stage_module("vqe").run_unitary_pqc_vqe_stage(
-        h_param=h_param, vqe_batch_size=vqe_batch_size,
+        h_param=h_param, vqe_batch_size=vqe_batch_size, device="cpu",
     )
     qfim_result = _stage_module("qfim").run_unitary_pqc_qfim_stage(
-        h_param=h_param, analysis_batch_size=analysis_batch_size,
+        h_param=h_param, analysis_batch_size=analysis_batch_size, device="cpu",
     )
     _stage_module("hessian").run_unitary_pqc_hessian_stage(
-        h_param=h_param, analysis_batch_size=analysis_batch_size,
+        h_param=h_param, analysis_batch_size=analysis_batch_size, device="cpu",
     )
     result = _stage_module("common").collect_unitary_pqc_result()
     result["analysis_batch_size"] = qfim_result["analysis_batch_size"]

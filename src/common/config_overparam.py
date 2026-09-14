@@ -8,8 +8,8 @@
 # ------------------------------------------------------------
 H_PARAM = 0.10
 # R: number of independent VQE optimization trials for every layer.
-NUM_RUNS = 30
-STEPS = 3000
+NUM_RUNS = 100
+STEPS = 5000
 SAMPLE_EVERY = 1000
 # Parameter update used by the DPQC and reset-DPQC VQE pipelines.
 # Supported values are:

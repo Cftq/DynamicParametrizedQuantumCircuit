@@ -11,14 +11,18 @@ from typing import Optional
 
 def main(argv=None) -> int:
     if __package__:
-        from .unitary_pqc_measured_1_overparam_cli import parse_stage_args
+        from . import unitary_pqc_measured_1_overparam_cli as _cli
     else:
-        from unitary_pqc_measured_1_overparam_cli import parse_stage_args
+        import unitary_pqc_measured_1_overparam_cli as _cli
 
-    args = parse_stage_args("hessian", argv)
+    args = _cli.parse_stage_args("hessian", argv)
+    routed_status = _cli.maybe_relaunch_stage_in_wsl("hessian", args, __file__, argv)
+    if routed_status is not None:
+        return routed_status
     result = run_unitary_pqc_hessian_stage(
         h_param=args.h_param,
         analysis_batch_size=args.analysis_batch_size,
+        device=args.device,
     )
     print(f"Saved Hessian numerical results to: {result['hessian_results_dir']}")
     return 0
@@ -28,13 +32,15 @@ def run_unitary_pqc_hessian_stage(
     *,
     h_param: Optional[float] = None,
     analysis_batch_size: Optional[int] = None,
+    device: Optional[str] = None,
 ) -> dict:
     """Compute signed Hessians independently of VQE and QFIM stages."""
     if __package__:
-        from . import unitary_pqc_measured_1_overparam_common as _common
+        from .unitary_pqc_measured_1_overparam_cli import load_stage_common
     else:
-        import unitary_pqc_measured_1_overparam_common as _common
+        from unitary_pqc_measured_1_overparam_cli import load_stage_common
 
+    _common = load_stage_common("hessian", device)
     effective_analysis_batch_size = _common._resolve_analysis_batch_size(
         analysis_batch_size
     )

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import math
 import sys
 from pathlib import Path
@@ -14,6 +15,8 @@ if str(_COMMON_DIR) not in sys.path:
     sys.path.insert(0, str(_COMMON_DIR))
 
 import config_overparam as cfg
+import dpqc_backend
+import dpqc_wsl
 
 
 def _positive_int(value: str) -> int:
@@ -45,6 +48,7 @@ def _resolve_h_param(value) -> float:
 
 
 def _add_stage_options(parser, *, training=False, analysis=False, qfim=False):
+    dpqc_backend.add_device_argument(parser)
     parser.add_argument(
         "--h-param", type=_finite_float, default=None,
         help="Hamiltonian parameter h (default: config_overparam.H_PARAM).",
@@ -102,3 +106,25 @@ def parse_compute_args(argv=None):
     args = parser.parse_args(argv)
     args.h_param = _resolve_h_param(args.h_param)
     return args
+
+
+def maybe_relaunch_stage_in_wsl(stage, args, script_path, argv=None):
+    """Resolve the stage device before handing Windows execution to WSL."""
+    args.device = dpqc_backend.resolve_stage_device(args.device, stage)
+    return dpqc_wsl.maybe_relaunch_in_wsl(script_path, argv, args.device)
+
+
+def load_stage_common(stage, device=None):
+    """Select a backend before importing circuit constants or numerical code.
+
+    A cached common module has already initialized JAX. Validate that backend
+    too, so a later CPU/GPU request cannot silently use the previous device.
+    Stages using different devices must run in separate Python processes.
+    """
+    selected = dpqc_backend.resolve_stage_device(device, stage)
+    dpqc_backend.configure_jax_backend(selected)
+    name = "unitary_pqc_measured_1_overparam_common"
+    qualified_name = f"{__package__}.{name}" if __package__ else name
+    if qualified_name in sys.modules:
+        dpqc_backend.initialize_jax_backend()
+    return importlib.import_module(qualified_name)

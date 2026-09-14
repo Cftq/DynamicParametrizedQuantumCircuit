@@ -51,6 +51,25 @@ python src/unitary_pqc/unitary_pqc_measured_1_overparam_visualize.py --h-param 0
 
 従来の明示的な`--stage vqe`と`--stage qfim`に加え、`--stage hessian`が使えます。`--stage qfim`はQFIM・HSだけを計算します。以前この処理に含まれていたHessianは専用ファイルまたは`--stage analysis`で計算してください。学習から全工程を実行する場合だけ`--stage all`を指定します。
 
-既存のPython API `run_unitary_pqc_overparam()`は、明示的に学習から全工程を実行する関数として維持しています。解析のみの場合は、専用ファイルの`run_unitary_pqc_qfim_stage()`と`run_unitary_pqc_hessian_stage()`を使用してください。
+既存のPython API `run_unitary_pqc_overparam()`は、同一プロセス内で学習から全工程を実行する互換用のCPU関数として維持しています。GPU学習とCPU解析を組み合わせる場合は、`compute.py --stage all`を使用してください。解析のみの場合は、専用ファイルの`run_unitary_pqc_qfim_stage()`と`run_unitary_pqc_hessian_stage()`を使用できます。各ステージ関数の`device`引数でもデバイスを選択できますが、異なるデバイスの工程は別のPythonプロセスで実行してください。
 
 旧computeファイル経由での数値関数呼出しと結果参照は引き続き利用できます。独自スクリプトでモジュールの共有状態へ直接代入する場合は、`unitary_pqc_measured_1_overparam_common`をimportして変更してください。設定値の変更には引き続き`config_overparam.py`を使用します。
+
+## GPU学習とCPU解析
+
+DPQC・Reset DPQCと同じデバイス選択を使用します。既定の`--device auto`では、VQEは利用可能なGPUを使い、QFIM・HS・HessianはCPUで計算します。`implement.ipynb`の既存セルも引数を追加せずにこの設定で動作します。
+
+```powershell
+# 学習のみ：既定でGPUを利用
+python src/unitary_pqc/unitary_pqc_measured_1_overparam_compute.py --h-param 0.1 --stage vqe
+# 保存済み学習結果を使ってQFIM・HSとHessianをCPUで計算
+python src/unitary_pqc/unitary_pqc_measured_1_overparam_compute.py --h-param 0.1
+# 学習から解析まで：工程ごとに別プロセスで実行
+python src/unitary_pqc/unitary_pqc_measured_1_overparam_compute.py --h-param 0.1 --stage all
+```
+
+個別の`_vqe.py`、`_qfim.py`、`_hessian.py`でも同じ既定値です。WindowsではDPQCで設定済みの`.dpqc-gpu-wsl.json`を読み、学習・解析とも同じWSL環境を使用します。設定方法は[DPQCのGPU実行手順](../dpqc/README_gpu.md)を参照してください。
+
+`--device cpu`は選択した全工程をCPUに固定し、`--device gpu`は全工程でGPUを必須にします。GPUを明示指定して利用できない場合は、計算開始前にエラーになります。`--device`を省略した場合は環境変数`DPQC_DEVICE`が優先されるため、工程別の既定選択を明示するには`--device auto`を指定してください。WSL/LinuxのVQEの`auto`はJAXの既定デバイスと外部のJAX設定に従います。
+
+実際のデバイスは起動時の`[DPQC] JAX backend: gpu/cpu`ログに表示されます。回路、float64/complex128精度、学習アルゴリズム、結果の保存先・形式は変更していません。

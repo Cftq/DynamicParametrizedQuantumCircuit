@@ -36,6 +36,13 @@ for _path in (_MODULE_DIR, _COMMON_DIR):
 
 
 import config_overparam as cfg
+from dpqc_backend import (
+    add_device_argument,
+    configure_jax_backend,
+    effective_vqe_batch_size,
+    initialize_jax_backend,
+)
+from dpqc_wsl import maybe_relaunch_in_wsl
 
 
 def _positive_int(value: str) -> int:
@@ -60,6 +67,7 @@ def _parse_cli_args(argv=None):
             "QFIM, visualization, and circuit-drawing stages."
         )
     )
+    add_device_argument(parser)
     parser.add_argument(
         "--h-param",
         type=_finite_float,
@@ -80,22 +88,31 @@ def _parse_cli_args(argv=None):
 
 if __name__ == "__main__":
     _CLI_ARGS = _parse_cli_args()
+    _wsl_returncode = maybe_relaunch_in_wsl(
+        __file__, sys.argv[1:], _CLI_ARGS.device,
+    )
+    if _wsl_returncode is not None:
+        raise SystemExit(_wsl_returncode)
 else:
     _CLI_ARGS = argparse.Namespace(
         h_param=float(cfg.H_PARAM),
         vqe_batch_size=int(getattr(cfg, "VQE_BATCH_SIZE", 5)),
+        device=None,
     )
 
-VQE_BATCH_SIZE = int(_CLI_ARGS.vqe_batch_size)
+REQUESTED_VQE_BATCH_SIZE = int(_CLI_ARGS.vqe_batch_size)
 RUN_VQE_STAGE = True
 RUN_QFIM_STAGE = False
 
 # ------------------------------------------------------------
 # IMPORTANT: env vars should be set BEFORE importing jax
 # ------------------------------------------------------------
-os.environ["JAX_PLATFORM_NAME"] = "cpu"
+configure_jax_backend(_CLI_ARGS.device)
 
 import jax
+
+JAX_DEVICE = initialize_jax_backend()
+
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -115,6 +132,20 @@ COMPLEX_DTYPE = jnp.complex128
 NP_REAL_DTYPE = np.float64
 NP_COMPLEX_DTYPE = np.complex128
 NP_INT_DTYPE = np.int64
+
+from dpqc_density_kernels import apply_rz_density, apply_rxx_density
+
+# Avoid the many tiny matrix products of generic gate conjugation on a GPU.
+# The elementwise formulas implement exactly the same Rz and Rxx unitaries.
+_density_kernel_request = os.environ.get("DPQC_DENSITY_KERNEL", "auto")
+if _density_kernel_request not in ("auto", "generic", "elementwise"):
+    raise ValueError("DPQC_DENSITY_KERNEL must be auto, generic, or elementwise.")
+USE_ELEMENTWISE_DENSITY_KERNELS = (
+    _density_kernel_request == "elementwise"
+    or (_density_kernel_request == "auto" and getattr(JAX_DEVICE, "platform", None) == "gpu")
+)
+DENSITY_KERNEL = "elementwise" if USE_ELEMENTWISE_DENSITY_KERNELS else "generic"
+print(f"[DPQC] VQE density kernel: {DENSITY_KERNEL}", flush=True)
 
 from dpqc_overparam_common import (
     _thr_tag,
@@ -139,6 +170,7 @@ steps = cfg.STEPS
 num_runs = int(cfg.NUM_RUNS)
 if RUN_VQE_STAGE and num_runs <= 0:
     raise ValueError("cfg.NUM_RUNS must be a positive integer.")
+VQE_BATCH_SIZE = effective_vqe_batch_size(REQUESTED_VQE_BATCH_SIZE, num_runs)
 lr = cfg.LEARNING_RATE
 vqe_optimizer_name = normalize_dpqc_vqe_optimizer_name(
     getattr(cfg, "DPQC_VQE_OPTIMIZER", "adam")
@@ -328,6 +360,11 @@ def _apply_kept_blocks(
     )
 
     for (q0, q1), p in zip(LAYER_PAIRS, blocks):
+        if USE_ELEMENTWISE_DENSITY_KERNELS:
+            rho = apply_rz_density(rho, p[0], q0, k)
+            rho = apply_rz_density(rho, p[1], q1, k)
+            rho = apply_rxx_density(rho, p[2], (q0, q1), k)
+            continue
         rho = apply_unitary_on_rho(rho, U_rz(p[0]), (q0,), k)
         rho = apply_unitary_on_rho(rho, U_rz(p[1]), (q1,), k)
         rho = apply_unitary_on_rho(rho, U_rxx(p[2]), (q0, q1), k)
@@ -875,6 +912,10 @@ def _run_vqe_optimization():
         f"{dpqc_vqe_optimizer_display_name(vqe_optimizer_name)} "
         f"(learning_rate={float(lr):g})"
     )
+    print(
+        f"VQE batch size: {VQE_BATCH_SIZE} "
+        f"(requested={REQUESTED_VQE_BATCH_SIZE}, trials={num_runs})"
+    )
 
     theta_history = {}
     ancilla_p1_stats_by_layer = {}
@@ -938,8 +979,8 @@ def _run_vqe_optimization():
                 VQE_BATCH_SIZE,
             )
 
-            # One transfer/synchronization per five runs replaces the former
-            # two scalar synchronizations at every optimizer step.
+            # The full optimizer loop remains on the selected device; transfer
+            # saved histories once per batch, without scalar step synchronizations.
             host_outputs = jax.device_get(run_vqe_batch(theta_batch))
             for parts, values in zip(output_parts, host_outputs):
                 parts.append(
@@ -1054,6 +1095,10 @@ def _run_vqe_optimization():
         tolerance=np.asarray(tolerance, dtype=NP_REAL_DTYPE),
         steps=np.asarray(steps, dtype=NP_INT_DTYPE),
         num_runs=np.asarray(num_runs, dtype=NP_INT_DTYPE),
+        vqe_batch_size=np.asarray(VQE_BATCH_SIZE, dtype=NP_INT_DTYPE),
+        requested_vqe_batch_size=np.asarray(
+            REQUESTED_VQE_BATCH_SIZE, dtype=NP_INT_DTYPE,
+        ),
         optimizer_name=np.asarray(vqe_optimizer_name),
         lr=np.asarray(lr, dtype=NP_REAL_DTYPE),
         smallest_eigval=np.asarray(

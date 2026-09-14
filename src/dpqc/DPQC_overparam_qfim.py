@@ -36,6 +36,13 @@ for _path in (_MODULE_DIR, _COMMON_DIR):
 
 
 import config_overparam as cfg
+from dpqc_backend import (
+    add_device_argument,
+    configure_jax_backend,
+    initialize_jax_backend,
+    resolve_stage_device,
+)
+from dpqc_wsl import maybe_relaunch_in_wsl
 
 
 def _positive_int(value: str) -> int:
@@ -59,6 +66,7 @@ def _parse_cli_args(argv=None):
             "keep=(0,1,2,3) and keep=(0,1,2,3,4), and save the results."
         )
     )
+    add_device_argument(parser)
     parser.add_argument(
         "--h-param",
         type=_finite_float,
@@ -73,8 +81,16 @@ def _parse_cli_args(argv=None):
 
 if __name__ == "__main__":
     _CLI_ARGS = _parse_cli_args()
+    _CLI_ARGS.device = resolve_stage_device(_CLI_ARGS.device, "qfim")
+    _wsl_returncode = maybe_relaunch_in_wsl(
+        __file__, sys.argv[1:], _CLI_ARGS.device,
+    )
+    if _wsl_returncode is not None:
+        raise SystemExit(_wsl_returncode)
 else:
-    _CLI_ARGS = argparse.Namespace(h_param=float(cfg.H_PARAM))
+    _CLI_ARGS = argparse.Namespace(
+        h_param=float(cfg.H_PARAM), device=resolve_stage_device(None, "qfim"),
+    )
 
 RUN_VQE_STAGE = False
 RUN_QFIM_STAGE = True
@@ -83,9 +99,12 @@ RUN_QFIM_STAGE = True
 # ------------------------------------------------------------
 # IMPORTANT: env vars should be set BEFORE importing jax
 # ------------------------------------------------------------
-os.environ["JAX_PLATFORM_NAME"] = "cpu"
+configure_jax_backend(_CLI_ARGS.device)
 
 import jax
+
+initialize_jax_backend()
+
 import jax.numpy as jnp
 import numpy as np
 import tensorcircuit as tc
@@ -797,29 +816,28 @@ def run_qfim(*, include_optimization_path: bool = True):
 
             Udag = jnp.conjugate(U).T
             n_params = int(theta.shape[0])
-            eye = jnp.eye(n_params, dtype=theta.dtype)
+            chunk_size = min(jvp_chunk, n_params)
+            num_chunks = (n_params + chunk_size - 1) // chunk_size
 
             def _to_eig(d: jnp.ndarray) -> jnp.ndarray:
                 return Udag @ d @ U
 
-            blocks = []
-
-            for s in range(0, n_params, jvp_chunk):
-                V = eye[s: min(s + jvp_chunk, n_params), :]
+            def feature_chunk(chunk_index):
+                directions = chunk_index * chunk_size + jnp.arange(chunk_size)
+                V = jax.nn.one_hot(directions, n_params, dtype=theta.dtype)
                 drho_B = jax.vmap(rho_jvp)(V)
 
                 drho_B = 0.5 * (
                     drho_B + jnp.conjugate(jnp.swapaxes(drho_B, 1, 2))
                 )
 
-                Cflat_B = jnp.reshape(
+                return jnp.reshape(
                     jax.vmap(_to_eig)(drho_B) * sqrtW[None, :, :],
                     (V.shape[0], dim_vec),
                 )
 
-                blocks.append(Cflat_B)
-
-            Cflat = jnp.concatenate(blocks, axis=0)
+            blocks = jax.lax.map(feature_chunk, jnp.arange(num_chunks))
+            Cflat = jnp.reshape(blocks, (-1, dim_vec))[:n_params]
             F_red = jnp.real(Cflat @ jnp.conjugate(Cflat).T)
 
             return 0.5 * (F_red + F_red.T)
@@ -910,6 +928,8 @@ def run_qfim(*, include_optimization_path: bool = True):
             raise ValueError(f"jvp_chunk must be positive, got {jvp_chunk}.")
 
         n_params = n_param_per_layer * n_layer
+        chunk_size = min(jvp_chunk, n_params)
+        num_chunks = (n_params + chunk_size - 1) // chunk_size
         dim4 = 2 ** (num_system_qubits - 1)
         dim5 = 2**num_system_qubits
 
@@ -960,14 +980,16 @@ def run_qfim(*, include_optimization_path: bool = True):
             eigenvectors4, sqrt_weight4, rho_rank4 = _state_sld_factors(rho4)
             eigenvectors5, sqrt_weight5, rho_rank5 = _state_sld_factors(rho5)
 
-            identity_tangents = jnp.eye(n_params, dtype=theta.dtype)
-            feature4_blocks = []
-            feature5_blocks = []
-
-            for start in range(0, n_params, jvp_chunk):
-                tangent_block = identity_tangents[
-                    start: min(start + jvp_chunk, n_params), :
-                ]
+            def feature_chunk(chunk_index):
+                # Keep a single compiled JVP body, including for deep circuits.
+                # A Python loop here is unrolled by the enclosing jit and can
+                # generate transposes exceeding the GPU shared-memory limit.
+                # Out-of-range one-hot indices give zero tangent directions;
+                # their padded rows are removed before forming either QFIM.
+                directions = chunk_index * chunk_size + jnp.arange(chunk_size)
+                tangent_block = jax.nn.one_hot(
+                    directions, n_params, dtype=theta.dtype,
+                )
 
                 d_rho5_block = jax.vmap(rho5_jvp)(tangent_block)
                 d_rho5_block = 0.5 * (
@@ -980,23 +1002,24 @@ def run_qfim(*, include_optimization_path: bool = True):
                     + jnp.conjugate(jnp.swapaxes(d_rho4_block, -2, -1))
                 )
 
-                feature4_blocks.append(
+                return (
                     _feature_block(
                         d_rho4_block,
                         eigenvectors4,
                         sqrt_weight4,
-                    )
-                )
-                feature5_blocks.append(
+                    ),
                     _feature_block(
                         d_rho5_block,
                         eigenvectors5,
                         sqrt_weight5,
-                    )
+                    ),
                 )
 
-            feature4 = jnp.concatenate(feature4_blocks, axis=0)
-            feature5 = jnp.concatenate(feature5_blocks, axis=0)
+            feature4_blocks, feature5_blocks = jax.lax.map(
+                feature_chunk, jnp.arange(num_chunks),
+            )
+            feature4 = jnp.reshape(feature4_blocks, (-1, dim4 * dim4))[:n_params]
+            feature5 = jnp.reshape(feature5_blocks, (-1, dim5 * dim5))[:n_params]
 
             if feature4.shape != (n_params, dim4 * dim4):
                 raise AssertionError(

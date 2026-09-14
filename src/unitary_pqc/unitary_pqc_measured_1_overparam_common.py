@@ -66,7 +66,11 @@ def _resolve_h_param(cli_value: Optional[float]) -> float:
 # ------------------------------------------------------------
 # IMPORTANT: env vars should be set BEFORE importing jax
 # ------------------------------------------------------------
-os.environ["JAX_PLATFORM_NAME"] = "cpu"
+from dpqc_backend import configure_jax_backend, initialize_jax_backend
+
+# Numerical stage entry points select their device before importing this
+# module. Direct imports (including plotting) retain the CPU default.
+configure_jax_backend(os.environ.get("DPQC_DEVICE", "cpu"))
 os.environ["JAX_ENABLE_X64"] = "1"
 
 import matplotlib
@@ -77,6 +81,9 @@ from matplotlib.patches import Patch
 from tqdm.auto import tqdm as _tqdm
 
 import jax
+
+JAX_DEVICE = initialize_jax_backend()
+
 import plot as plot_style
 from hamiltonian import (
     PAULI,

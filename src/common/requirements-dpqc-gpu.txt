@@ -1,0 +1,10 @@
+# Match the existing JAX 0.5.3 numerical code while adding Linux CUDA support.
+# Install in a dedicated Linux / WSL2 virtual environment, not native Windows.
+jax[cuda12]==0.5.3
+numpy==1.26.4
+scipy==1.15.2
+optax==0.2.4
+chex==0.1.89
+tensorcircuit==0.12.0
+matplotlib>=3.8,<3.11
+tqdm>=4.66,<5

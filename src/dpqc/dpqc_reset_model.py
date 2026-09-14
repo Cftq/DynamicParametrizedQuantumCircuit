@@ -164,10 +164,14 @@ def _load_base_stage_module(
     *,
     h_param: float,
     vqe_batch_size: int | None = None,
+    device: str | None = None,
 ) -> ModuleType:
     if stage not in ("vqe", "qfim"):
         raise ValueError(f"Unsupported base numerical stage: {stage!r}.")
     _prepare_base_config(h_param, vqe_batch_size)
+    from dpqc_backend import configure_jax_backend, resolve_stage_device
+
+    configure_jax_backend(resolve_stage_device(device, stage))
     module_name = (
         "DPQC_overparam_vqe" if stage == "vqe" else "DPQC_overparam_qfim"
     )
@@ -237,6 +241,11 @@ def _install_reset_model(module: ModuleType) -> None:
             (NUM_BLOCKS, PARAMS_PER_BLOCK),
         )
         for (q0, q1), block_params in zip(LAYER_PAIRS, blocks):
+            if getattr(module, "USE_ELEMENTWISE_DENSITY_KERNELS", False):
+                rho = module.apply_rz_density(rho, block_params[0], q0, k)
+                rho = module.apply_rz_density(rho, block_params[1], q1, k)
+                rho = module.apply_rxx_density(rho, block_params[2], (q0, q1), k)
+                continue
             rho = module.apply_unitary_on_rho(
                 rho,
                 module.U_rz(block_params[0]),

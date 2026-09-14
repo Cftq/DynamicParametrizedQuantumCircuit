@@ -4,7 +4,10 @@ Run with ``python -m unittest discover -s src/dpqc -p test_dpqc_compute_launcher
 All numerical subprocesses are mocked.
 """
 
+from contextlib import redirect_stderr
 import importlib.util
+import io
+import os
 from pathlib import Path
 import subprocess
 import unittest
@@ -22,13 +25,23 @@ class DPQCComputeLauncherTests(unittest.TestCase):
     ANALYSIS_STAGES = ("qfim", "hessian")
 
     def setUp(self):
+        environment_patch = patch.dict(os.environ, {"DPQC_DEVICE": "auto"})
+        environment_patch.start()
+        self.addCleanup(environment_patch.stop)
         config_patch = patch.object(
             _LAUNCHER, "_default_config_values", return_value=(0.25, 17)
         )
         config_patch.start()
         self.addCleanup(config_patch.stop)
+        route_patch = patch.object(
+            _LAUNCHER.dpqc_wsl, "maybe_relaunch_in_wsl", return_value=None
+        )
+        route_patch.start()
+        self.addCleanup(route_patch.stop)
 
-    def assert_stage_calls(self, run, stages, *, h_param="0.1", batch_size="3"):
+    def assert_stage_calls(
+        self, run, stages, *, h_param="0.1", batch_size="3", device="auto"
+    ):
         self.assertEqual(run.call_count, len(stages))
         for invocation, stage in zip(run.call_args_list, stages):
             self.assertEqual(invocation.kwargs, {"check": False})
@@ -43,7 +56,8 @@ class DPQCComputeLauncherTests(unittest.TestCase):
             self.assertEqual(len(options) % 2, 0)
             parsed_options = dict(zip(options[::2], options[1::2]))
             self.assertEqual(len(parsed_options) * 2, len(options))
-            expected = {"--h-param": h_param}
+            stage_device = "cpu" if device == "auto" and stage != "vqe" else device
+            expected = {"--h-param": h_param, "--device": stage_device}
             if stage == "vqe":
                 expected["--vqe-batch-size"] = batch_size
             elif stage == "hessian":
@@ -118,6 +132,76 @@ class DPQCComputeLauncherTests(unittest.TestCase):
                 self.assert_stage_calls(
                     run, self.ANALYSIS_STAGES[: failed_index + 1]
                 )
+
+    def test_explicit_device_is_forwarded_to_every_selected_stage(self):
+        for device in ("cpu", "gpu"):
+            with self.subTest(device=device), patch.object(
+                _LAUNCHER.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as run:
+                result = _LAUNCHER.main([
+                    "--stage", "all", "--h-param", "0.1",
+                    "--vqe-batch-size", "3", "--device", device,
+                ])
+                self.assertEqual(result, 0)
+                self.assert_stage_calls(run, self.STAGES, device=device)
+
+    def test_gpu_default_analysis_still_excludes_training(self):
+        with patch.object(
+            _LAUNCHER.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as run:
+            result = _LAUNCHER.main(["--h-param", "0.1", "--device", "gpu"])
+        self.assertEqual(result, 0)
+        self.assert_stage_calls(run, self.ANALYSIS_STAGES, device="gpu")
+
+    def test_environment_device_and_explicit_auto_override_reach_separate_stages(self):
+        for inherited in ("cpu", "gpu"):
+            for arguments, expected in (([], inherited), (["--device", "auto"], "auto")):
+                with self.subTest(inherited=inherited, arguments=arguments), patch.dict(
+                    os.environ, {"DPQC_DEVICE": inherited}
+                ), patch.object(
+                    _LAUNCHER.subprocess, "run",
+                    return_value=subprocess.CompletedProcess([], 0),
+                ) as run:
+                    result = _LAUNCHER.main([
+                        "--stage", "all", "--h-param", "0.1", "--vqe-batch-size", "3",
+                        *arguments,
+                    ])
+                    self.assertEqual(result, 0)
+                    self.assert_stage_calls(run, self.STAGES, device=expected)
+
+    def test_default_wsl_route_preserves_auto_before_per_stage_dispatch(self):
+        arguments = ["--stage", "all"]
+        with patch.object(_LAUNCHER.subprocess, "run") as run, patch.object(
+            _LAUNCHER.dpqc_wsl, "maybe_relaunch_in_wsl", return_value=0,
+        ) as route:
+            self.assertEqual(_LAUNCHER.main(arguments), 0)
+        self.assertEqual(route.call_args.args[1:], (arguments, "auto"))
+        self.assertEqual(route.call_args.kwargs, {"preserve_auto": True})
+        run.assert_not_called()
+
+    def test_invalid_device_fails_before_routing_or_launching(self):
+        with patch.object(_LAUNCHER.subprocess, "run") as run, patch.object(
+            _LAUNCHER.dpqc_wsl, "maybe_relaunch_in_wsl"
+        ) as route, redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            _LAUNCHER.main(["--device", "tpu"])
+        self.assertEqual(error.exception.code, 2)
+        route.assert_not_called()
+        run.assert_not_called()
+
+    def test_wsl_routing_returns_status_without_local_stage_launch(self):
+        arguments = ["--device", "gpu", "--stage", "hessian", "--h-param", "0.1"]
+        with patch.object(_LAUNCHER.subprocess, "run") as run, patch.object(
+            _LAUNCHER.dpqc_wsl, "maybe_relaunch_in_wsl", return_value=19
+        ) as route:
+            result = _LAUNCHER.main(arguments)
+        self.assertEqual(result, 19)
+        route.assert_called_once()
+        self.assertEqual(Path(route.call_args.args[0]), _MODULE_PATH)
+        self.assertEqual(route.call_args.args[1:], (arguments, "gpu"))
+        self.assertEqual(route.call_args.kwargs, {"preserve_auto": True})
+        run.assert_not_called()
 
     def test_selected_stage_failure_propagates_exit_code(self):
         for stage in self.STAGES:

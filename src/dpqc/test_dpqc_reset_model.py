@@ -3,22 +3,27 @@
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 _MODULE_PATH = Path(__file__).with_name("dpqc_reset_model.py")
 _SPEC = importlib.util.spec_from_file_location("reset_model_test", _MODULE_PATH)
 _MODEL = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODEL)
+from dpqc_backend import resolve_stage_device
 
 
 class ResetModelTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"DPQC_DEVICE": "auto"}))
+
     def test_model_and_parameter_order_are_preserved(self):
         self.assertEqual(_MODEL.MODEL_ID, "dpqc_reset_fixed_rx_pi")
         self.assertEqual(_MODEL.OUTPUT_FAMILY, "dpqc_reset")
@@ -79,7 +84,9 @@ class ResetModelTests(unittest.TestCase):
     def test_qfim_loads_only_qfim_and_does_not_set_training_batch_size(self):
         config = SimpleNamespace(H_PARAM=0.9, VQE_BATCH_SIZE=29)
         stage_module = SimpleNamespace()
-        with patch.dict(sys.modules, {"config_overparam": config}), patch.object(
+        with patch("dpqc_backend.configure_jax_backend"), patch.dict(
+            sys.modules, {"config_overparam": config}
+        ), patch.object(
             _MODEL.importlib, "import_module", return_value=stage_module
         ) as import_module, patch.object(
             _MODEL.importlib, "reload", return_value=stage_module
@@ -95,6 +102,77 @@ class ResetModelTests(unittest.TestCase):
         else:
             import_module.assert_called_once_with("DPQC_overparam_qfim")
             reload_module.assert_not_called()
+
+
+    def test_device_is_configured_before_base_stage_import_or_reload(self):
+        for stage in ("vqe", "qfim"):
+            for already_loaded in (False, True):
+                with self.subTest(stage=stage, already_loaded=already_loaded):
+                    events = []
+                    backend = ModuleType("dpqc_backend")
+                    backend.resolve_stage_device = resolve_stage_device
+                    backend.configure_jax_backend = Mock(
+                        side_effect=lambda device: events.append(("backend", device))
+                    )
+                    base = ModuleType("DPQC_overparam_" + stage)
+                    config = SimpleNamespace(H_PARAM=0.9, VQE_BATCH_SIZE=29)
+                    with patch.dict(sys.modules, {
+                        "dpqc_backend": backend, "config_overparam": config,
+                    }):
+                        sys.modules.pop(base.__name__, None)
+                        if already_loaded:
+                            sys.modules[base.__name__] = base
+                        with patch.object(
+                            _MODEL.importlib, "import_module",
+                            side_effect=lambda name: events.append(("import", name)) or base,
+                        ), patch.object(
+                            _MODEL.importlib, "reload",
+                            side_effect=lambda module: events.append(("reload", module.__name__)) or module,
+                        ):
+                            actual = _MODEL._load_base_stage_module(
+                                stage, h_param=0.1, device="gpu",
+                            )
+                    self.assertIs(actual, base)
+                    self.assertEqual(events, [
+                        ("backend", "gpu"),
+                        ("reload" if already_loaded else "import", base.__name__),
+                    ])
+                    self.assertEqual(config.H_PARAM, 0.1)
+                    self.assertEqual(config.VQE_BATCH_SIZE, 29)
+
+    def test_invalid_device_prevents_loading_base_numerical_stage(self):
+        backend = ModuleType("dpqc_backend")
+        backend.resolve_stage_device = Mock(side_effect=ValueError("invalid device"))
+        backend.configure_jax_backend = Mock(side_effect=ValueError("invalid device"))
+        with patch.dict(sys.modules, {"dpqc_backend": backend}), patch.object(
+            _MODEL, "_prepare_base_config"
+        ), patch.object(_MODEL.importlib, "import_module") as load, patch.object(
+            _MODEL.importlib, "reload"
+        ) as reload_module, self.assertRaisesRegex(ValueError, "invalid device"):
+            _MODEL._load_base_stage_module("qfim", h_param=0.1, device="tpu")
+        load.assert_not_called()
+        reload_module.assert_not_called()
+
+    def test_auto_base_qfim_pins_cpu_before_import_even_with_inherited_cuda_platform(self):
+        for device in (None, "auto"):
+            events = []
+            backend = ModuleType("dpqc_backend")
+            backend.resolve_stage_device = resolve_stage_device
+            backend.configure_jax_backend = Mock(
+                side_effect=lambda selected: events.append(("configure", selected))
+            )
+            with self.subTest(device=device), patch.dict(os.environ, {
+                "DPQC_DEVICE": "auto", "JAX_PLATFORMS": "cuda", "JAX_PLATFORM_NAME": "gpu",
+            }), patch.dict(sys.modules, {"dpqc_backend": backend}), patch.object(
+                _MODEL, "_prepare_base_config",
+            ), patch.object(_MODEL.importlib, "import_module", side_effect=(
+                lambda name: events.append(("import", name)) or ModuleType(name)
+            )), patch.object(_MODEL.importlib, "reload", side_effect=(
+                lambda module: events.append(("reload", module.__name__)) or module
+            )):
+                _MODEL._load_base_stage_module("qfim", h_param=0.1, device=device)
+            self.assertEqual(events[0], ("configure", "cpu"))
+            self.assertEqual(events[1][1], "DPQC_overparam_qfim")
 
 
 class ResetMetadataTests(unittest.TestCase):

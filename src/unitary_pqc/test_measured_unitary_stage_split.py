@@ -29,6 +29,12 @@ class MeasuredUnitaryLauncherTests(unittest.TestCase):
     def setUpClass(cls):
         cls.launcher = importlib.import_module(_PREFIX + "compute")
 
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"DPQC_DEVICE": "auto"}))
+        self.enterContext(patch.object(
+            self.launcher.dpqc_wsl, "maybe_relaunch_in_wsl", return_value=None,
+        ))
+
     def invoke(self, *extra, returncodes=None):
         arguments = [
             "--h-param", "0.3", "--vqe-batch-size", "7",
@@ -55,7 +61,10 @@ class MeasuredUnitaryLauncherTests(unittest.TestCase):
                 Path(command[1]), _MODULE_DIR / f"{_PREFIX}{stage}.py"
             )
             options = command[2:]
-            expected = ["--h-param", "0.3"]
+            expected = [
+                "--h-param", "0.3", "--device",
+                "auto" if stage == "vqe" else "cpu",
+            ]
             expected.extend(
                 ["--vqe-batch-size", "7"] if stage == "vqe" else
                 ["--analysis-batch-size", "2"]
@@ -113,6 +122,7 @@ class MeasuredUnitaryLauncherTests(unittest.TestCase):
             ["--h-param", "nan"], ["--h-param", "inf"],
             ["--vqe-batch-size", "0"], ["--analysis-batch-size", "-1"],
             ["--stage", "training"],
+            ["--device", "cuda"],
         ):
             with self.subTest(arguments=arguments), patch.object(
                 self.launcher.subprocess, "run"
@@ -149,6 +159,12 @@ class MeasuredUnitaryAnalysisIsolationTests(unittest.TestCase):
         common_patch = patch.dict(sys.modules, {_PREFIX + "common": self.common})
         common_patch.start()
         self.addCleanup(common_patch.stop)
+        cli = importlib.import_module(_PREFIX + "cli")
+        self.enterContext(patch.object(cli, "load_stage_common", return_value=self.common))
+        self.enterContext(patch.object(
+            cli.dpqc_wsl, "maybe_relaunch_in_wsl", return_value=None,
+        ))
+        self.enterContext(patch.dict(os.environ, {"DPQC_DEVICE": "auto"}))
 
     def run_qfim(self, *, include_optimization_path):
         with patch.object(self.qfim, "run_random_qfim_analysis") as random, patch.object(
@@ -312,6 +328,7 @@ print("MEASURED_UNITARY_LIGHTWEIGHT_OK")
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("MEASURED_UNITARY_LIGHTWEIGHT_OK", result.stdout)
+            self.assertIn("--device {auto,cpu,gpu}", result.stdout)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
 
@@ -342,6 +359,7 @@ class MeasuredUnitaryPackageImportTests(unittest.TestCase):
         common.energy_results_dir = "package-only-energy-results"
         common.os = os
         facade = modules["compute"]
+        cli = importlib.import_module(f"{package_name}.{_PREFIX}cli")
 
         def record_qfim(**kwargs):
             state["qfim"] = kwargs["analysis_batch_size"]
@@ -358,7 +376,9 @@ class MeasuredUnitaryPackageImportTests(unittest.TestCase):
         with patch.dict(sys.modules, {
             f"{package_name}.{common_name}": common,
             common_name: None,
-        }), patch.object(package, common_name, common, create=True), patch.object(
+        }), patch.dict(os.environ, {"DPQC_DEVICE": "auto"}), patch.object(
+            cli.dpqc_backend, "initialize_jax_backend",
+        ), patch.object(package, common_name, common, create=True), patch.object(
             modules["qfim"], "run_random_qfim_analysis", side_effect=record_qfim,
         ), patch.object(
             modules["qfim"], "run_optimization_path_qfim_analysis",

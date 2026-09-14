@@ -2,6 +2,8 @@
 
 プロジェクトのルートから実行してください。学習済みデータがある場合、学習を再実行する必要はありません。
 
+計算プログラムは`--device auto/cpu/gpu`に対応しています。このPCでは既定の`auto`で学習はRTX 3080、QFIM・HessianはCPUを使用します。学習する例は`python src/dpqc/DPQC_overparam_reset_compute.py --stage vqe --h-param 0.1`です。解析だけなら`--stage vqe`を省略します。`--stage all`も学習GPU・解析CPUの順で実行し、`--device cpu/gpu`の明示指定は選択した全工程に適用します。[GPU実行・環境設定・速度比較](README_gpu.md)も参照してください。
+
 | ファイル | 実行する処理 |
 | --- | --- |
 | `DPQC_overparam_reset_vqe.py` | 変分量子回路の学習とパラメータ履歴の保存 |

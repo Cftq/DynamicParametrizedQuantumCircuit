@@ -37,23 +37,14 @@ if _common_dir_string not in sys.path:
     sys.path.insert(0, _common_dir_string)
 
 import config_overparam as cfg
+from dpqc_backend import (
+    add_device_argument,
+    configure_jax_backend,
+    initialize_jax_backend,
+    resolve_stage_device,
+)
+from dpqc_wsl import maybe_relaunch_in_wsl
 
-
-# Match the QFIM and VQE programs' deterministic double-precision CPU default
-# while allowing callers to select a different JAX platform before launch.
-os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
-
-import jax
-import jax.numpy as jnp
-import numpy as np
-
-
-jax.config.update("jax_enable_x64", True)
-
-REAL_DTYPE = jnp.float64
-COMPLEX_DTYPE = jnp.complex128
-NP_REAL_DTYPE = np.float64
-NP_INT_DTYPE = np.int64
 
 NUM_OBSERVED_QUBITS = 4
 NUM_KEPT_QUBITS = 5
@@ -84,6 +75,153 @@ DEFAULT_SEED_BASE = int(cfg.QFIM_SAMPLE_SEED_BASE)
 DEFAULT_HVP_CHUNK_SIZE = 8
 HESSIAN_METHOD = "chunked_forward_over_reverse_hvp"
 SCHEMA_VERSION = 2
+
+
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("value must be finite")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError("value must be positive")
+        return parsed
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be a positive integer"
+        ) from exc
+
+
+def _nonnegative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+        if parsed < 0:
+            raise ValueError("value must be nonnegative")
+        return parsed
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be a nonnegative integer"
+        ) from exc
+
+
+def _parse_layer_list(value: str) -> tuple[int, ...]:
+    tokens = value.split(",")
+    if not tokens or any(token.strip() == "" for token in tokens):
+        raise argparse.ArgumentTypeError(
+            "expected a nonempty comma-separated list of positive integers"
+        )
+    try:
+        parsed = tuple(int(token.strip()) for token in tokens)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "expected a comma-separated list of positive integers"
+        ) from exc
+    if any(layer <= 0 for layer in parsed):
+        raise argparse.ArgumentTypeError("layers must be positive")
+    if len(set(parsed)) != len(parsed):
+        raise argparse.ArgumentTypeError("layers must not be duplicated")
+    return parsed
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    add_device_argument(parser)
+    parser.add_argument(
+        "--output-family",
+        choices=SUPPORTED_OUTPUT_FAMILIES,
+        default=OUTPUT_FAMILY_DPQC,
+        help=(
+            "DPQC model/result family to analyze "
+            f"(default: {OUTPUT_FAMILY_DPQC})."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Output directory. By default, use ./figs/<output-family>/"
+            "h_<h>/numerical_results/hessian."
+        ),
+    )
+    parser.add_argument(
+        "--h-param",
+        type=_finite_float,
+        default=float(cfg.H_PARAM),
+        help="Hamiltonian parameter (default: config_overparam.H_PARAM).",
+    )
+    parser.add_argument(
+        "--layers",
+        type=_parse_layer_list,
+        default=None,
+        help=(
+            "Comma-separated positive layers (default: the DPQC QFIM layer "
+            "schedule from config_overparam.py)."
+        ),
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=_positive_int,
+        default=DEFAULT_NUM_SAMPLES,
+        help=(
+            "Random points per layer "
+            f"(default: NUM_QFIM_SAMPLES={DEFAULT_NUM_SAMPLES})."
+        ),
+    )
+    parser.add_argument(
+        "--seed-base",
+        type=_nonnegative_int,
+        default=DEFAULT_SEED_BASE,
+        help=(
+            "Base random seed; layer L uses PRNGKey(seed_base + L) "
+            f"(default: QFIM_SAMPLE_SEED_BASE={DEFAULT_SEED_BASE})."
+        ),
+    )
+    parser.add_argument(
+        "--hvp-chunk-size",
+        type=_positive_int,
+        default=DEFAULT_HVP_CHUNK_SIZE,
+        help=(
+            "Hessian-vector products per compiled batch "
+            f"(default: {DEFAULT_HVP_CHUNK_SIZE})."
+        ),
+    )
+    return parser
+
+
+# Parse the complete CLI before importing JAX, so --help stays lightweight and
+# Windows GPU requests can be relaunched in the configured WSL environment.
+if __name__ == "__main__":
+    _CLI_ARGS = build_parser().parse_args()
+    _CLI_ARGS.device = resolve_stage_device(_CLI_ARGS.device, "hessian")
+    _wsl_returncode = maybe_relaunch_in_wsl(
+        __file__, sys.argv[1:], _CLI_ARGS.device,
+    )
+    if _wsl_returncode is not None:
+        raise SystemExit(_wsl_returncode)
+    configure_jax_backend(_CLI_ARGS.device)
+else:
+    _CLI_ARGS = None
+    configure_jax_backend(resolve_stage_device(None, "hessian"))
+
+import jax
+
+initialize_jax_backend()
+
+import jax.numpy as jnp
+import numpy as np
+
+
+jax.config.update("jax_enable_x64", True)
+
+REAL_DTYPE = jnp.float64
+COMPLEX_DTYPE = jnp.complex128
+NP_REAL_DTYPE = np.float64
+NP_INT_DTYPE = np.int64
 
 
 def _validated_output_family(output_family: str) -> str:
@@ -507,48 +645,6 @@ def _require_nonnegative_int(value, name: str) -> int:
     return int(value)
 
 
-def _finite_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise argparse.ArgumentTypeError("value must be finite")
-    return parsed
-
-
-def _positive_int(value: str) -> int:
-    try:
-        return _require_positive_int(int(value), "value")
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise argparse.ArgumentTypeError(
-            "value must be a positive integer"
-        ) from exc
-
-
-def _nonnegative_int(value: str) -> int:
-    try:
-        return _require_nonnegative_int(int(value), "value")
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise argparse.ArgumentTypeError(
-            "value must be a nonnegative integer"
-        ) from exc
-
-
-def _parse_layer_list(value: str) -> tuple[int, ...]:
-    tokens = value.split(",")
-    if not tokens or any(token.strip() == "" for token in tokens):
-        raise argparse.ArgumentTypeError(
-            "expected a nonempty comma-separated list of positive integers"
-        )
-    try:
-        parsed = tuple(int(token.strip()) for token in tokens)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "expected a comma-separated list of positive integers"
-        ) from exc
-    if any(layer <= 0 for layer in parsed):
-        raise argparse.ArgumentTypeError("layers must be positive")
-    if len(set(parsed)) != len(parsed):
-        raise argparse.ArgumentTypeError("layers must not be duplicated")
-    return parsed
 
 
 def _default_layers() -> list[int]:
@@ -747,73 +843,17 @@ def run_hessian_analysis(
     return {"random_points": output_path}
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--output-family",
-        choices=SUPPORTED_OUTPUT_FAMILIES,
-        default=OUTPUT_FAMILY_DPQC,
-        help=(
-            "DPQC model/result family to analyze "
-            f"(default: {OUTPUT_FAMILY_DPQC})."
-        ),
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Output directory. By default, use ./figs/<output-family>/"
-            "h_<h>/numerical_results/hessian."
-        ),
-    )
-    parser.add_argument(
-        "--h-param",
-        type=_finite_float,
-        default=float(cfg.H_PARAM),
-        help="Hamiltonian parameter (default: config_overparam.H_PARAM).",
-    )
-    parser.add_argument(
-        "--layers",
-        type=_parse_layer_list,
-        default=None,
-        help=(
-            "Comma-separated positive layers (default: the DPQC QFIM layer "
-            "schedule from config_overparam.py)."
-        ),
-    )
-    parser.add_argument(
-        "--num-samples",
-        type=_positive_int,
-        default=DEFAULT_NUM_SAMPLES,
-        help=(
-            "Random points per layer "
-            f"(default: NUM_QFIM_SAMPLES={DEFAULT_NUM_SAMPLES})."
-        ),
-    )
-    parser.add_argument(
-        "--seed-base",
-        type=_nonnegative_int,
-        default=DEFAULT_SEED_BASE,
-        help=(
-            "Base random seed; layer L uses PRNGKey(seed_base + L) "
-            f"(default: QFIM_SAMPLE_SEED_BASE={DEFAULT_SEED_BASE})."
-        ),
-    )
-    parser.add_argument(
-        "--hvp-chunk-size",
-        type=_positive_int,
-        default=DEFAULT_HVP_CHUNK_SIZE,
-        help=(
-            "Hessian-vector products per compiled batch "
-            f"(default: {DEFAULT_HVP_CHUNK_SIZE})."
-        ),
-    )
-    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = (
+        _CLI_ARGS if argv is None and _CLI_ARGS is not None
+        else build_parser().parse_args(argv)
+    )
+    if _CLI_ARGS is None or argv is not None:
+        # Also validate callers that invoke main(argv) after importing us.
+        configure_jax_backend(resolve_stage_device(args.device, "hessian"))
+        initialize_jax_backend()
     run_hessian_analysis(
         output_dir=args.output_dir,
         h_param=args.h_param,

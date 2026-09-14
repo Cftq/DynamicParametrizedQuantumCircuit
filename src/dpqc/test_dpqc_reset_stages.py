@@ -33,13 +33,23 @@ _VISUALIZE = importlib.import_module("DPQC_overparam_reset_visualize")
 
 class ResetLauncherTests(unittest.TestCase):
     def setUp(self):
+        environment_patch = patch.dict(os.environ, {"DPQC_DEVICE": "auto"})
+        environment_patch.start()
+        self.addCleanup(environment_patch.stop)
         config_patch = patch.object(
             _LAUNCHER, "_default_config_values", return_value=(0.25, 17)
         )
         config_patch.start()
         self.addCleanup(config_patch.stop)
+        route_patch = patch.object(
+            _LAUNCHER.dpqc_wsl, "maybe_relaunch_in_wsl", return_value=None
+        )
+        route_patch.start()
+        self.addCleanup(route_patch.stop)
 
-    def assert_stage_commands(self, run, stages, *, h_param="0.1", batch="3"):
+    def assert_stage_commands(
+        self, run, stages, *, h_param="0.1", batch="3", device="auto"
+    ):
         self.assertEqual(run.call_count, len(stages))
         for invocation, stage in zip(run.call_args_list, stages):
             command = invocation.args[0]
@@ -48,10 +58,15 @@ class ResetLauncherTests(unittest.TestCase):
                 Path(command[1]),
                 _MODULE_DIR / f"DPQC_overparam_reset_{stage}.py",
             )
-            expected_options = ["--h-param", h_param]
+            stage_device = "cpu" if device == "auto" and stage != "vqe" else device
+            expected_options = ["--h-param", h_param, "--device", stage_device]
             if stage == "vqe":
                 expected_options.extend(["--vqe-batch-size", batch])
-            self.assertEqual(command[2:], expected_options)
+            self.assertEqual(len(command[2:]), len(expected_options))
+            self.assertEqual(
+                dict(zip(command[2::2], command[3::2])),
+                dict(zip(expected_options[::2], expected_options[1::2])),
+            )
             self.assertEqual(invocation.kwargs, {"check": False})
 
     def test_default_runs_analysis_without_training(self):
@@ -101,6 +116,79 @@ class ResetLauncherTests(unittest.TestCase):
                     self.assertEqual(result, status)
                     self.assert_stage_commands(run, stages[: failed_index + 1])
 
+    def test_gpu_selection_reaches_all_children_without_changing_stage_order(self):
+        with patch.object(
+            _LAUNCHER.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as run:
+            result = _LAUNCHER.main([
+                "--stage", "all", "--h-param", "0.1", "--vqe-batch-size", "3",
+                "--device", "gpu",
+            ])
+        self.assertEqual(result, 0)
+        self.assert_stage_commands(run, ("vqe", "qfim", "hessian"), device="gpu")
+
+    def test_gpu_analysis_default_does_not_add_training(self):
+        with patch.object(
+            _LAUNCHER.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as run:
+            result = _LAUNCHER.main(["--h-param", "0.1", "--device", "gpu"])
+        self.assertEqual(result, 0)
+        self.assert_stage_commands(run, ("qfim", "hessian"), device="gpu")
+
+    def test_cpu_selection_is_forwarded_to_selected_stage(self):
+        with patch.object(
+            _LAUNCHER.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as run:
+            result = _LAUNCHER.main([
+                "--stage", "qfim", "--h-param", "0.1", "--device", "cpu",
+            ])
+        self.assertEqual(result, 0)
+        self.assert_stage_commands(run, ("qfim",), device="cpu")
+
+    def test_environment_device_and_explicit_auto_override_reach_separate_stages(self):
+        for inherited in ("cpu", "gpu"):
+            for arguments, expected in (([], inherited), (["--device", "auto"], "auto")):
+                with self.subTest(inherited=inherited, arguments=arguments), patch.dict(
+                    os.environ, {"DPQC_DEVICE": inherited}
+                ), patch.object(
+                    _LAUNCHER.subprocess, "run",
+                    return_value=subprocess.CompletedProcess([], 0),
+                ) as run:
+                    result = _LAUNCHER.main([
+                        "--stage", "all", "--h-param", "0.1", "--vqe-batch-size", "3",
+                        *arguments,
+                    ])
+                    self.assertEqual(result, 0)
+                    self.assert_stage_commands(run, ("vqe", "qfim", "hessian"), device=expected)
+
+    def test_default_wsl_route_preserves_auto_before_per_stage_dispatch(self):
+        arguments = ["--stage", "all"]
+        with patch.object(_LAUNCHER.subprocess, "run") as run, patch.object(
+            _LAUNCHER.dpqc_wsl, "maybe_relaunch_in_wsl", return_value=0,
+        ) as route:
+            self.assertEqual(_LAUNCHER.main(arguments), 0)
+        self.assertEqual(route.call_args.args[1:], (arguments, "auto"))
+        self.assertEqual(route.call_args.kwargs, {"preserve_auto": True})
+        run.assert_not_called()
+
+    def test_wsl_route_preserves_status_without_local_launch(self):
+        arguments = ["--stage", "qfim", "--h-param", "0.1", "--device", "gpu"]
+        with patch.object(_LAUNCHER.subprocess, "run") as run, patch.object(
+            _LAUNCHER.dpqc_wsl, "maybe_relaunch_in_wsl", return_value=17
+        ) as route:
+            result = _LAUNCHER.main(arguments)
+        self.assertEqual(result, 17)
+        route.assert_called_once()
+        self.assertEqual(
+            Path(route.call_args.args[0]), _MODULE_DIR / "DPQC_overparam_reset_compute.py"
+        )
+        self.assertEqual(route.call_args.args[1:], (arguments, "gpu"))
+        self.assertEqual(route.call_args.kwargs, {"preserve_auto": True})
+        run.assert_not_called()
+
     def test_individual_stage_failure_is_propagated(self):
         for stage in ("vqe", "qfim", "hessian"):
             with self.subTest(stage=stage), patch.object(
@@ -117,6 +205,7 @@ class ResetLauncherTests(unittest.TestCase):
 
 class ResetNumericalStageIsolationTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"DPQC_DEVICE": "auto"}))
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         original_cwd = Path.cwd()
@@ -146,6 +235,7 @@ class ResetNumericalStageIsolationTests(unittest.TestCase):
             _QFIM.run_qfim(h_param=0.1)
         self.assertEqual(load.call_args.args, ("qfim",))
         self.assertEqual(load.call_args.kwargs["h_param"], 0.1)
+        self.assertEqual(load.call_args.kwargs["device"], "cpu")
         install.assert_called_once_with(module)
         module.run_qfim.assert_called_once_with(include_optimization_path=False)
         return module
@@ -201,18 +291,74 @@ class ResetNumericalStageIsolationTests(unittest.TestCase):
             _MODEL, "_load_base_stage_module", return_value=module
         ) as load, patch.object(_MODEL, "_install_reset_model") as install:
             _VQE.run_vqe(h_param=0.1, vqe_batch_size=3)
-        load.assert_called_once_with("vqe", h_param=0.1, vqe_batch_size=3)
+        load.assert_called_once_with("vqe", h_param=0.1, vqe_batch_size=3, device=None)
         install.assert_called_once_with(module)
         module.run_vqe.assert_called_once_with()
         self.assertTrue(self.metadata_path.is_file())
 
 
+    def test_explicit_device_is_forwarded_to_only_the_selected_base_stage(self):
+        for stage, entry in (("vqe", _VQE.run_vqe), ("qfim", _QFIM.run_qfim)):
+            module = self.make_stage(stage)
+            options = {"h_param": 0.1, "device": "gpu"}
+            if stage == "vqe":
+                options["vqe_batch_size"] = 3
+            with self.subTest(stage=stage), patch.object(
+                _MODEL, "_load_base_stage_module", return_value=module
+            ) as load, patch.object(_MODEL, "_install_reset_model"):
+                entry(**options)
+            load.assert_called_once_with(stage, **options)
+            if stage == "qfim":
+                module.run_qfim.assert_called_once_with(include_optimization_path=False)
+            else:
+                module.run_vqe.assert_called_once_with()
+
+
 class ResetHessianStageTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"DPQC_DEVICE": "auto"}))
+        route_patch = patch.object(
+            _HESSIAN, "maybe_relaunch_in_wsl", return_value=None
+        )
+        route_patch.start()
+        self.addCleanup(route_patch.stop)
+
+    def test_default_hessian_forwards_cpu_to_shared_stage(self):
+        with patch.object(
+            _HESSIAN.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as run:
+            self.assertEqual(_HESSIAN.main(["--h-param", "0.1"]), 0)
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--device") + 1], "cpu")
+        self.assertEqual(Path(command[1]), _MODULE_DIR / "DPQC_overparam_hessian.py")
+
+    def test_reset_analysis_resolves_default_and_overrides_before_wsl_routing(self):
+        for module in (_QFIM, _HESSIAN):
+            for inherited in ("auto", "gpu"):
+                for arguments, expected in (
+                    ([], "cpu" if inherited == "auto" else inherited),
+                    (["--device", "auto"], "cpu"),
+                    (["--device", "gpu"], "gpu"),
+                    (["--device", "cpu"], "cpu"),
+                ):
+                    with self.subTest(module=module.__name__, inherited=inherited, arguments=arguments), patch.dict(
+                        os.environ, {"DPQC_DEVICE": inherited}
+                    ), patch.object(
+                        module, "maybe_relaunch_in_wsl", return_value=27,
+                    ) as route, patch.object(_MODEL, "_load_base_stage_module") as load, patch.object(
+                        _HESSIAN.subprocess, "run",
+                    ) as run:
+                        self.assertEqual(module.main(arguments), 27)
+                    self.assertEqual(route.call_args.args[2], expected)
+                    load.assert_not_called()
+                    run.assert_not_called()
+
     def test_hessian_uses_reset_family_and_forwards_options_and_exit_status(self):
         options = [
             "--h-param", "0.1", "--layers", "1,4", "--num-samples", "2",
             "--seed-base", "17", "--hvp-chunk-size", "3",
-            "--output-dir", "an output directory",
+            "--output-dir", "an output directory", "--device", "gpu",
         ]
         with patch.object(
             _HESSIAN.subprocess,

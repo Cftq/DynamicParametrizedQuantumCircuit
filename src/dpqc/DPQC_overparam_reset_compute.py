@@ -40,6 +40,8 @@ if str(_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(_MODULE_DIR))
 
 import dpqc_reset_model as _model
+import dpqc_backend
+import dpqc_wsl
 
 # Preserve the documented circuit-builder API of this former combined file.
 MODEL_ID = _model.MODEL_ID
@@ -66,6 +68,7 @@ def _parse_cli_args(argv=None):
         "--vqe-batch-size", type=_model._positive_int, default=default_batch,
         help="Training batch size; used only with --stage vqe/all.",
     )
+    dpqc_backend.add_device_argument(parser)
     return parser.parse_args(argv)
 
 
@@ -75,6 +78,7 @@ def _launch_stage_subprocess(stage, args) -> int:
     command = [
         sys.executable, str(_MODULE_DIR / f"DPQC_overparam_reset_{stage}.py"),
         "--h-param", str(args.h_param),
+        "--device", dpqc_backend.resolve_stage_device(args.device, stage),
     ]
     if stage == "vqe":
         command.extend(("--vqe-batch-size", str(args.vqe_batch_size)))
@@ -84,6 +88,11 @@ def _launch_stage_subprocess(stage, args) -> int:
 
 def main(argv=None) -> int:
     args = _parse_cli_args(argv)
+    routed_status = dpqc_wsl.maybe_relaunch_in_wsl(
+        __file__, argv, args.device, preserve_auto=True,
+    )
+    if routed_status is not None:
+        return routed_status
     if args.stage == "all":
         stages = ("vqe", "qfim", "hessian")
     elif args.stage == "analysis":

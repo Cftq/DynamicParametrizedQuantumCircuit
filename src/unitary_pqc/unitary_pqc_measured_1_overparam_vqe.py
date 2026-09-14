@@ -11,14 +11,18 @@ from typing import Optional
 
 def main(argv=None) -> int:
     if __package__:
-        from .unitary_pqc_measured_1_overparam_cli import parse_stage_args
+        from . import unitary_pqc_measured_1_overparam_cli as _cli
     else:
-        from unitary_pqc_measured_1_overparam_cli import parse_stage_args
+        import unitary_pqc_measured_1_overparam_cli as _cli
 
-    args = parse_stage_args("vqe", argv)
+    args = _cli.parse_stage_args("vqe", argv)
+    routed_status = _cli.maybe_relaunch_stage_in_wsl("vqe", args, __file__, argv)
+    if routed_status is not None:
+        return routed_status
     archive_path = run_unitary_pqc_vqe_stage(
         h_param=args.h_param,
         vqe_batch_size=args.vqe_batch_size,
+        device=args.device,
     )
     print(f"Saved VQE numerical results to: {archive_path}")
     return 0
@@ -28,13 +32,15 @@ def run_unitary_pqc_vqe_stage(
     *,
     h_param: Optional[float] = None,
     vqe_batch_size: Optional[int] = None,
+    device: Optional[str] = None,
 ) -> str:
     """Train once and save the float64 archive consumed by later analyses."""
     if __package__:
-        from . import unitary_pqc_measured_1_overparam_common as _common
+        from .unitary_pqc_measured_1_overparam_cli import load_stage_common
     else:
-        import unitary_pqc_measured_1_overparam_common as _common
+        from unitary_pqc_measured_1_overparam_cli import load_stage_common
 
+    _common = load_stage_common("vqe", device)
     _common.configure_unitary_pqc_overparam(h_value=h_param)
     run_vqe_optimization(vqe_batch_size=vqe_batch_size)
     return _common.os.path.join(
