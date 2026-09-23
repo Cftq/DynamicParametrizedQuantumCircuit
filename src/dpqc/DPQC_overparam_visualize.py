@@ -10,6 +10,9 @@ visualization loads those saved results without recomputing them; older
 VQE/QFIM results can still be plotted when no Hessian archive is present.
 Layer counts, trial counts, and the VQE success tolerance come from the
 saved results, so changing the compute configuration does not relabel them.
+Energy histories also produce ``energy_error_history_logstat.pdf`` using the
+same lognormal moment conversion and shaded band as Unitary-PQC, at every
+saved iteration. Both DPQC and reset-DPQC use this shared plotting path.
 QFIM trace figures sum only eigenvalues at or above the configured QFIM rank
 threshold (1e-12 by default).  The same active spectrum is normalized to
 compute its Shannon entropy in nats directly from the saved eigenvalues.
@@ -38,6 +41,19 @@ entropy include the cutoff. Entropy normalizes the active absolute spectrum
 in nats. The signed trace uses the full spectrum. Statistics and definitions
 are saved in hessian_figures/hessian_statistics_random_points.npz.
 
+Gap-normalized final energy errors and success probabilities at epsilon =
+1e-3 through 1e-10 are also derived from saved VQE histories. The normalized
+error uses a beeswarm plot; normalized success rates are saved separately.
+Use ``--gap-normalized-only`` to render these figures without loading
+QFIM/Hessian archives or a quantum runtime. The gap is measured above the
+entire (possibly degenerate) ground-state subspace.
+
+Random-point QFIM spectra also produce mean log det(I + kappa F) versus layer
+count, with kappa=1 by default. Use ``--qfim-logdet-only`` for this saved-spectrum
+analysis alone and ``--qfim-logdet-kappa`` to select another positive kappa.
+Each point's full spectrum is summed in natural logarithms before averaging;
+the rank threshold is not applied. No QFIM or training calculation is run.
+
 Example::
 
     python src/dpqc/DPQC_overparam_compute.py --h-param 0.1
@@ -50,7 +66,6 @@ Example::
 
 
 import argparse
-import json
 import math
 import os
 import sys
@@ -72,6 +87,13 @@ for _path in (_MODULE_DIR, _COMMON_DIR):
 
 
 import config_overparam as cfg
+
+
+# Both DPQC entry points use the same eight cutoffs for raw and gap-normalized
+# success figures. Keep this lightweight definition available to --gap-normalized-only.
+SUCCESS_PROBABILITY_FIGURE_THRESHOLDS = (
+    1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10,
+)
 
 
 def _finite_float(value: str) -> float:
@@ -186,6 +208,23 @@ def _parse_cli_args(argv=None):
     )
     hessian_mode = parser.add_mutually_exclusive_group()
     hessian_mode.add_argument(
+        "--qfim-logdet-only",
+        action="store_true",
+        help=(
+            "Plot mean log det(I + kappa F) versus layers using saved random-point "
+            "QFIM spectra only; no VQE, Hessian, or quantum runtime is needed."
+        ),
+    )
+    hessian_mode.add_argument(
+        "--gap-normalized-only",
+        action="store_true",
+        help=(
+            "Plot final (E-E0)/gap and strict success probabilities at "
+            "1e-3 through 1e-10 from saved VQE histories only; "
+            "no training, QFIM, Hessian, or quantum runtime is needed."
+        ),
+    )
+    hessian_mode.add_argument(
         "--hessian-only",
         action="store_true",
         help=(
@@ -198,6 +237,13 @@ def _parse_cli_args(argv=None):
         "--with-hessian",
         action="store_true",
         help="Run the Hessian workflow after the existing energy/QFIM figures.",
+    )
+    parser.add_argument(
+        "--qfim-logdet-kappa",
+        type=_positive_float,
+        default=1.0,
+        metavar="KAPPA",
+        help="Positive kappa for the saved-QFIM log-determinant metric (default: 1).",
     )
     parser.add_argument(
         "--reuse-hessian-results",
@@ -270,6 +316,7 @@ else:
         skip_optimization_path_qfim=False,
         skip_qfim_eigs_by_index_layers=False,
         skip_qfim_trace_figures=False,
+        qfim_logdet_kappa=1.0,
     )
 
 h_param = float(_CLI_ARGS.h_param)
@@ -301,14 +348,19 @@ def _hessian_h_tag(value: float) -> str:
 
 def _resolve_hessian_paths(args):
     """Resolve the random-point Hessian results and figure output dirs."""
-    h_tags = list(
-        dict.fromkeys((str(float(args.h_param)), _hessian_h_tag(args.h_param)))
-    )
-    h_roots = [
-        Path.cwd() / "figs" / str(args.output_family) / f"h_{tag}"
-        for tag in h_tags
-    ]
-    h_root = next((path for path in h_roots if path.is_dir()), h_roots[0])
+    if args.output_family == "dpqc_reset":
+        from dpqc_reset_model import reset_output_dir
+
+        h_root = reset_output_dir(args.h_param)
+    else:
+        h_tags = list(
+            dict.fromkeys((str(float(args.h_param)), _hessian_h_tag(args.h_param)))
+        )
+        h_roots = [
+            Path.cwd() / "figs" / str(args.output_family) / f"h_{tag}"
+            for tag in h_tags
+        ]
+        h_root = next((path for path in h_roots if path.is_dir()), h_roots[0])
     results_dir = (
         h_root / "numerical_results" / "hessian"
         if args.hessian_results_dir is None
@@ -473,6 +525,200 @@ def run_hessian_workflow(args):
     )
 
 
+def _load_gap_normalized_vqe_archive(archive_path, *, expected_h_param):
+    """Read only energy history fields, without loading saved parameter arrays."""
+    import numpy as np
+
+    archive_path = Path(archive_path)
+    if not archive_path.is_file():
+        raise FileNotFoundError(f"Saved VQE energy histories were not found: {archive_path}")
+
+    def scalar(archive, key, *, integer=False):
+        value = np.asarray(archive[key])
+        if (
+            value.shape != () or not np.issubdtype(value.dtype, np.number)
+            or np.iscomplexobj(value) or not np.isfinite(value)
+        ):
+            raise ValueError(f"VQE {key} must be one finite real scalar.")
+        if integer and (not np.issubdtype(value.dtype, np.integer) or value <= 0):
+            raise ValueError(f"VQE {key} must be a positive integer.")
+        return value.item()
+
+    with np.load(archive_path, allow_pickle=False) as archive:
+        archived_h = scalar(archive, "h_param")
+        if archived_h != float(expected_h_param):
+            raise ValueError(f"VQE h_param mismatch: {archived_h} != {expected_h_param}.")
+        saved_ground = scalar(archive, "smallest_eigval")
+        runs, steps = scalar(archive, "num_runs", integer=True), scalar(archive, "steps", integer=True)
+        layers = np.asarray(archive["vqe_layers"])
+        if (
+            layers.ndim != 1 or layers.size == 0
+            or not np.issubdtype(layers.dtype, np.integer)
+            or np.any(layers <= 0) or np.unique(layers).size != layers.size
+        ):
+            raise ValueError("VQE vqe_layers must contain unique positive integers.")
+        final_energies = {}
+        history_length = None
+        for layer in layers:
+            key = f"L{int(layer)}_energy_traces"
+            values = np.asarray(archive[key])
+            if (
+                values.ndim != 2 or values.shape[0] != runs
+                or values.shape[1] not in (steps, steps + 1)
+                or not np.issubdtype(values.dtype, np.number) or np.iscomplexobj(values)
+            ):
+                raise ValueError(
+                    f"VQE {key} must be a real array with {runs} runs and "
+                    f"{steps} or {steps + 1} stored energies per run."
+                )
+            if history_length is not None and values.shape[1] != history_length:
+                raise ValueError("VQE energy history lengths must match across layers.")
+            history_length = values.shape[1]
+            final_energies[int(layer)] = np.array(values[:, -1], dtype=np.float64)
+        optimizer = np.asarray(archive["optimizer_name"]) if "optimizer_name" in archive else np.asarray("adam")
+        if optimizer.shape != () or optimizer.dtype.kind not in "US":
+            raise ValueError("VQE optimizer_name must be a scalar string.")
+    return final_energies, saved_ground, {
+        "source_archive": str(archive_path.resolve()),
+        "source_energy_definition": "last saved energy-trace sample per run",
+        "optimizer_name": str(optimizer.item()),
+        "optimizer_steps": steps,
+        "num_stored_energy_samples": history_length,
+    }
+
+
+def run_qfim_logdet_workflow(args):
+    """Average pointwise log determinants from saved random-point spectra only."""
+    import numpy as np
+    from qfim_logdet import (
+        compute_qfim_logdet,
+        load_random_qfim_spectra,
+        save_qfim_logdet_outputs,
+    )
+
+    selected_h = float(args.h_param)
+    family = str(args.output_family)
+    if family == "dpqc_reset":
+        from dpqc_reset_model import (
+            UNITARY_PARAMS_PER_LAYER,
+            _validate_model_metadata,
+            reset_output_dir,
+        )
+
+        h_root = reset_output_dir(selected_h)
+        _validate_model_metadata(h_root, selected_h, require_vqe_archive=False)
+        parameters_per_layer = UNITARY_PARAMS_PER_LAYER
+    elif family == "dpqc":
+        h_root = Path.cwd() / "figs" / family / f"h_{selected_h}"
+        parameters_per_layer = 14
+    else:
+        raise ValueError(f"Unsupported output family: {family!r}.")
+
+    results_dir = h_root / "numerical_results" / "qfim"
+    figures_dir = h_root / "figures" / "qfim" / "logdet"
+    prepared = {}
+    # Validate both saved subsystems before creating either output.
+    for keep_key, keep_wires in (("keep0123", (0, 1, 2, 3)), ("keep01234", (0, 1, 2, 3, 4))):
+        loaded = load_random_qfim_spectra(
+            results_dir / f"qfim_random_points_{keep_key}.npz",
+            expected_h_param=selected_h,
+            parameters_per_layer=parameters_per_layer,
+        )
+        metadata = dict(loaded["metadata"])
+        if "keep_key" in metadata and str(metadata["keep_key"]) != keep_key:
+            raise ValueError(f"Saved QFIM keep_key does not match {keep_key}.")
+        if "keep_wires" in metadata and not np.array_equal(metadata["keep_wires"], keep_wires):
+            raise ValueError(f"Saved QFIM keep_wires does not match {keep_wires}.")
+        metadata.update(
+            output_family=family,
+            keep_key=keep_key,
+            keep_wires=np.asarray(keep_wires, dtype=np.int64),
+        )
+        if "sampling_distribution" not in metadata:
+            metadata.update(
+                sampling_distribution="independent_uniform[-pi,pi)",
+                sampling_distribution_source="DPQC_overparam_qfim.py random-point sampler",
+            )
+        prepared[keep_key] = (
+            compute_qfim_logdet(
+                loaded["eigenvalues_by_layer"],
+                kappa=getattr(args, "qfim_logdet_kappa", 1.0),
+            ),
+            loaded["source_path"],
+            metadata,
+        )
+
+    outputs = {}
+    for keep_key, (result, source_path, metadata) in prepared.items():
+        outputs[keep_key] = save_qfim_logdet_outputs(
+            result,
+            figures_dir,
+            keep_key=keep_key,
+            title=f"{'Reset DPQC' if family == 'dpqc_reset' else 'DPQC'}: {keep_key}",
+            source_path=source_path,
+            metadata=metadata,
+        )
+    print(f"Saved random-point QFIM log-determinant figures to: {figures_dir}")
+    return outputs
+
+
+def run_gap_normalized_energy_workflow(args):
+    """Generate new optimization diagnostics using saved VQE energies only."""
+    import numpy as np
+    from gap_normalized_energy import (
+        save_gap_normalized_energy_outputs,
+        spectral_gap_from_hamiltonian,
+    )
+    from hessian_curvature import hamiltonian_matrix_numpy
+
+    selected_h = float(args.h_param)
+    family = str(args.output_family)
+    if family == "dpqc_reset":
+        from dpqc_reset_model import reset_output_dir, _validate_model_metadata
+
+        h_root = reset_output_dir(selected_h)
+        _validate_model_metadata(h_root, selected_h, require_vqe_archive=True)
+    elif family == "dpqc":
+        h_root = Path.cwd() / "figs" / family / f"h_{selected_h}"
+    else:
+        raise ValueError(f"Unsupported output family: {family!r}.")
+    energy_dir = h_root / "numerical_results" / "energy"
+    archive_path = energy_dir / "vqe_optimization_histories.npz"
+    energies, saved_ground, metadata = _load_gap_normalized_vqe_archive(
+        archive_path, expected_h_param=selected_h,
+    )
+    matrix = hamiltonian_matrix_numpy(selected_h)
+    spectrum = spectral_gap_from_hamiltonian(matrix)
+    ground_tolerance = 128 * np.finfo(np.float64).eps * max(1.0, np.linalg.norm(matrix, ord=2))
+    if abs(saved_ground - spectrum["ground_energy"]) > ground_tolerance:
+        raise ValueError("Saved VQE ground energy does not match the selected Hamiltonian.")
+    metadata.update(output_family=family, saved_ground_energy=saved_ground)
+    result = save_gap_normalized_energy_outputs(
+        energies,
+        h_param=selected_h,
+        hamiltonian_matrix=matrix,
+        figures_dir=h_root / "energy_figures",
+        statistics_outpath=energy_dir / "gap_normalized_energy_statistics.npz",
+        thresholds=SUCCESS_PROBABILITY_FIGURE_THRESHOLDS,
+        metadata=metadata,
+    )
+    print(f"Spectral gap above the ground subspace: {result['spectral_gap']:.12g}")
+    print(f"Saved gap-normalized energy figures to: {h_root / 'energy_figures'}")
+    return result
+
+
+if __name__ == "__main__" and _CLI_ARGS.qfim_logdet_only:
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    run_qfim_logdet_workflow(_CLI_ARGS)
+    raise SystemExit(0)
+
+
+if __name__ == "__main__" and _CLI_ARGS.gap_normalized_only:
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    run_gap_normalized_energy_workflow(_CLI_ARGS)
+    raise SystemExit(0)
+
+
 if __name__ == "__main__" and _CLI_ARGS.hessian_only:
     run_hessian_workflow(_CLI_ARGS)
     raise SystemExit(0)
@@ -493,6 +739,7 @@ from matplotlib.patches import Patch
 from convergence_time import generate_convergence_time_outputs
 from plot import (
     new_fig_ax,
+    plot_energy_error_history_logstat,
     save_fig,
     style_axes_for_prx,
 )
@@ -600,9 +847,16 @@ sample_iters = sample_iters[
 sample_iters = np.unique(sample_iters).astype(NP_INT_DTYPE)
 sample_iter_set = set(int(t) for t in sample_iters.tolist())
 
-NUM_BLOCKS = 4
-PARAMS_PER_BLOCK = 3
-EXTRA_PARAMS_PER_LAYER = 2
+if output_family == "dpqc_reset":
+    import dpqc_reset_model as reset_model
+
+    NUM_BLOCKS = reset_model.NUM_BLOCKS
+    PARAMS_PER_BLOCK = reset_model.PARAMS_PER_BLOCK
+    EXTRA_PARAMS_PER_LAYER = reset_model.NUM_TRAINABLE_FEED_FORWARD_PARAMS
+else:
+    NUM_BLOCKS = 4
+    PARAMS_PER_BLOCK = 3
+    EXTRA_PARAMS_PER_LAYER = 2
 n_param_per_layer = NUM_BLOCKS * PARAMS_PER_BLOCK + EXTRA_PARAMS_PER_LAYER
 
 TOP, LEFT, RIGHT, BOTTOM, ANC_CENTER, FRESH_ANCILLA = 0, 1, 2, 3, 4, 5
@@ -955,12 +1209,6 @@ def plot_single_line_by_layer(
     save_fig(fig, ax, outpath, outside_legend=False)
 
 
-SUCCESS_PROBABILITY_FIGURE_THRESHOLDS = np.asarray(
-    cfg.SUCCESS_PROBABILITY_FIGURE_THRESHOLDS,
-    dtype=NP_REAL_DTYPE,
-)
-
-
 def _warn_skip_success_probability_figure(message: str) -> None:
     warnings.warn(
         "Skipping multiple-accuracy success-probability figure: "
@@ -970,10 +1218,10 @@ def _warn_skip_success_probability_figure(message: str) -> None:
     )
 
 
-def _success_probability_result_for_figure(result: dict) -> dict:
+def _success_probability_result_for_figure(result: dict, *, thresholds=None) -> dict:
     """Recompute plot summaries at the figure-specific thresholds."""
     thresholds = np.asarray(
-        SUCCESS_PROBABILITY_FIGURE_THRESHOLDS,
+        SUCCESS_PROBABILITY_FIGURE_THRESHOLDS if thresholds is None else thresholds,
         dtype=NP_REAL_DTYPE,
     )
     if thresholds.ndim != 1 or thresholds.size == 0:
@@ -1098,8 +1346,13 @@ def _success_probability_result_for_figure(result: dict) -> dict:
     return figure_result
 
 
-def _validated_success_probability_data(result: dict):
+def _validated_success_probability_data(result: dict, *, expected_thresholds=None):
     """Validate and normalize the dedicated multiple-accuracy archive."""
+    expected_thresholds = np.asarray(
+        SUCCESS_PROBABILITY_FIGURE_THRESHOLDS
+        if expected_thresholds is None else expected_thresholds,
+        dtype=NP_REAL_DTYPE,
+    )
     required_keys = {
         "layers",
         "num_trials",
@@ -1157,13 +1410,13 @@ def _validated_success_probability_data(result: dict):
     if thresholds.ndim != 1:
         raise ValueError(f"'{threshold_key}' must be one-dimensional")
     if (
-        thresholds.size != SUCCESS_PROBABILITY_FIGURE_THRESHOLDS.size
+        thresholds.size != expected_thresholds.size
         or not np.all(np.isfinite(thresholds))
         or np.any(thresholds <= 0.0)
     ):
         raise ValueError(
             f"'{threshold_key}' must contain the "
-            f"{SUCCESS_PROBABILITY_FIGURE_THRESHOLDS.size} configured positive "
+            f"{expected_thresholds.size} configured positive "
             "finite accuracy levels"
         )
 
@@ -1192,7 +1445,7 @@ def _validated_success_probability_data(result: dict):
             )
 
     threshold_order = []
-    for expected_threshold in SUCCESS_PROBABILITY_FIGURE_THRESHOLDS:
+    for expected_threshold in expected_thresholds:
         matching = np.flatnonzero(
             np.isclose(
                 thresholds,
@@ -1485,11 +1738,30 @@ def render_success_probability_multiple_tolerances_figure(
         outpath=outpath,
     )
     if delta_one_outpath is not None:
+        # The separate delta=1 figure keeps its original meaning even though
+        # delta=1 is separate from the multiple-tolerance curves.
+        try:
+            delta_one_result = _success_probability_result_for_figure(
+                result, thresholds=(1.0,),
+            )
+            (
+                delta_layers, delta_thresholds, delta_probabilities,
+                _delta_counts, delta_num_trials,
+            ) = _validated_success_probability_data(
+                delta_one_result, expected_thresholds=(1.0,),
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            warnings.warn(
+                "Skipping the separate delta=1 success-probability figure: "
+                f"saved final energies are unavailable or invalid: {exc}",
+                RuntimeWarning, stacklevel=2,
+            )
+            return True
         plot_success_probability_multiple_tolerances(
-            layers,
-            thresholds,
-            success_probabilities,
-            num_trials=num_trials,
+            delta_layers,
+            delta_thresholds,
+            delta_probabilities,
+            num_trials=delta_num_trials,
             outpath=delta_one_outpath,
             only_threshold=1.0,
         )
@@ -1602,48 +1874,16 @@ if not qfim_layer_list:
         "DPQC_QFIM_DENSE_UNTIL_LAYER, and DPQC_QFIM_SPARSE_STEP."
     )
 
-save_dir = f"./figs/{output_family}/h_{h_param}"
+save_dir = (
+    str(reset_model.reset_output_dir(h_param))
+    if output_family == "dpqc_reset"
+    else f"./figs/{output_family}/h_{h_param}"
+)
 
 if output_family == "dpqc_reset":
-    reset_metadata_path = os.path.join(
-        save_dir,
-        "reset_model_metadata.json",
-    )
-    if not os.path.isfile(reset_metadata_path):
-        raise FileNotFoundError(
-            "Reset-DPQC metadata was not found: "
-            f"{reset_metadata_path}"
-        )
-    with open(reset_metadata_path, "r", encoding="utf-8") as metadata_file:
-        reset_metadata = json.load(metadata_file)
-    if reset_metadata.get("model_id") != "dpqc_reset_fixed_rx_pi":
-        raise ValueError(
-            "Reset-DPQC metadata has an incompatible model_id: "
-            f"{reset_metadata.get('model_id')!r}."
-        )
-    metadata_h_param = float(reset_metadata.get("h_param", math.nan))
-    if not math.isclose(
-        metadata_h_param,
-        h_param,
-        rel_tol=0.0,
-        abs_tol=1e-15,
-    ):
-        raise ValueError(
-            "Reset-DPQC metadata h_param does not match --h-param: "
-            f"{metadata_h_param} != {h_param}."
-        )
-    fixed_rx_angle = float(
-        reset_metadata.get("fixed_feed_forward_rx_angle", math.nan)
-    )
-    if not math.isclose(
-        fixed_rx_angle,
-        math.pi,
-        rel_tol=0.0,
-        abs_tol=1e-15,
-    ):
-        raise ValueError(
-            "Reset-DPQC metadata does not specify fixed Rx(pi)."
-        )
+    from dpqc_reset_model import _validate_model_metadata
+
+    _validate_model_metadata(Path(save_dir), h_param)
 
 energy_fig_dir = os.path.join(save_dir, "energy_figures")
 qfim_fig_dir = os.path.join(save_dir, "qfim_figures")
@@ -1742,7 +1982,7 @@ print(f"Loaded VQE optimizer: {vqe_optimizer_label}")
 
 # Create output directories only after confirming that the selected h has a
 # valid VQE archive.  Raw numerical archives are treated as inputs; the only
-# numerical file written below is the derived convergence-time statistics.
+# numerical files written below contain derived plotting statistics only.
 _output_dirs = (
     save_dir,
     energy_fig_dir,
@@ -1824,6 +2064,8 @@ final_stats = {
     "std_energy": np.asarray(vqe_optimization_results["final_stats_std_energy"], dtype=NP_REAL_DTYPE),
 }
 
+gap_normalized_energy_statistics = run_gap_normalized_energy_workflow(_CLI_ARGS)
+
 convergence_time_statistics = generate_convergence_time_outputs(
     energy_traces_by_layer,
     vqe_layer_list,
@@ -1886,6 +2128,18 @@ plot_history_violin(
     ),
     outpath=os.path.join(energy_fig_dir, "grad_norm_history.pdf"),
     transform=lambda x: x + eps,
+)
+
+plot_energy_error_history_logstat(
+    energy_traces_by_layer,
+    vqe_layer_list,
+    ground_energy=smallest_eigval,
+    cmap=cmap,
+    title=(
+        rf"Error (log-mean $\pm$ log-std over {num_runs} runs)"
+        f"{vqe_optimizer_title_suffix}"
+    ),
+    outpath=os.path.join(energy_fig_dir, "energy_error_history_logstat.pdf"),
 )
 
 final_energy_error_by_layer = [
@@ -2294,6 +2548,8 @@ def save_qfim_eigs_by_index_colored_by_layer(
 
     save_fig(fig, ax, outpath, outside_legend=True)
 
+
+qfim_logdet_outputs = run_qfim_logdet_workflow(_CLI_ARGS)
 
 qfim_random_points_result_path = os.path.join(
     qfim_results_dir,

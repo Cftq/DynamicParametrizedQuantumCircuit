@@ -127,7 +127,7 @@ class DPQCQFIMChunkingTests(unittest.TestCase):
 
         layers = 2
         n_params = module.n_param_per_layer * layers
-        self.assertEqual(n_params, 24 if reset else 28)
+        self.assertEqual(n_params, 120 if reset else 28)
         theta = jnp.asarray(
             np.random.default_rng(1941 + int(reset)).uniform(
                 -1.3, 1.3, size=n_params

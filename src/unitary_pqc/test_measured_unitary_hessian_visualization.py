@@ -38,12 +38,12 @@ def _archive_fixture(*, include_matrices=True):
         "hessian_condition_number_definition": np.asarray(
             "max(abs(active eigenvalue)) / min(abs(active eigenvalue)); NaN if rank == 0"
         ),
-        "num_params_per_layer": np.asarray(14),
+        "num_params_per_layer": np.asarray(62),
         "analysis_batch_size": np.asarray(8),
         "hessian_matrix_definition": np.asarray("d2 E(theta) / dtheta_i dtheta_j"),
     }
     for layer in (3, 1):
-        dimension = 14 * layer
+        dimension = 62 * layer
         data[f"L{layer}_rank"] = np.asarray([2, 2])
         data[f"L{layer}_condition_number"] = np.asarray([1.0, 2.0])
         if include_matrices:

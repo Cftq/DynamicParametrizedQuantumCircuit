@@ -5,8 +5,12 @@
 The default ``analysis`` stage runs only random-point QFIM and Hessian
 calculations. It never runs VQE training and needs no trained parameters.
 Training lives in DPQC_overparam_reset_vqe.py; circuit/model definitions live
-in dpqc_reset_model.py. Existing archive names, the 12*L parameter convention,
-and the fixed Rx(pi) reset model are unchanged.
+in dpqc_reset_model.py. Each pair block applies independent RY-RZ-RY rotations
+on both wires, then RXX-RYY-RZZ, then independent RY-RZ-RY rotations on both
+wires (15 angles per block, 60 per layer). The fixed Rx(pi) reset is unchanged.
+Archives from the former 12*L circuit are incompatible with this model.
+Current results use figs/dpqc_reset/u3_cartan/h_<h>/; the former model's
+figs/dpqc_reset/h_<h>/ results are kept separately.
 
 Each stage has its own entry point:
 

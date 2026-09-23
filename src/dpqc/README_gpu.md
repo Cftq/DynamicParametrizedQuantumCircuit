@@ -64,7 +64,7 @@ GPU上の学習では、RzとRxxによる密度行列の更新に専用の演算
 
 `--vqe-batch-size`は同時に計算する試行数です。指定値が総試行数`NUM_RUNS`より大きい場合は、実効バッチサイズを`NUM_RUNS`に制限して余分な試行を計算しません。末尾の不完全なバッチには従来どおりパディングを行い、有効な試行だけ保存します。学習アーカイブには`vqe_batch_size`と`requested_vqe_batch_size`を追加して記録します。GPUメモリは、利用者が別のJAX設定を指定していなければ必要に応じて確保します。
 
-WSLは`/mnt/c/`を通じて同じプロジェクトを使用します。保存先は従来どおり`figs/dpqc/h_<h>/numerical_results/`と`figs/dpqc_reset/h_<h>/numerical_results/`です。保存済み結果の描画に学習の再実行は必要ありません。
+WSLは`/mnt/c/`を通じて同じプロジェクトを使用します。保存先は`figs/dpqc/h_<h>/numerical_results/`と、修正版reset回路専用の`figs/dpqc_reset/u3_cartan/h_<h>/numerical_results/`です。旧reset回路の`figs/dpqc_reset/h_<h>/`はそのまま保持します。同じモデルの保存済み結果を描画する際に、学習の再実行は必要ありません。
 
 ## 深い回路のQFIM計算
 

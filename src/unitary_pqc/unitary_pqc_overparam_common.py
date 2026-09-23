@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
-"""Shared circuit, state, archive I/O and plotting helpers for outcome-1 PQC.
+"""Shared circuit, state, archive I/O and plotting helpers for Cartan PQC.
 
 Training and matrix-analysis implementations live in separate stage modules.
 Importing this module never starts training or any numerical analysis.
@@ -27,11 +27,10 @@ for _path in (_MODULE_DIR, _COMMON_DIR):
 
 
 import config_overparam as cfg
-import unitary_pqc_measured_1_model as circuit_model
+import unitary_pqc_model as circuit_model
 
-from unitary_pqc_measured_1_model import (
+from unitary_pqc_model import (
     ANSATZ_NAME,
-    FEED_FORWARD_PARAMS_PER_LAYER,
     LAYER_PAIRS,
     NUM_BLOCKS,
     OUTPUT_VARIANT,
@@ -137,7 +136,6 @@ COMPLEX_DTYPE = jnp.complex128
 NP_REAL_DTYPE = np.float64
 NP_COMPLEX_DTYPE = np.complex128
 NP_INT_DTYPE = np.int64
-MEASUREMENT_OUTCOME = 1
 
 
 def build_layer_list(max_layer: int, dense_until_layer: int, sparse_step: int):
@@ -149,7 +147,7 @@ def build_layer_list(max_layer: int, dense_until_layer: int, sparse_step: int):
 
 
 def _unitary_pqc_save_dir(h_value: float) -> str:
-    """Return this outcome branch's output directory independent of CWD."""
+    """Return the 60-angle Cartan output directory independent of CWD."""
     return str(
         _PROJECT_ROOT
         / "figs"
@@ -329,6 +327,11 @@ def _ensure_unitary_result_dirs() -> None:
 
 
 def save_npz_result(outpath: str, **arrays) -> None:
+    """Save a numerical archive tagged with the current Cartan model."""
+    arrays.setdefault("ansatz", np.asarray(ANSATZ_NAME))
+    arrays.setdefault("num_params_per_layer", np.asarray(num_params_per_layer, dtype=NP_INT_DTYPE))
+    arrays.setdefault("output_variant", np.asarray(OUTPUT_VARIANT))
+    arrays.setdefault("h_param", np.asarray(h_param, dtype=NP_REAL_DTYPE))
     outdir = os.path.dirname(outpath)
     if outdir:
         os.makedirs(outdir, exist_ok=True)
@@ -542,10 +545,6 @@ def save_qfim_random_point_results_by_keep(
         arrays = {
             "schema_version": np.asarray(1, dtype=NP_INT_DTYPE),
             "ansatz": np.asarray(ANSATZ_NAME),
-            "measurement_outcome": np.asarray(
-                MEASUREMENT_OUTCOME,
-                dtype=NP_INT_DTYPE,
-            ),
             "analysis_kind": np.asarray("random_points"),
             "h_param": np.asarray(h_param, dtype=NP_REAL_DTYPE),
             "num_total_qubits": np.asarray(
@@ -672,10 +671,6 @@ def save_qfim_optimization_path_results_by_keep(
         metadata = {
             "schema_version": np.asarray(1, dtype=NP_INT_DTYPE),
             "ansatz": np.asarray(ANSATZ_NAME),
-            "measurement_outcome": np.asarray(
-                MEASUREMENT_OUTCOME,
-                dtype=NP_INT_DTYPE,
-            ),
             "analysis_kind": np.asarray("optimization_path"),
             "h_param": np.asarray(h_param, dtype=NP_REAL_DTYPE),
             "num_total_qubits": np.asarray(
@@ -775,9 +770,8 @@ def create_unitary_pqc(theta: jnp.ndarray, num_layers: int, num_qubits: int):
     wires, Rxx/Ryy/Rzz, then another independent Ry-Rz-Ry triple on
     each wire (15 parameters per block).
 
-    For feed-forward measurement outcome 1, every layer ends with
-    Rz(varphi), Rx(2 * phi), Rz(varphi) on the center ancilla q4.
-    The two feed-forward angles follow the 60 block parameters in each layer.
+    The four Cartan blocks use 60 parameters per layer. There are no
+    additional ancilla rotations, measurements, resets, or feed-forward gates.
     """
     num_qubits_int = int(num_qubits)
     if num_qubits_int != num_total_qubits:
@@ -813,7 +807,7 @@ def create_unitary_pqc(theta: jnp.ndarray, num_layers: int, num_qubits: int):
     except (ImportError, OSError, MemoryError) as exc:
         raise RuntimeError(
             "Optional TensorCircuit circuit construction is unavailable. "
-            "Use unitary_pqc_measured_1_overparam_draw_circuits.py for "
+            "Use unitary_pqc_overparam_draw_circuits.py for "
             "circuit drawings; numerical computation does not require "
             "TensorCircuit."
         ) from exc
@@ -839,10 +833,6 @@ def create_unitary_pqc(theta: jnp.ndarray, num_layers: int, num_qubits: int):
                 qc.ry(int(wire), theta=p[start])
                 qc.rz(int(wire), theta=p[start + 1])
                 qc.ry(int(wire), theta=p[start + 2])
-        varphi, phi = grab(FEED_FORWARD_PARAMS_PER_LAYER)
-        qc.rz(ANCILLA_QUBIT, theta=varphi)
-        qc.rx(ANCILLA_QUBIT, theta=2.0 * phi)
-        qc.rz(ANCILLA_QUBIT, theta=varphi)
 
     return qc
 
@@ -1031,14 +1021,14 @@ def statevector_sequential_unitary_pqc(
     theta: jnp.ndarray,
     num_layers: int,
 ) -> jnp.ndarray:
-    """Propagate the outcome-1 circuit as a 32-component statevector."""
+    """Propagate the Cartan circuit as a 32-component statevector."""
     num_layers = int(num_layers)
     theta = jnp.asarray(theta, dtype=REAL_DTYPE)
     theta_layers = jnp.reshape(theta, (num_layers, num_params_per_layer))
 
     def one_layer(statevector: jnp.ndarray, layer_theta: jnp.ndarray):
         blocks = jnp.reshape(
-            layer_theta[:-FEED_FORWARD_PARAMS_PER_LAYER],
+            layer_theta,
             (NUM_BLOCKS, PARAMS_PER_BLOCK),
         )
         for block_index, (q0, q1) in enumerate(LAYER_PAIRS):
@@ -1050,26 +1040,6 @@ def statevector_sequential_unitary_pqc(
                 num_total_qubits,
             )
 
-        varphi = layer_theta[-2]
-        phi = layer_theta[-1]
-        statevector = apply_unitary_on_statevector(
-            statevector,
-            U_rz(varphi),
-            (ANCILLA_QUBIT,),
-            num_total_qubits,
-        )
-        statevector = apply_unitary_on_statevector(
-            statevector,
-            U_rx(2.0 * phi),
-            (ANCILLA_QUBIT,),
-            num_total_qubits,
-        )
-        statevector = apply_unitary_on_statevector(
-            statevector,
-            U_rz(varphi),
-            (ANCILLA_QUBIT,),
-            num_total_qubits,
-        )
         return statevector, None
 
     statevector_final, _ = jax.lax.scan(
@@ -1432,7 +1402,7 @@ def configure_unitary_pqc_overparam(
     global TICK_LABEL_FONT_SIZE, LEGEND_FONT_SIZE, _DEFAULT_AXES_MARGINS_PRX, _DEFAULT_AXES_MARGINS_PRX_OUTSIDE_LEGEND, key, num_system_qubits
     global ANCILLA_QUBIT, num_total_qubits, SYSTEM_WIRES, FULL_WIRES, h_param, tolerance
     global steps, num_runs, lr, NUM_BLOCKS, PARAMS_PER_BLOCK
-    global FEED_FORWARD_PARAMS_PER_LAYER, num_params_per_layer
+    global num_params_per_layer
     global LAYER_PAIRS, H_terms, PAULI, H_matrix, eigvals_np, smallest_eigval
     global X2, _PSI_FULL_INIT
     global save_dir, figures_dir, energy_fig_dir, qfim_fig_dir, hs_fig_dir, hessian_fig_dir
@@ -1453,11 +1423,9 @@ def configure_unitary_pqc_overparam(
     #     where (0,4) is the added system-ancilla block.
     #   - Each block applies independent Ry-Rz-Ry triples on both wires,
     #     Rxx/Ryy/Rzz, and independent Ry-Rz-Ry triples on both wires.
-    #   - For measurement outcome 1, each layer then applies
-    #       Rz(varphi) Rx(2 phi) Rz(varphi)
-    #     to the center ancilla q4 using two additional parameters.
+    #   - No additional feed-forward rotation is applied on q4.
     #   - Per-layer parameter count:
-    #       num_params_per_layer = NUM_BLOCKS * PARAMS_PER_BLOCK + 2 = 62
+    #       num_params_per_layer = NUM_BLOCKS * PARAMS_PER_BLOCK = 60
     #   - The closed 5-qubit circuit is propagated as a 32-amplitude statevector.
     #     A 16x16 reduced density matrix is formed only for mixed subsystem
     #     quantities after tracing out the ancilla.
@@ -1577,7 +1545,6 @@ def configure_unitary_pqc_overparam(
     # Added center-ancilla block: (0, ANCILLA_QUBIT)
     NUM_BLOCKS = circuit_model.NUM_BLOCKS
     PARAMS_PER_BLOCK = circuit_model.PARAMS_PER_BLOCK
-    FEED_FORWARD_PARAMS_PER_LAYER = circuit_model.FEED_FORWARD_PARAMS_PER_LAYER
     num_params_per_layer = circuit_model.NUM_PARAMS_PER_LAYER
     LAYER_PAIRS = circuit_model.LAYER_PAIRS
 
@@ -1645,10 +1612,6 @@ def save_unitary_vqe_results() -> str:
     save_npz_result(
         outpath,
         ansatz=np.asarray(ANSATZ_NAME),
-        measurement_outcome=np.asarray(
-            MEASUREMENT_OUTCOME,
-            dtype=NP_INT_DTYPE,
-        ),
         num_params_per_layer=np.asarray(
             num_params_per_layer,
             dtype=NP_INT_DTYPE,
@@ -1747,7 +1710,6 @@ def load_unitary_vqe_samples(inpath: Optional[str] = None) -> str:
     with np.load(result_path, allow_pickle=False) as data:
         metadata_keys = (
             "ansatz",
-            "measurement_outcome",
             "num_params_per_layer",
             "h_param",
             "steps",
@@ -1766,9 +1728,6 @@ def load_unitary_vqe_samples(inpath: Optional[str] = None) -> str:
         archived_steps = np.asarray(data["steps"])
         archived_num_runs = np.asarray(data["num_runs"])
         archived_ansatz = np.asarray(data["ansatz"])
-        archived_measurement_outcome = np.asarray(
-            data["measurement_outcome"]
-        )
         archived_num_params_per_layer = np.asarray(
             data["num_params_per_layer"]
         )
@@ -1777,7 +1736,6 @@ def load_unitary_vqe_samples(inpath: Optional[str] = None) -> str:
             or archived_steps.shape != ()
             or archived_num_runs.shape != ()
             or archived_ansatz.shape != ()
-            or archived_measurement_outcome.shape != ()
             or archived_num_params_per_layer.shape != ()
         ):
             raise ValueError(
@@ -1788,14 +1746,6 @@ def load_unitary_vqe_samples(inpath: Optional[str] = None) -> str:
             raise ValueError(
                 "Saved VQE ansatz does not match this program: "
                 f"{archived_ansatz.item()!r} != {ANSATZ_NAME!r}."
-            )
-        if not np.issubdtype(archived_measurement_outcome.dtype, np.integer):
-            raise TypeError("Saved measurement_outcome must use an integer dtype.")
-        if int(archived_measurement_outcome.item()) != MEASUREMENT_OUTCOME:
-            raise ValueError(
-                "Saved VQE measurement outcome does not match this program: "
-                f"{int(archived_measurement_outcome.item())} != "
-                f"{MEASUREMENT_OUTCOME}."
             )
         if not np.issubdtype(
             archived_num_params_per_layer.dtype,
@@ -2353,7 +2303,6 @@ def collect_unitary_pqc_result() -> dict:
     """Return the compact summary shown by the notebook after execution."""
     return {
         "ansatz": ANSATZ_NAME,
-        "measurement_outcome": MEASUREMENT_OUTCOME,
         "num_params_per_layer": num_params_per_layer,
         "save_dir": save_dir,
         "figures_dir": figures_dir,

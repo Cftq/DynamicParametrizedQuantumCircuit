@@ -38,6 +38,17 @@ def _direct_numpy(rho, theta, generator):
 
 
 class DPQCDensityKernelTests(unittest.TestCase):
+    def test_ry_matches_numpy_for_each_wire_and_half_angle_convention(self):
+        y = np.array([[0.0, -1j], [1j, 0.0]])
+        for num_qubits in (1, 2, 3):
+            rho = _density(num_qubits)
+            for wire, theta in itertools.product(range(num_qubits), (0.0, np.pi, -0.37, 2.4)):
+                generator = _pauli_product(num_qubits, (wire,), y)
+                with self.subTest(num_qubits=num_qubits, wire=wire, theta=theta):
+                    actual = kernels.apply_ry_density(rho, theta, wire, num_qubits)
+                    np.testing.assert_allclose(actual, _direct_numpy(rho, theta, generator), atol=2e-15, rtol=2e-14)
+                    self.assertEqual(actual.dtype, jnp.complex128)
+
     def test_rz_matches_numpy_for_each_wire_and_half_angle_convention(self):
         for num_qubits in (2, 3):
             rho = _density(num_qubits)
@@ -65,12 +76,43 @@ class DPQCDensityKernelTests(unittest.TestCase):
         actual = kernels.apply_rxx_density(rho, 0.73, (0, 1), 2)
         np.testing.assert_allclose(actual, _direct_numpy(rho, 0.73, generator), atol=2e-15, rtol=2e-14)
 
+    def test_ryy_and_rzz_match_numpy_for_neighbor_and_nonadjacent_wire_pairs(self):
+        cases = (
+            (kernels.apply_ryy_density, np.array([[0.0, -1j], [1j, 0.0]])),
+            (kernels.apply_rzz_density, np.diag([1.0, -1.0])),
+        )
+        for kernel, pauli in cases:
+            for num_qubits in (2, 3):
+                rho = _density(num_qubits)
+                for wires, theta in itertools.product(itertools.permutations(range(num_qubits), 2), (0.0, np.pi, -0.37, 2.4)):
+                    generator = _pauli_product(num_qubits, wires, pauli)
+                    with self.subTest(kernel=kernel.__name__, num_qubits=num_qubits, wires=wires, theta=theta):
+                        actual = kernel(rho, theta, wires, num_qubits)
+                        np.testing.assert_allclose(actual, _direct_numpy(rho, theta, generator), atol=2e-15, rtol=2e-14)
+                        self.assertEqual(actual.dtype, jnp.complex128)
+
+    def test_new_rotations_have_correct_phases_for_nonhermitian_input(self):
+        rho = np.arange(64).reshape(8, 8).astype(np.complex128) * (0.07 + 0.03j)
+        cases = (
+            (kernels.apply_ry_density, 1, np.array([[0.0, -1j], [1j, 0.0]]), (1,)),
+            (kernels.apply_ryy_density, (0, 2), np.array([[0.0, -1j], [1j, 0.0]]), (0, 2)),
+            (kernels.apply_rzz_density, (0, 2), np.diag([1.0, -1.0]), (0, 2)),
+        )
+        for kernel, wires, pauli, product_wires in cases:
+            with self.subTest(kernel=kernel.__name__):
+                generator = _pauli_product(3, product_wires, pauli)
+                actual = kernel(rho, 0.73, wires, 3)
+                np.testing.assert_allclose(actual, _direct_numpy(rho, 0.73, generator), atol=2e-15, rtol=2e-14)
+
     def test_jit_gradients_and_second_derivatives_match_full_matrix_reference(self):
         rho = jnp.asarray(_density(3))
         observable = jnp.asarray(_density(3, seed=92))
         cases = (
+            (kernels.apply_ry_density, 1, np.array([[0, -1j], [1j, 0]]), (1,)),
             (kernels.apply_rz_density, 1, np.diag([1, -1]), (1,)),
             (kernels.apply_rxx_density, (0, 2), np.array([[0, 1], [1, 0]]), (0, 2)),
+            (kernels.apply_ryy_density, (0, 2), np.array([[0, -1j], [1j, 0]]), (0, 2)),
+            (kernels.apply_rzz_density, (0, 2), np.diag([1, -1]), (0, 2)),
         )
         for kernel, wires, pauli, product_wires in cases:
             generator = jnp.asarray(_pauli_product(3, product_wires, pauli))
@@ -93,7 +135,13 @@ class DPQCDensityKernelTests(unittest.TestCase):
     def test_vmap_trial_angles_and_leading_density_batches(self):
         rhos = np.stack([_density(2, seed=seed) for seed in (74, 75, 76)])
         angles = jnp.array([0.1, -0.7, 2.1], dtype=jnp.float64)
-        cases = ((kernels.apply_rz_density, 1), (kernels.apply_rxx_density, (0, 1)))
+        cases = (
+            (kernels.apply_ry_density, 1),
+            (kernels.apply_rz_density, 1),
+            (kernels.apply_rxx_density, (0, 1)),
+            (kernels.apply_ryy_density, (0, 1)),
+            (kernels.apply_rzz_density, (0, 1)),
+        )
         for kernel, wires in cases:
             with self.subTest(kernel=kernel.__name__):
                 actual = jax.jit(jax.vmap(lambda rho, theta: kernel(rho, theta, wires, 2)))(rhos, angles)
@@ -102,12 +150,17 @@ class DPQCDensityKernelTests(unittest.TestCase):
                 batch = kernel(rhos, 0.4, wires, 2)
                 expected_batch = np.stack([kernel(rho, 0.4, wires, 2) for rho in rhos])
                 np.testing.assert_allclose(batch, expected_batch, atol=2e-15, rtol=2e-14)
+                nested_batch = kernel(np.stack([rhos, rhos]), 0.4, wires, 2)
+                np.testing.assert_allclose(nested_batch, np.stack([expected_batch, expected_batch]), atol=2e-15, rtol=2e-14)
 
     def test_density_physical_invariants_and_five_qubit_default(self):
         rho = _density(5)
         for actual in (
+            kernels.apply_ry_density(rho, 0.81, 4),
             kernels.apply_rz_density(rho, 0.81, 4),
             kernels.apply_rxx_density(rho, 0.81, (0, 4)),
+            kernels.apply_ryy_density(rho, 0.81, (0, 4)),
+            kernels.apply_rzz_density(rho, 0.81, (0, 4)),
         ):
             np.testing.assert_allclose(actual, actual.conj().T, atol=2e-15)
             np.testing.assert_allclose(np.trace(actual), 1.0, atol=2e-15)
@@ -115,14 +168,18 @@ class DPQCDensityKernelTests(unittest.TestCase):
 
     def test_invalid_shapes_and_wire_indices_are_rejected(self):
         rho = _density(2)
-        for wire in (-1, 2):
-            with self.subTest(wire=wire), self.assertRaises(ValueError):
-                kernels.apply_rz_density(rho, 0.1, wire, 2)
-        for wires in ((0, 0), (0,), (0, 1, 2), (0, 2)):
-            with self.subTest(wires=wires), self.assertRaises(ValueError):
-                kernels.apply_rxx_density(rho, 0.1, wires, 2)
-        with self.assertRaises(ValueError):
-            kernels.apply_rz_density(rho, 0.1, 0, 3)
+        for kernel in (kernels.apply_ry_density, kernels.apply_rz_density):
+            for wire in (-1, 2):
+                with self.subTest(kernel=kernel.__name__, wire=wire), self.assertRaises(ValueError):
+                    kernel(rho, 0.1, wire, 2)
+            with self.subTest(kernel=kernel.__name__, shape=rho.shape), self.assertRaises(ValueError):
+                kernel(rho, 0.1, 0, 3)
+        for kernel in (kernels.apply_rxx_density, kernels.apply_ryy_density, kernels.apply_rzz_density):
+            for wires in ((0, 0), (0,), (0, 1, 2), (0, 2), (-1, 1)):
+                with self.subTest(kernel=kernel.__name__, wires=wires), self.assertRaises(ValueError):
+                    kernel(rho, 0.1, wires, 2)
+            with self.subTest(kernel=kernel.__name__, shape=rho.shape), self.assertRaises(ValueError):
+                kernel(rho, 0.1, (0, 1), 3)
 
 
 if __name__ == "__main__":

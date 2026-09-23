@@ -9,7 +9,8 @@ parameters drawn uniformly from ``[-pi, pi)`` in float64. It then computes
 the full signed energy Hessian at every point.
 
 Both the original 14-parameters-per-layer DPQC channel and the fixed-Rx(pi)
-12-parameters-per-layer reset-DPQC channel are supported. The schema-version-2
+60-parameters-per-layer U3-Cartan reset-DPQC channel are supported. The schema-2
+(original DPQC) or schema-3 (reset-DPQC)
 ``hessian_random_points.npz`` archive contains one float64 signed symmetric
 matrix per random point as ``L{L}_hessian`` with shape ``(samples, P, P)``,
 and its sampled parameter vector as ``L{L}_theta`` with shape ``(samples, P)``.
@@ -32,11 +33,13 @@ from typing import Iterable, Sequence
 
 _MODULE_DIR = Path(__file__).resolve().parent
 _COMMON_DIR = _MODULE_DIR.parent / "common"
-_common_dir_string = str(_COMMON_DIR)
-if _common_dir_string not in sys.path:
-    sys.path.insert(0, _common_dir_string)
+for _path in (_MODULE_DIR, _COMMON_DIR):
+    _path_string = str(_path)
+    if _path_string not in sys.path:
+        sys.path.insert(0, _path_string)
 
 import config_overparam as cfg
+import dpqc_reset_model as reset_model
 from dpqc_backend import (
     add_device_argument,
     configure_jax_backend,
@@ -52,14 +55,14 @@ NUM_BLOCKS = 4
 PARAMS_PER_BLOCK = 3
 NUM_CHANNEL_PARAMS = 2
 NUM_PARAMS_PER_LAYER = NUM_BLOCKS * PARAMS_PER_BLOCK + NUM_CHANNEL_PARAMS
-RESET_NUM_PARAMS_PER_LAYER = NUM_BLOCKS * PARAMS_PER_BLOCK
+RESET_NUM_PARAMS_PER_LAYER = reset_model.UNITARY_PARAMS_PER_LAYER
 
 OUTPUT_FAMILY_DPQC = "dpqc"
 OUTPUT_FAMILY_RESET = "dpqc_reset"
 SUPPORTED_OUTPUT_FAMILIES = (OUTPUT_FAMILY_DPQC, OUTPUT_FAMILY_RESET)
 MODEL_ID_BY_OUTPUT_FAMILY = {
     OUTPUT_FAMILY_DPQC: "dpqc_dynamic_channel",
-    OUTPUT_FAMILY_RESET: "dpqc_reset_fixed_rx_pi",
+    OUTPUT_FAMILY_RESET: reset_model.MODEL_ID,
 }
 
 TOP, LEFT, RIGHT, BOTTOM, CENTRE = 0, 1, 2, 3, 4
@@ -75,6 +78,7 @@ DEFAULT_SEED_BASE = int(cfg.QFIM_SAMPLE_SEED_BASE)
 DEFAULT_HVP_CHUNK_SIZE = 8
 HESSIAN_METHOD = "chunked_forward_over_reverse_hvp"
 SCHEMA_VERSION = 2
+RESET_SCHEMA_VERSION = 3
 
 
 def _finite_float(value: str) -> float:
@@ -145,7 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Output directory. By default, use ./figs/<output-family>/"
-            "h_<h>/numerical_results/hessian."
+            "h_<h>/numerical_results/hessian for dpqc, or "
+            "./figs/dpqc_reset/u3_cartan/h_<h>/numerical_results/hessian "
+            "for dpqc_reset."
         ),
     )
     parser.add_argument(
@@ -406,15 +412,15 @@ def _one_reset_layer(
     rho: jnp.ndarray,
     layer_theta: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Apply one 12-parameter unitary layer and the fixed-Rx(pi) reset."""
+    """Apply one 60-parameter U3-Cartan layer and the fixed-Rx(pi) reset."""
     blocks = jnp.reshape(
         layer_theta,
-        (NUM_BLOCKS, PARAMS_PER_BLOCK),
+        (reset_model.NUM_BLOCKS, reset_model.PARAMS_PER_BLOCK),
     )
-    for (left_wire, right_wire), block in zip(LAYER_PAIRS, blocks):
-        rho = _apply_unitary(rho, _rz(block[0]), (left_wire,))
-        rho = _apply_unitary(rho, _rz(block[1]), (right_wire,))
-        rho = _apply_unitary(rho, _rxx(block[2]), (left_wire, right_wire))
+    for wires, block in zip(reset_model.LAYER_PAIRS, blocks):
+        rho = _apply_unitary(
+            rho, reset_model.unitary_block_matrix(block, jnp), wires,
+        )
     return _apply_reset_channel(rho)
 
 
@@ -675,6 +681,8 @@ def _default_output_dir(
     output_family: str = OUTPUT_FAMILY_DPQC,
 ) -> Path:
     output_family = _validated_output_family(output_family)
+    if output_family == OUTPUT_FAMILY_RESET:
+        return reset_model.reset_output_dir(h_param) / "numerical_results" / "hessian"
     return (
         Path.cwd()
         / "figs"
@@ -724,9 +732,17 @@ def run_hessian_analysis(
         output_dir = _default_output_dir(h_param, output_family)
     output_dir = Path(output_dir).expanduser().resolve()
     output_path = output_dir / "hessian_random_points.npz"
+    if (
+        output_family == OUTPUT_FAMILY_RESET
+        and output_dir == _default_output_dir(h_param, output_family).resolve()
+    ):
+        reset_model._ensure_model_metadata(output_dir.parent.parent, h_param)
 
     arrays: dict[str, np.ndarray] = {
-        "schema_version": np.asarray(SCHEMA_VERSION, dtype=NP_INT_DTYPE),
+        "schema_version": np.asarray(
+            RESET_SCHEMA_VERSION if output_family == OUTPUT_FAMILY_RESET else SCHEMA_VERSION,
+            dtype=NP_INT_DTYPE,
+        ),
         "output_family": np.asarray(output_family),
         "model_id": np.asarray(MODEL_ID_BY_OUTPUT_FAMILY[output_family]),
         "h_param": np.asarray(h_param, dtype=NP_REAL_DTYPE),
@@ -749,6 +765,8 @@ def run_hessian_analysis(
         "block_wire_pairs": np.asarray(LAYER_PAIRS, dtype=NP_INT_DTYPE),
         "unitary_block_parameter_order": np.asarray(
             ["Rz(first_wire)", "Rz(second_wire)", "Rxx(first_wire,second_wire)"]
+            if output_family == OUTPUT_FAMILY_DPQC
+            else reset_model.BLOCK_PARAMETER_NAMES
         ),
         "channel_parameter_order": np.asarray(
             ["varphi", "phi"] if output_family == OUTPUT_FAMILY_DPQC else [],

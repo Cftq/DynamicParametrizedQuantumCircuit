@@ -95,11 +95,11 @@ def energy_width_from_hamiltonian(hamiltonian_matrix):
     return _positive_width(eigenvalues[-1] - eigenvalues[0])
 
 
-def hamiltonian_energy_width(h_param):
-    """Width of the project's four-qubit H_S(h), without importing JAX.
+def hamiltonian_matrix_numpy(h_param):
+    """Dense matrix of the project's four-qubit H_S(h), without importing JAX.
 
-    This mirrors common/hamiltonian.py::hamiltonian_terms. The dense spectrum
-    is used for arbitrary finite h, without assuming h lies in [0, 1].
+    This mirrors common/hamiltonian.py::hamiltonian_terms for arbitrary finite
+    h, without assuming h lies in [0, 1].
     """
     h_param = float(h_param)
     if not math.isfinite(h_param):
@@ -120,7 +120,12 @@ def hamiltonian_energy_width(h_param):
     matrix -= (1.0 - h_param) * pauli_product(dict.fromkeys(range(4), x))
     for wire in range(4):
         matrix -= h_param * pauli_product({wire: z})
-    return energy_width_from_hamiltonian(matrix)
+    return matrix
+
+
+def hamiltonian_energy_width(h_param):
+    """Width of the project's four-qubit H_S(h), without importing JAX."""
+    return energy_width_from_hamiltonian(hamiltonian_matrix_numpy(h_param))
 
 
 def curvature_metrics(hessian_samples, energy_width, *, eigenvalues=None):

@@ -36,6 +36,16 @@ for _path in (_MODULE_DIR, _COMMON_DIR):
 
 
 import config_overparam as cfg
+from unitary_pqc_measured_1_model import (
+    ANCILLA_QUBIT,
+    ANSATZ_NAME,
+    FEED_FORWARD_PARAMS_PER_LAYER,
+    LAYER_PAIRS,
+    NUM_BLOCKS,
+    NUM_PARAMS_PER_LAYER,
+    OUTPUT_VARIANT,
+    PARAMS_PER_BLOCK,
+)
 
 
 # Configure noninteractive drawing before importing Matplotlib.
@@ -53,27 +63,16 @@ NP_REAL_DTYPE = np.float64
 DEFAULT_DRAW_DPI = min(int(SAVE_DPI), 100)
 
 NUM_QUBITS = 5
-NUM_BLOCKS = 4
-PARAMS_PER_BLOCK = 3
-FEED_FORWARD_PARAMS_PER_LAYER = 2
-N_PARAM_PER_LAYER = (
-    NUM_BLOCKS * PARAMS_PER_BLOCK + FEED_FORWARD_PARAMS_PER_LAYER
-)
-ANCILLA_QUBIT = 4
+N_PARAM_PER_LAYER = NUM_PARAMS_PER_LAYER
 MEASUREMENT_OUTCOME = 1
-ANSATZ_NAME = "unitary_pqc_measured_1"
-LAYER_PAIRS = (
-    (1, 3),
-    (2, 3),
-    (0, 2),
-    (0, ANCILLA_QUBIT),
-)
 
 PARAMETER_FREE_GATE_LABELS = {
     "rz": r"$R_z$",
     "rx": r"$R_x$",
     "ry": r"$R_y$",
     "rxx": r"$R_{xx}$",
+    "ryy": r"$R_{yy}$",
+    "rzz": r"$R_{zz}$",
     "crx": r"$CR_x$",
     "cry": r"$CR_y$",
     "crz": r"$CR_z$",
@@ -99,7 +98,10 @@ def _circuit_fold(value: str) -> int:
 
 
 def _default_result_root() -> Path:
-    return _PROJECT_ROOT / "figs" / ANSATZ_NAME / f"h_{cfg.H_PARAM}"
+    return (
+        _PROJECT_ROOT / "figs" / ANSATZ_NAME / OUTPUT_VARIANT
+        / f"h_{cfg.H_PARAM}"
+    )
 
 
 def _validate_archive_variant(archive, archive_path: Path) -> None:
@@ -207,10 +209,22 @@ def qg_layer(
     q1: int,
     params: np.ndarray,
 ) -> None:
-    """Append one Unitary-PQC two-qubit block."""
-    circuit.rz(float(params[0]), q0)
-    circuit.rz(float(params[1]), q1)
-    circuit.rxx(float(params[2]), q0, q1)
+    """Append one independent 15-angle U3-Cartan two-qubit block.
+
+    Local U3 factors use Ry, Rz, Ry in application order, matching the
+    numerical model and reset DPQC parameter ordering.
+    """
+    for wire, start in ((q0, 0), (q1, 3)):
+        circuit.ry(float(params[start]), wire)
+        circuit.rz(float(params[start + 1]), wire)
+        circuit.ry(float(params[start + 2]), wire)
+    circuit.rxx(float(params[6]), q0, q1)
+    circuit.ryy(float(params[7]), q0, q1)
+    circuit.rzz(float(params[8]), q0, q1)
+    for wire, start in ((q0, 9), (q1, 12)):
+        circuit.ry(float(params[start]), wire)
+        circuit.rz(float(params[start + 1]), wire)
+        circuit.ry(float(params[start + 2]), wire)
 
 
 def feed_forward_measured_1(

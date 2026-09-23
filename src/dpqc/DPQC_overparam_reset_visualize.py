@@ -2,13 +2,31 @@
 # coding: utf-8
 """Visualize saved fixed-Rx(pi) reset-DPQC results.
 
+The current pair blocks use independent local RY-RZ-RY rotations before and
+after RXX-RYY-RZZ (60 angles per layer). Model metadata rejects results from
+the former 12-angle circuit; recompute those results with the current model.
+
 Run ``DPQC_overparam_reset_vqe.py`` once for training results and use
 ``DPQC_overparam_reset_compute.py`` for the independent QFIM/Hessian analyses,
 from the project directory that should contain the ``figs`` output tree.
 Existing training results can be reused; visualization never runs VQE.
+Normal visualization also writes ``energy_figures/energy_error_history_logstat.pdf``
+with the same lognormal error center and shaded band as Unitary-PQC, using
+all saved VQE iterations and the shared DPQC plotting implementation.
+The shared visualizer renders ``success_probability_multiple_tolerances.pdf``
+at final energy-error tolerances 1e-3 through 1e-10 using saved energies.
+Gap-normalized errors use a beeswarm plot; normalized success rates at the
+same eight tolerances 1e-3 through 1e-10 are saved as a separate figure.
+Use ``--qfim-logdet-only`` to render mean log det(I + kappa F) versus layers
+from saved random-point QFIM spectra, with no training, QFIM, or Hessian
+calculation. ``--qfim-logdet-kappa`` selects a positive kappa (default: 1).
+
+Use ``--gap-normalized-only`` to render only the final gap-normalized energy
+error and success probability from saved energies, without QFIM or Hessian
+analysis. This mode does not require their archives.
 This entry point then renders the
 saved VQE, random-point QFIM, and random-point Hessian results below
-``figs/dpqc_reset/h_<h_param>`` without recomputing them. Hessian figures are
+``figs/dpqc_reset/u3_cartan/h_<h_param>`` without recomputing them. Hessian figures are
 saved under ``hessian_figures`` (override with ``--hessian-figures-dir``).
 QFIM-style Hessian statistics include rank, condition number, participation
 effective rank, absolute spectral sum, signed trace, Shannon entropy, matrix
@@ -18,8 +36,8 @@ figures show the layerwise minimum, maximum, and mean with SEM. Explicit
 unless ``--reuse-hessian-results`` is also supplied.
 Rank and condition numbers are computed from saved Hessian matrices at plot
 time. Use ``--hessian-rank-threshold`` to change their active absolute-spectrum
-threshold without rerunning the Hessian calculation. Legacy summary archives
-remain readable at their saved threshold.
+threshold without rerunning the Hessian calculation. Reset Hessian archives
+must use schema 3 for the current 60-angle layer.
 Participation rank uses ``abs(lambda) > threshold``; rank, absolute spectral
 sum, and entropy use ``abs(lambda) >= threshold``. Entropy normalizes those
 absolute eigenvalues (nats). A zero active spectrum gives zero participation
@@ -59,6 +77,7 @@ Examples::
 
     python src/dpqc/DPQC_overparam_reset_visualize.py
     python src/dpqc/DPQC_overparam_reset_visualize.py --h-param 0.1
+    python src/dpqc/DPQC_overparam_reset_visualize.py --h-param 0.1 --gap-normalized-only
     python src/dpqc/DPQC_overparam_reset_visualize.py --h-param 0.1 --hessian-only
     python src/dpqc/DPQC_overparam_reset_visualize.py --h-param 0.1 --hessian-only --reuse-hessian-results
 
@@ -203,8 +222,26 @@ def _parse_cli_args(
             "(default: 1.0)."
         ),
     )
-    hessian_mode = parser.add_mutually_exclusive_group()
-    hessian_mode.add_argument(
+    visualization_mode = parser.add_mutually_exclusive_group()
+    visualization_mode.add_argument(
+        "--qfim-logdet-only",
+        action="store_true",
+        help=(
+            "Render only mean log det(I + kappa F) versus layers from saved "
+            "random-point QFIM spectra. No training, QFIM, or Hessian "
+            "calculations are run."
+        ),
+    )
+    visualization_mode.add_argument(
+        "--gap-normalized-only",
+        action="store_true",
+        help=(
+            "Render only the gap-normalized final-energy error and success "
+            "probability from saved VQE energies. No QFIM, Hessian, or "
+            "training calculations are run."
+        ),
+    )
+    visualization_mode.add_argument(
         "--hessian-only",
         action="store_true",
         help=(
@@ -212,7 +249,7 @@ def _parse_cli_args(
             "their statistics, spectra, and normalized curvature figures."
         ),
     )
-    hessian_mode.add_argument(
+    visualization_mode.add_argument(
         "--with-hessian",
         action="store_true",
         help=(
@@ -221,6 +258,13 @@ def _parse_cli_args(
             "--reuse-hessian-results is supplied. Without a Hessian mode "
             "option, saved Hessian results are plotted without recomputing."
         ),
+    )
+    parser.add_argument(
+        "--qfim-logdet-kappa",
+        type=_positive_float,
+        default=1.0,
+        metavar="KAPPA",
+        help="Positive kappa for the saved-QFIM log-determinant metric (default: 1).",
     )
     parser.add_argument(
         "--reuse-hessian-results",
@@ -296,6 +340,9 @@ def _build_visualizer_command(
     h_param: float,
     convergence_tolerances: Sequence[float] | None = None,
     *,
+    gap_normalized_only: bool = False,
+    qfim_logdet_only: bool = False,
+    qfim_logdet_kappa: float = 1.0,
     hessian_only: bool = False,
     with_hessian: bool = False,
     reuse_hessian_results: bool = False,
@@ -317,6 +364,15 @@ def _build_visualizer_command(
         )
     if hessian_only and with_hessian:
         raise ValueError("hessian_only and with_hessian are mutually exclusive.")
+    if gap_normalized_only and (hessian_only or with_hessian):
+        raise ValueError(
+            "gap_normalized_only is mutually exclusive with Hessian modes."
+        )
+    if qfim_logdet_only and (gap_normalized_only or hessian_only or with_hessian):
+        raise ValueError("qfim_logdet_only is mutually exclusive with other visualization modes.")
+    qfim_logdet_kappa = float(qfim_logdet_kappa)
+    if not math.isfinite(qfim_logdet_kappa) or qfim_logdet_kappa <= 0.0:
+        raise ValueError("qfim_logdet_kappa must be finite and positive.")
     command = [
         sys.executable,
         str(_BASE_VISUALIZER),
@@ -326,6 +382,8 @@ def _build_visualizer_command(
         _OUTPUT_FAMILY,
         "--skip-optimization-path-qfim",
         "--skip-qfim-eigs-by-index-layers",
+        "--qfim-logdet-kappa",
+        repr(qfim_logdet_kappa),
     ]
     tolerance_values = (
         () if convergence_tolerances is None else convergence_tolerances
@@ -335,6 +393,14 @@ def _build_visualizer_command(
         if not math.isfinite(tolerance) or tolerance <= 0.0:
             raise ValueError("convergence tolerances must be finite and positive")
         command.extend(("--convergence-tolerance", repr(tolerance)))
+
+    if qfim_logdet_only:
+        command.append("--qfim-logdet-only")
+        return tuple(command)
+
+    if gap_normalized_only:
+        command.append("--gap-normalized-only")
+        return tuple(command)
 
     # A plain visualization command renders the saved Hessian archive too.
     # Keep fresh (potentially expensive) analysis opt-in via the mode flags.
@@ -423,6 +489,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     return _run_visualizer(
         args.h_param,
         args.convergence_tolerances,
+        gap_normalized_only=args.gap_normalized_only,
+        qfim_logdet_only=args.qfim_logdet_only,
+        qfim_logdet_kappa=args.qfim_logdet_kappa,
         hessian_only=args.hessian_only,
         with_hessian=args.with_hessian,
         reuse_hessian_results=args.reuse_hessian_results,

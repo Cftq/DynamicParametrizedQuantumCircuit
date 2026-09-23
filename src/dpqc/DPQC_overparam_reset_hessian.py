@@ -4,7 +4,7 @@
 
 This entry point fixes the shared Hessian program's model to dpqc_reset. It
 saves signed matrices and random parameters under
-figs/dpqc_reset/h_<h>/numerical_results/hessian by default. Neither trained
+figs/dpqc_reset/u3_cartan/h_<h>/numerical_results/hessian by default. Neither trained
 parameters nor a VQE archive are required. Plot these saved matrices with
 DPQC_overparam_reset_visualize.py --hessian-only --reuse-hessian-results.
 

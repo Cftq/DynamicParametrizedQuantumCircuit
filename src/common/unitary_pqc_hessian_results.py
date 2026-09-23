@@ -1,4 +1,4 @@
-"""Read U3-Cartan outcome-1 Hessians without initializing the quantum simulator.
+"""Read U3-Cartan Hessians without initializing the quantum simulator.
 
 Schema 1 originally held rank/condition summaries and now optionally includes
 the raw signed matrices. Those matrices allow spectral plots and changing the
@@ -18,15 +18,15 @@ except ImportError:  # The visualization scripts put src/common on sys.path.
 
 
 RESULT_NAME = "hessian_random_points.npz"
-OUTPUT_FAMILY = "unitary_pqc_measured_1"
-# Four 15-angle U3-Cartan blocks plus two outcome-1 feed-forward angles.
-PARAMETERS_PER_LAYER = 62
+OUTPUT_FAMILY = "unitary_pqc"
+# Four independent 15-angle U3-Cartan blocks.
+PARAMETERS_PER_LAYER = 60
 HESSIAN_RANK_DEFINITION = "count(abs(eigenvalue) >= hessian_rank_threshold)"
 HESSIAN_CONDITION_NUMBER_DEFINITION = (
     "max(abs(active eigenvalue)) / min(abs(active eigenvalue)); NaN if rank == 0"
 )
 _REQUIRED_METADATA = {
-    "schema_version", "analysis_kind", "ansatz", "measurement_outcome",
+    "schema_version", "analysis_kind", "ansatz",
     "h_param", "layers", "num_hessian_samples", "hessian_sample_seed_base",
     "hessian_rank_threshold", "hessian_rank_definition",
     "hessian_condition_number_definition", "num_params_per_layer",
@@ -116,7 +116,7 @@ def _saved_summaries(archive, layers, num_samples):
     return rank_by_layer, condition_by_layer
 
 
-def load_measured_unitary_hessian_result(
+def load_unitary_hessian_result(
     results_dir,
     *,
     expected_h_param,
@@ -125,7 +125,7 @@ def load_measured_unitary_hessian_result(
     expected_seed_base=None,
     rank_threshold=1e-12,
 ):
-    """Load only measured-outcome-1 unitary random-point Hessian results.
+    """Load only U3-Cartan unitary random-point Hessian results.
 
     Optional expected layers/sample count/seed verify correspondence with a
     loaded QFIM archive. Layer order is normalized, but the layer sets must
@@ -141,8 +141,8 @@ def load_measured_unitary_hessian_result(
     path = Path(results_dir) / RESULT_NAME
     if not path.is_file():
         raise FileNotFoundError(
-            f"Measured-outcome-1 Unitary-PQC Hessian result was not found: {path}. "
-            "Run unitary_pqc_measured_1_overparam_hessian.py "
+            f"U3-Cartan Unitary-PQC Hessian result was not found: {path}. "
+            "Run unitary_pqc_overparam_hessian.py "
             f"--h-param {expected_h:g} before visualizing."
         )
 
@@ -166,12 +166,6 @@ def load_measured_unitary_hessian_result(
         if "output_family" in archive:
             if _scalar(archive["output_family"], "output_family").item() != OUTPUT_FAMILY:
                 raise ValueError("Hessian archive output_family mismatch.")
-        outcome = _integer(
-            archive["measurement_outcome"], "measurement_outcome",
-            minimum=0, require_integer_dtype=True,
-        )
-        if outcome != 1:
-            raise ValueError("Hessian measurement_outcome must be 1.")
         parameters = _integer(
             archive["num_params_per_layer"], "num_params_per_layer",
             require_integer_dtype=True,
@@ -206,7 +200,7 @@ def load_measured_unitary_hessian_result(
         raise ValueError(
             "Legacy Hessian archive contains only rank/condition summaries at "
             f"threshold {saved_threshold:g}. Recompute with "
-            "unitary_pqc_measured_1_overparam_hessian.py to save raw matrices "
+            "unitary_pqc_overparam_hessian.py to save raw matrices "
             "before changing the analysis threshold."
         )
     for layer, matrices in hessian_by_layer.items():

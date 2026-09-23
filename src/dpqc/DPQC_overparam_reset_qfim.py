@@ -4,8 +4,11 @@
 
 Layer/sample/seed settings come from config_overparam.py. Only the QFIM stage
 is imported; no VQE archive or trained parameters are needed. Existing energy
-histories are preserved. Model metadata and QFIM archives retain their paths
-under figs/dpqc_reset/h_<h>/.
+histories are preserved. Model metadata and QFIM archives are saved under
+figs/dpqc_reset/u3_cartan/h_<h>/, separately from the former Rz/Rxx model.
+The shared circuit uses 60 independent angles per layer: local RY-RZ-RY,
+pair RXX-RYY-RZZ, and local RY-RZ-RY in each block. The reset is unchanged.
+Saved results from the former 12-angle layer must be recomputed separately.
 
     python src/dpqc/DPQC_overparam_reset_qfim.py --h-param 0.1
 """

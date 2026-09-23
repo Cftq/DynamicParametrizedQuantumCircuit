@@ -212,7 +212,7 @@ class ResetNumericalStageIsolationTests(unittest.TestCase):
         os.chdir(temp_dir.name)
         self.addCleanup(os.chdir, original_cwd)
         self.root = Path(temp_dir.name)
-        self.save_dir = self.root / "figs" / "dpqc_reset" / "h_0.1"
+        self.save_dir = self.root / "figs" / "dpqc_reset" / "u3_cartan" / "h_0.1"
         self.energy_archive = (
             self.save_dir / "numerical_results" / "energy" / "vqe_optimization_histories.npz"
         )
@@ -245,9 +245,52 @@ class ResetNumericalStageIsolationTests(unittest.TestCase):
         self.run_fake_qfim()
         self.assertFalse(self.energy_archive.exists())
         metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
-        self.assertEqual(metadata["model_id"], "dpqc_reset_fixed_rx_pi")
+        self.assertEqual(metadata["model_id"], "dpqc_reset_u3_cartan_fixed_rx_pi")
         self.assertEqual(metadata["h_param"], 0.1)
-        self.assertEqual(metadata["total_parameter_formula"], "12 * L")
+        self.assertEqual(metadata["schema_version"], 3)
+        self.assertEqual(metadata["total_parameter_formula"], "60 * L")
+
+    def test_qfim_and_vqe_use_versioned_directory_and_preserve_legacy_results(self):
+        legacy_dir = self.root / "figs" / "dpqc_reset" / "h_0.1"
+        legacy_metadata = _MODEL._model_metadata(0.1)
+        legacy_metadata.update(
+            schema_version=2,
+            model_id="dpqc_reset_fixed_rx_pi",
+            unitary_parameters_per_layer=12,
+            total_parameter_formula="12 * L",
+        )
+        legacy_files = {
+            legacy_dir / "reset_model_metadata.json": json.dumps(legacy_metadata).encode(),
+            legacy_dir / "numerical_results" / "energy" / "vqe_optimization_histories.npz": b"old training results",
+            legacy_dir / "numerical_results" / "qfim" / "qfim_random_points.npz": b"old QFIM results",
+            legacy_dir / "numerical_results" / "hessian" / "hessian_random_points.npz": b"old Hessian results",
+        }
+        for path, contents in legacy_files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+
+        for stage, entry in (("qfim", _QFIM.run_qfim), ("vqe", _VQE.run_vqe)):
+            module = self.make_stage(stage)
+            options = {"h_param": 0.1}
+            if stage == "vqe":
+                options["vqe_batch_size"] = 3
+            with self.subTest(stage=stage), patch.object(
+                _MODEL, "_load_base_stage_module", return_value=module
+            ), patch.object(_MODEL, "_install_reset_model"):
+                entry(**options)
+                getattr(module, f"run_{stage}").assert_called_once()
+                self.assertEqual(Path(module.save_dir), self.save_dir)
+                self.assertEqual(Path(module.vqe_optimization_result_path), self.energy_archive)
+                self.assertEqual(
+                    Path(module.qfim_results_dir), self.save_dir / "numerical_results" / "qfim",
+                )
+                metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+                self.assertEqual(metadata["schema_version"], 3)
+                self.assertEqual(metadata["model_id"], "dpqc_reset_u3_cartan_fixed_rx_pi")
+                self.assertEqual(
+                    {path: path.read_bytes() for path in legacy_dir.rglob("*") if path.is_file()},
+                    legacy_files,
+                )
 
     def test_repeated_qfim_preserves_saved_training_and_metadata(self):
         self.energy_archive.parent.mkdir(parents=True)
@@ -295,6 +338,28 @@ class ResetNumericalStageIsolationTests(unittest.TestCase):
         install.assert_called_once_with(module)
         module.run_vqe.assert_called_once_with()
         self.assertTrue(self.metadata_path.is_file())
+
+    def test_versioned_directory_rejects_incompatible_metadata_before_either_stage(self):
+        _MODEL._ensure_model_metadata(self.save_dir, 0.1)
+        metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        metadata.update(
+            schema_version=2,
+            model_id="dpqc_reset_fixed_rx_pi",
+            unitary_parameters_per_layer=12,
+            total_parameter_formula="12 * L",
+        )
+        self.metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        before = self.metadata_path.read_bytes()
+        for stage, entry in (("qfim", _QFIM.run_qfim), ("vqe", _VQE.run_vqe)):
+            module = self.make_stage(stage)
+            with self.subTest(stage=stage), patch.object(
+                _MODEL, "_load_base_stage_module", return_value=module
+            ), patch.object(_MODEL, "_install_reset_model"), self.assertRaisesRegex(
+                ValueError, "Incompatible reset archive metadata",
+            ):
+                entry(h_param=0.1)
+            getattr(module, f"run_{stage}").assert_not_called()
+            self.assertEqual(self.metadata_path.read_bytes(), before)
 
 
     def test_explicit_device_is_forwarded_to_only_the_selected_base_stage(self):

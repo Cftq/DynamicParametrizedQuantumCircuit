@@ -24,22 +24,42 @@ class ResetModelTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.dict(os.environ, {"DPQC_DEVICE": "auto"}))
 
-    def test_model_and_parameter_order_are_preserved(self):
-        self.assertEqual(_MODEL.MODEL_ID, "dpqc_reset_fixed_rx_pi")
+    def test_cartan_model_has_independent_angles_and_preserves_fixed_reset(self):
+        self.assertEqual(_MODEL.MODEL_ID, "dpqc_reset_u3_cartan_fixed_rx_pi")
         self.assertEqual(_MODEL.OUTPUT_FAMILY, "dpqc_reset")
         self.assertEqual(_MODEL.NUM_TRAINABLE_FEED_FORWARD_PARAMS, 0)
         self.assertEqual(_MODEL.FIXED_FEED_FORWARD_RX_ANGLE, math.pi)
-        self.assertEqual(_MODEL.num_trainable_parameters(2), 24)
+        self.assertEqual(_MODEL.PARAMS_PER_BLOCK, 15)
+        self.assertEqual(_MODEL.num_trainable_parameters(2), 120)
         names = _MODEL.parameter_names(2)
-        self.assertEqual(len(names), 24)
-        self.assertEqual(len(set(names)), 24)
+        self.assertEqual(len(names), 120)
+        self.assertEqual(len(set(names)), 120)
         self.assertEqual(
-            names[:3],
-            ("L1_B0_Rz_q0", "L1_B0_Rz_q1", "L1_B0_Rxx"),
+            names[:15],
+            (
+                "L1_B0_pre_Ry1_q0", "L1_B0_pre_Rz_q0", "L1_B0_pre_Ry2_q0",
+                "L1_B0_pre_Ry1_q1", "L1_B0_pre_Rz_q1", "L1_B0_pre_Ry2_q1",
+                "L1_B0_Rxx", "L1_B0_Ryy", "L1_B0_Rzz",
+                "L1_B0_post_Ry1_q0", "L1_B0_post_Rz_q0", "L1_B0_post_Ry2_q0",
+                "L1_B0_post_Ry1_q1", "L1_B0_post_Rz_q1", "L1_B0_post_Ry2_q1",
+            ),
         )
-        self.assertEqual(names[-1], "L2_B3_Rxx")
+        self.assertEqual(names[-1], "L2_B3_post_Ry2_q1")
         with self.assertRaises(ValueError):
             _MODEL.num_trainable_parameters(0)
+
+    def test_reset_output_directory_versions_model_and_normalizes_h_param(self):
+        with tempfile.TemporaryDirectory(prefix="dpqc_reset_paths_") as directory:
+            root = Path(directory)
+            expected = root / "figs" / "dpqc_reset" / "u3_cartan" / "h_0.1"
+            with patch.object(Path, "cwd", return_value=root):
+                self.assertEqual(_MODEL.reset_output_dir(0.1), expected)
+            self.assertEqual(_MODEL.reset_output_dir("0.10", root=root), expected)
+            self.assertEqual(
+                _MODEL.reset_output_dir(1, root=str(root)),
+                root / "figs" / "dpqc_reset" / "u3_cartan" / "h_1.0",
+            )
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_import_does_not_load_numerical_or_training_modules(self):
         probe = "\n".join(
@@ -179,7 +199,9 @@ class ResetMetadataTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="dpqc_reset_metadata_")
         self.addCleanup(temporary.cleanup)
-        self.save_dir = Path(temporary.name) / "h_0.1"
+        self.save_dir = (
+            Path(temporary.name) / "figs" / "dpqc_reset" / "u3_cartan" / "h_0.1"
+        )
         self.archive = (
             self.save_dir
             / "numerical_results"
@@ -221,6 +243,24 @@ class ResetMetadataTests(unittest.TestCase):
             _MODEL._ensure_model_metadata(self.save_dir, 0.1)
         self.assertEqual(path.read_bytes(), before)
 
+    def test_old_rz_rxx_metadata_is_rejected_without_overwriting_results(self):
+        path = _MODEL._ensure_model_metadata(self.save_dir, 0.1)
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        metadata.update(
+            schema_version=2,
+            model_id="dpqc_reset_fixed_rx_pi",
+            unitary_parameters_per_layer=12,
+            total_parameter_formula="12 * L",
+        )
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+        self.archive.parent.mkdir(parents=True)
+        self.archive.write_bytes(b"old 12-angle training archive")
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "Incompatible reset archive metadata"):
+            _MODEL._ensure_model_metadata(self.save_dir, 0.1)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.archive.read_bytes(), b"old 12-angle training archive")
+
     def test_different_hamiltonian_metadata_is_rejected(self):
         path = _MODEL._ensure_model_metadata(self.save_dir, 0.1)
         before = path.read_bytes()
@@ -235,6 +275,18 @@ class ResetMetadataTests(unittest.TestCase):
             _MODEL._ensure_model_metadata(self.save_dir, 0.1)
         self.assertFalse(_MODEL._metadata_path(self.save_dir).exists())
         self.assertEqual(self.archive.read_bytes(), b"existing training archive")
+
+    def test_unidentified_analysis_archives_are_not_stamped_with_new_model(self):
+        for stage in ("qfim", "hessian"):
+            with self.subTest(stage=stage):
+                archive = self.save_dir / "numerical_results" / stage / "existing_results.npz"
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                archive.write_bytes(b"unidentified analysis archive")
+                with self.assertRaisesRegex(FileNotFoundError, "refusing to identify"):
+                    _MODEL._ensure_model_metadata(self.save_dir, 0.1)
+                self.assertFalse(_MODEL._metadata_path(self.save_dir).exists())
+                self.assertEqual(archive.read_bytes(), b"unidentified analysis archive")
+                archive.unlink()
 
     def test_explicit_vqe_requirement_accepts_archive_with_valid_metadata(self):
         _MODEL._ensure_model_metadata(self.save_dir, 0.1)

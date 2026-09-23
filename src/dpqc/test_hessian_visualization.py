@@ -4,15 +4,19 @@ Run with ``python -m unittest discover -s src/dpqc -p test_hessian_visualization
 All generated archives and figures live in a temporary directory.
 """
 
+import ast
 import importlib.util
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
+import dpqc_reset_model as reset_model
 
 
 _MODULE_DIR = Path(__file__).resolve().parent
@@ -24,10 +28,10 @@ def _archive_fixture(output_family):
     """Two signed analytic Hessians, on an intentionally non-configured schedule."""
     parameters_per_layer, model_id = {
         "dpqc": (14, "dpqc_dynamic_channel"),
-        "dpqc_reset": (12, "dpqc_reset_fixed_rx_pi"),
+        "dpqc_reset": (60, "dpqc_reset_u3_cartan_fixed_rx_pi"),
     }[output_family]
     data = {
-        "schema_version": np.asarray(2),
+        "schema_version": np.asarray(3 if output_family == "dpqc_reset" else 2),
         "h_param": np.asarray(0.1),
         "layers": np.asarray([3, 1]),
         "num_hessian_samples": np.asarray(2),
@@ -50,19 +54,83 @@ def _archive_fixture(output_family):
 
 
 class HessianVisualizationTests(unittest.TestCase):
-    def test_reuse_cli_avoids_quantum_imports_and_preserves_archive_sampling(self):
-        for output_family in ("dpqc", "dpqc_reset"):
-            with self.subTest(output_family=output_family):
-                self._assert_reuse_cli(output_family)
-
-    def _assert_reuse_cli(self, output_family):
+    def test_compute_and_visualize_default_directories_agree(self):
+        # Extract path-only code so the real numerical entry points never import JAX.
+        namespace = {
+            "Path": Path,
+            "reset_model": reset_model,
+            "OUTPUT_FAMILY_DPQC": "dpqc",
+            "OUTPUT_FAMILY_RESET": "dpqc_reset",
+            "SUPPORTED_OUTPUT_FAMILIES": ("dpqc", "dpqc_reset"),
+        }
+        for source, names in (
+            (_MODULE_DIR / "DPQC_overparam_hessian.py", {
+                "_validated_output_family", "_default_output_dir",
+            }),
+            (_VISUALIZER, {"_hessian_h_tag", "_resolve_hessian_paths"}),
+        ):
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            definitions = [
+                node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name in names
+            ]
+            exec(compile(ast.Module(body=definitions, type_ignores=[]), str(source), "exec"), namespace)
+        visualizer_tree = ast.parse(_VISUALIZER.read_text(encoding="utf-8"))
+        save_assignment = next(
+            node for node in visualizer_tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "save_dir" for target in node.targets)
+        )
         with tempfile.TemporaryDirectory() as temporary:
-            if output_family == "dpqc":
-                # Exercise the original model's default family and paths.
-                h_root = Path(temporary) / "figs" / "dpqc" / "h_0.1"
+            root = Path(temporary)
+            old_root = root / "figs" / "dpqc_reset" / "h_0.1"
+            old_root.mkdir(parents=True)
+            old_metadata = old_root / "reset_model_metadata.json"
+            old_metadata.write_text('{"schema_version": 2}', encoding="utf-8")
+            with patch.object(Path, "cwd", return_value=root):
+                for family, expected_root in (
+                    ("dpqc", root / "figs" / "dpqc" / "h_0.1"),
+                    ("dpqc_reset", root / "figs" / "dpqc_reset" / "u3_cartan" / "h_0.1"),
+                ):
+                    with self.subTest(output_family=family):
+                        args = SimpleNamespace(
+                            h_param=0.1, output_family=family,
+                            hessian_results_dir=None, hessian_figures_dir=None,
+                        )
+                        compute_dir = namespace["_default_output_dir"](0.1, family)
+                        results_dir, figures_dir = namespace["_resolve_hessian_paths"](args)
+                        self.assertEqual(compute_dir, expected_root / "numerical_results" / "hessian")
+                        self.assertEqual(results_dir, compute_dir)
+                        self.assertEqual(figures_dir, expected_root / "hessian_figures")
+                        namespace.update(output_family=family, h_param=0.1)
+                        exec(compile(ast.Module(body=[save_assignment], type_ignores=[]), str(_VISUALIZER), "exec"), namespace)
+                        normal_save_dir = Path(namespace["save_dir"])
+                        if not normal_save_dir.is_absolute():
+                            normal_save_dir = root / normal_save_dir
+                        self.assertEqual(normal_save_dir, expected_root)
+            self.assertEqual(old_metadata.read_text(encoding="utf-8"), '{"schema_version": 2}')
+
+    def test_reuse_cli_avoids_quantum_imports_and_preserves_archive_sampling(self):
+        for output_family, use_default_paths in (
+            ("dpqc", True), ("dpqc_reset", True), ("dpqc_reset", False),
+        ):
+            with self.subTest(output_family=output_family, default_paths=use_default_paths):
+                self._assert_reuse_cli(output_family, use_default_paths=use_default_paths)
+
+    def _assert_reuse_cli(self, output_family, *, use_default_paths):
+        with tempfile.TemporaryDirectory() as temporary:
+            if use_default_paths:
+                # Exercise both model families' default result and figure paths.
+                h_root = Path(temporary) / "figs" / output_family
+                if output_family == "dpqc_reset":
+                    h_root = h_root / "u3_cartan"
+                h_root = h_root / "h_0.1"
                 results_dir = h_root / "numerical_results" / "hessian"
                 figures_dir = h_root / "hessian_figures"
-                path_arguments = []
+                path_arguments = (
+                    [] if output_family == "dpqc"
+                    else ["--output-family", output_family]
+                )
             else:
                 results_dir = Path(temporary) / "saved"
                 figures_dir = Path(temporary) / "figures"

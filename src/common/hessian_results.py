@@ -1,6 +1,6 @@
 """Load saved DPQC Hessians and derive threshold-dependent plot quantities.
 
-Schema 2 stores signed Hessian matrices and their parameter points; changing
+Schemas 2 and 3 store signed Hessian matrices and their parameter points; changing
 the analysis threshold does not require running the quantum circuit again.
 Schema 1 contains only summaries and can be used at its saved threshold.
 This module deliberately depends only on NumPy, not on JAX or TensorCircuit.
@@ -15,10 +15,10 @@ import numpy as np
 
 
 RESULT_NAME = "hessian_random_points.npz"
-_PARAMETERS_PER_LAYER = {"dpqc": 14, "dpqc_reset": 12}
+_PARAMETERS_PER_LAYER = {"dpqc": 14, "dpqc_reset": 60}
 _MODEL_IDS = {
     "dpqc": "dpqc_dynamic_channel",
-    "dpqc_reset": "dpqc_reset_fixed_rx_pi",
+    "dpqc_reset": "dpqc_reset_u3_cartan_fixed_rx_pi",
 }
 _COMMON_METADATA = {
     "schema_version", "h_param", "layers", "num_hessian_samples",
@@ -109,8 +109,13 @@ def load_random_hessian_result(
         if missing:
             raise KeyError(f"Hessian archive {path} is missing: {', '.join(missing)}.")
         schema = _integer_scalar(archive, "schema_version")
-        if schema not in (1, 2):
-            raise ValueError(f"Unsupported Hessian schema version {schema}; expected 1 or 2.")
+        if schema not in (1, 2, 3):
+            raise ValueError(f"Unsupported Hessian schema version {schema}; expected 1, 2, or 3.")
+        if family == "dpqc_reset" and schema != 3:
+            raise ValueError(
+                "Reset-DPQC Hessians require schema 3 for the 60-parameter "
+                "U3-Cartan model. Recompute the reset Hessian results."
+            )
         archived_h = float(_scalar(archive, "h_param"))
         if not math.isclose(archived_h, float(expected_h_param), rel_tol=0.0, abs_tol=1e-12):
             raise ValueError(f"Hessian archive h_param mismatch: {archived_h} != {expected_h_param}.")
@@ -121,7 +126,7 @@ def load_random_hessian_result(
             if key in archive:
                 if str(_scalar(archive, key)) != expected:
                     raise ValueError(f"Hessian archive {key} mismatch; expected {expected!r}.")
-            elif family != "dpqc" or schema == 2:
+            elif family != "dpqc" or schema >= 2:
                 raise KeyError(f"Hessian archive is missing: {key}.")
         num_samples = _integer_scalar(archive, "num_hessian_samples")
         _integer_scalar(archive, "hessian_sample_seed_base", minimum=0)
@@ -147,7 +152,7 @@ def load_random_hessian_result(
 
         for layer in layers:
             dimension = parameters_per_layer * layer
-            if schema == 2:
+            if schema >= 2:
                 matrices = _real_array(archive, f"L{layer}_hessian", (num_samples, dimension, dimension))
                 theta = _real_array(archive, f"L{layer}_theta", (num_samples, dimension))
                 if not np.allclose(matrices, matrices.swapaxes(-1, -2), rtol=1e-10, atol=1e-14):

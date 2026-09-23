@@ -328,6 +328,58 @@ def save_fig(
     plt.close(fig)
 
 
+def plot_energy_error_history_logstat(
+    data_by_layer,
+    layer_list,
+    *,
+    ground_energy,
+    outpath,
+    cmap=None,
+    title=None,
+):
+    """Plot the same moment-matched lognormal error bands as Unitary-PQC.
+
+    Each array has shape (runs, saved iterations). Population energy moments
+    are converted to a lognormal center and one-log-standard-deviation band;
+    this is not the empirical mean/std of the logarithms of individual errors.
+    All saved iterations are plotted, including any final post-update sample.
+    """
+    layers = tuple(layer_list)
+    if not layers:
+        raise ValueError("layer_list must not be empty.")
+    ground_energy = float(ground_energy)
+    if not np.isfinite(ground_energy):
+        raise ValueError("ground_energy must be finite.")
+    statistics = []
+    for layer in layers:
+        runs = np.asarray(data_by_layer[layer], dtype=np.float64)
+        if runs.ndim != 2 or 0 in runs.shape or not np.all(np.isfinite(runs)):
+            raise ValueError(f"L{layer} energy histories must be a finite nonempty (runs, iterations) array.")
+        error_mean = np.abs(np.mean(runs, axis=0) - ground_energy) + 1e-12
+        variance = np.std(runs, axis=0, ddof=0) ** 2
+        mu_log = np.log(error_mean**2 / np.sqrt(variance + error_mean**2))
+        sigma_log = np.sqrt(np.log(1.0 + variance / error_mean**2))
+        statistics.append((mu_log, sigma_log))
+
+    cmap = matplotlib.colormaps.get_cmap("viridis") if cmap is None else cmap
+    fig, ax = new_fig_ax(outside_legend=True, width="double")
+    for index, (layer, (mu_log, sigma_log)) in enumerate(zip(layers, statistics)):
+        color = cmap(index / len(layers))
+        iterations = np.arange(len(mu_log))
+        ax.semilogy(iterations, np.exp(mu_log), label=f"L{layer}", color=color, linewidth=1.0)
+        ax.fill_between(
+            iterations, np.exp(mu_log - sigma_log), np.exp(mu_log + sigma_log),
+            color=color, alpha=0.15,
+        )
+    ax.set_xlabel("Iterations")
+    ax.set_ylabel(r"Absolute Error  $|E - E_{\mathrm{GT}}|$")
+    if title is not None:
+        ax.set_title(title)
+    ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+    ax.grid(True, which="both", alpha=0.3)
+    save_fig(fig, ax, os.fspath(outpath), outside_legend=True)
+
+
 def save_current_figure(
     outpath: str,
     *,

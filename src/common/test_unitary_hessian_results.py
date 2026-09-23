@@ -30,18 +30,18 @@ def archive_fixture(layers=(1,), *, matrices=True):
         "hessian_condition_number_definition": (
             "max(abs(active eigenvalue)) / min(abs(active eigenvalue)); NaN if rank == 0"
         ),
-        "num_params_per_layer": 14,
+        "num_params_per_layer": 62,
         "analysis_batch_size": 2,
     }
     for layer in layers:
         arrays[f"L{layer}_rank"] = np.asarray([2, 2, 0])
         arrays[f"L{layer}_condition_number"] = np.asarray([1.5, 3.0, np.nan])
         if matrices:
-            values = np.zeros((3, 14 * layer, 14 * layer))
+            values = np.zeros((3, 62 * layer, 62 * layer))
             values[0, 0, 0], values[0, 1, 1] = -3.0, 2.0
             values[1, :2, :2] = [[1.0, 2.0], [2.0, 1.0]]
             arrays[f"L{layer}_hessian"] = values
-            arrays[f"L{layer}_theta"] = np.zeros((3, 14 * layer))
+            arrays[f"L{layer}_theta"] = np.zeros((3, 62 * layer))
     return arrays
 
 
@@ -114,7 +114,7 @@ class MeasuredUnitaryHessianResultsTests(unittest.TestCase):
         invalid = {
             "ansatz": ["unitary_pqc", "unitary_pqc_measured_0", "dpqc"],
             "measurement_outcome": [0, 2, 1.0, True],
-            "num_params_per_layer": [12, 14.0, 14.5],
+            "num_params_per_layer": [12, 14, 60, 62.0, 62.5],
             "h_param": [0.2, np.nan, np.inf, "0.1", 0.1 + 0j],
             "schema_version": [0, 2, 1.5],
             "analysis_kind": ["optimized_points"],
@@ -169,7 +169,7 @@ class MeasuredUnitaryHessianResultsTests(unittest.TestCase):
 
     def test_saved_summaries_are_validated_even_when_recomputed(self):
         invalid = {
-            "L1_rank": [[2, 2], [15, 2, 0], [-1, 2, 0], [1.5, 2, 0], [np.nan, 2, 0], [2j, 2, 0]],
+            "L1_rank": [[2, 2], [63, 2, 0], [-1, 2, 0], [1.5, 2, 0], [np.nan, 2, 0], [2j, 2, 0]],
             "L1_condition_number": [[1.5, 3], [0.5, 3, np.nan], [np.inf, 3, np.nan],
                                      [np.nan, 3, np.nan], [1.5, 3, 1], [1.5j, 3, np.nan],
                                      ["1.5", "3", "nan"]],
@@ -192,8 +192,8 @@ class MeasuredUnitaryHessianResultsTests(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, "raw matrices"):
             self.load(arrays)
         for values in (
-            np.zeros((2, 14, 14)), np.zeros((3, 13, 13)),
-            np.zeros((3, 14, 14), dtype=complex), np.full((3, 14, 14), np.nan),
+            np.zeros((2, 62, 62)), np.zeros((3, 61, 61)),
+            np.zeros((3, 62, 62), dtype=complex), np.full((3, 62, 62), np.nan),
         ):
             arrays = archive_fixture()
             arrays["L1_hessian"] = values
@@ -205,7 +205,7 @@ class MeasuredUnitaryHessianResultsTests(unittest.TestCase):
             self.load(arrays)
 
     def test_optional_saved_parameter_points_are_validated(self):
-        for values in (np.zeros((3, 13)), np.full((3, 14), np.inf), np.zeros((3, 14), dtype=complex)):
+        for values in (np.zeros((3, 61)), np.full((3, 62), np.inf), np.zeros((3, 62), dtype=complex)):
             arrays = archive_fixture()
             arrays["L1_theta"] = values
             with self.subTest(values=values), self.assertRaises(ValueError):

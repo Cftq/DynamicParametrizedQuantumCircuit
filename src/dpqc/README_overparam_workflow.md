@@ -48,3 +48,35 @@ python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1 --hessian-only --reuse
 既存の保存形式と保存先 `figs/dpqc/h_0.1/numerical_results/` 内の `energy`、`qfim`、`hessian` は維持しています。Hessianは1層あたり14個の学習パラメータに対応します。
 
 従来の `--stage vqe`、`--stage qfim`、`--stage hessian` も利用できます。学習から全工程を実行する場合だけ `--stage all` を明示してください。`--vqe-batch-size` は学習を選択した場合だけ使用します。
+
+## ギャップで規格化した最適化性能
+
+通常の可視化では、層数を横軸とする `(E_final - E0) / Delta` のbeeswarm plotと、`epsilon = 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10` の成功確率も出力します。各試行の値を変えずに横方向へ配置し、層ごとの中央値を横線で示します。規格化誤差の成功判定は厳密な `< epsilon` です。全試行を分母に含め、値を1で打ち切りません。
+
+これらの図だけを作る場合は、次のコマンドを使います。必要なのは既存の `vqe_optimization_histories.npz` だけで、QFIM・Hessianのファイルも量子計算ライブラリも不要です。
+
+```powershell
+python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1 --gap-normalized-only
+python src/dpqc/DPQC_overparam_reset_visualize.py --h-param 0.1 --gap-normalized-only
+```
+
+入力は各試行の保存済みエネルギー履歴の最終値です。初期状態を含む `steps + 1` 点の履歴と、旧形式の `steps` 点の履歴に対応します。`E0` と `Delta` は同じ `h` の4量子ビットHamiltonianの小さな行列から求めます。基底状態が縮退する場合、`Delta` は基底状態部分空間より上の最初の励起エネルギーとの差です。補助量子ビットの縮退をゼロギャップと誤認しません。
+
+出力は `figs/dpqc/h_<h>/energy_figures/` の `final_gap_normalized_energy_error.pdf` と `success_probability_multiple_tolerances_gap_normalized.pdf` です。成功率の図は従来名 `gap_normalized_success_probability.pdf` にも同じ内容を保存します。数値は `numerical_results/energy/gap_normalized_energy_statistics.npz` です。reset DPQC の保存先は `figs/dpqc_reset/u3_cartan/h_<h>/` です。数値ファイルにはギャップ、閾値、各試行の規格化誤差、試行数、成功確率、平均・SEM・最小最大・中央値を保存します。丸め誤差による微小な負値だけを0に補正し、誤差図は0を表示できる対称対数軸（最小閾値の1/10以下は線形）を使用します。密集した点は隣の層に重ならない範囲へ横幅を圧縮しますが、試行を間引いたり縦軸の値を変更したりしません。学習結果やQFIMの入力ファイルは変更しません。
+
+`success_probability_multiple_tolerances.pdf` は `delta = 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10` の8閾値を使います。この図は規格化前の最終エネルギー誤差を `<= delta` で判定し、規格化誤差の成功率とは別に保存します。
+
+## ランダム点QFIMの平均log-determinant
+
+保存済みのランダム点QFIM固有値から、横軸を層数 `L`、縦軸を `mean_theta[log det(I + kappa F)]` とした図を出力します。既定値は `kappa = 1` で、通常の可視化にも追加されています。この指標だけを作成する場合は次を実行します。
+
+```powershell
+python src/dpqc/DPQC_overparam_visualize.py --h-param 0.1 --qfim-logdet-only
+python src/dpqc/DPQC_overparam_reset_visualize.py --h-param 0.1 --qfim-logdet-only
+```
+
+`--qfim-logdet-kappa 10` のように有限の正の値を指定して変更できます。入力は `numerical_results/qfim/qfim_random_points_keep0123.npz` と `qfim_random_points_keep01234.npz` の保存済み固有値です。専用モードはQFIM、学習、Hessianを再実行せず、VQE履歴や量子計算ライブラリを必要としません。resetでは現在のモデルを示す `reset_model_metadata.json` も検証します。
+
+各ランダム点で `sum_i log1p(kappa * lambda_i)` を計算し、その後に点間の算術平均を取ります。自然対数を用い、QFIMランクの閾値やパラメータ数による規格化は適用しません。微小な正の固有値も含めます。`p(theta)` は保存したサンプルの分布であり、既存の生成プログラムでは各角度が独立な `[-pi, pi)` の一様分布です。
+
+出力先は `figs/dpqc/h_<h>/figures/qfim/logdet/`（resetは `figs/dpqc_reset/u3_cartan/h_<h>/figures/qfim/logdet/`）です。各部分系について `qfim_logdet_random_points_keep0123_kappa_1.pdf` と同名の `.npz`、`keep01234` の組を保存します。図は平均±SEMを示し、数値ファイルには各点の値、最小・最大を含む統計量、層数、サンプル数、パラメータ数、κ、入力ファイルの情報を保存します。κを変えると別名で保存されます。`--qfim-logdet-only` は `--gap-normalized-only`、`--hessian-only`、`--with-hessian` と同時指定できません。

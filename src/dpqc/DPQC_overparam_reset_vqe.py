@@ -37,6 +37,7 @@ def run_vqe(*, h_param=None, vqe_batch_size=None, device=None) -> int:
     )
     _model._install_reset_model(module)
     save_dir = _model._configure_reset_output_paths(module)
+    _model._ensure_model_metadata(save_dir, h_param)
     module.run_vqe()
     metadata_path = _model._write_model_metadata(save_dir, h_param)
     print(f"Saved reset-DPQC VQE results to: {module.energy_results_dir}")

@@ -1,4 +1,4 @@
-"""Differentiable Rz/Rxx density updates without small matrix products.
+"""Differentiable Pauli-rotation density updates without small matrix products.
 
 Wire zero is the most significant computational-basis bit, matching the DPQC
 reshape/transposition convention.  Callers configure JAX and enable float64
@@ -27,6 +27,29 @@ def _wire_mask(wire, num_qubits):
     if not 0 <= wire < num_qubits:
         raise ValueError("wire must be in range(num_qubits).")
     return 1 << (num_qubits - 1 - wire)
+
+
+def apply_ry_density(rho, theta, wire, num_qubits=5):
+    """Apply exp(-i theta Y_wire / 2) using a signed XOR permutation."""
+    rho = jnp.asarray(rho)
+    num_qubits, dimension = _basis_size(rho, num_qubits)
+    mask = _wire_mask(wire, num_qubits)
+    basis = jnp.arange(dimension)
+    permutation = basis ^ mask
+    z_eigenvalue = 1 - 2 * ((basis & mask) != 0).astype(rho.real.dtype)
+    # Y has row phase -i*z and column phase +i*z.
+    y_rho = (-1j * z_eigenvalue[:, None]) * jnp.take(
+        rho, permutation, axis=-2, mode="clip",
+    )
+    rho_y = (1j * z_eigenvalue[None, :]) * jnp.take(
+        rho, permutation, axis=-1, mode="clip",
+    )
+    y_rho_y = (1j * z_eigenvalue[None, :]) * jnp.take(
+        y_rho, permutation, axis=-1, mode="clip",
+    )
+    theta = jnp.asarray(theta, dtype=rho.real.dtype)
+    c, s = jnp.cos(0.5 * theta), jnp.sin(0.5 * theta)
+    return c * c * rho + s * s * y_rho_y + 1j * c * s * (rho_y - y_rho)
 
 
 def apply_rz_density(rho, theta, wire, num_qubits=5):
@@ -61,3 +84,42 @@ def apply_rxx_density(rho, theta, wires, num_qubits=5):
     theta = jnp.asarray(theta, dtype=rho.real.dtype)
     c, s = jnp.cos(0.5 * theta), jnp.sin(0.5 * theta)
     return c * c * rho + s * s * p_rho_p + 1j * c * s * (rho_p - p_rho)
+
+
+def apply_ryy_density(rho, theta, wires, num_qubits=5):
+    """Apply exp(-i theta Y_a Y_b / 2) using signed XOR permutations."""
+    rho = jnp.asarray(rho)
+    num_qubits, dimension = _basis_size(rho, num_qubits)
+    wires = tuple(wires)
+    if len(wires) != 2 or wires[0] == wires[1]:
+        raise ValueError("Ryy requires two distinct wires.")
+    mask_a = _wire_mask(wires[0], num_qubits)
+    mask_b = _wire_mask(wires[1], num_qubits)
+    basis = jnp.arange(dimension)
+    permutation = basis ^ (mask_a | mask_b)
+    parity = ((basis & mask_a) != 0) ^ ((basis & mask_b) != 0)
+    # Y_a Y_b flips both bits: equal bits acquire -1, unequal bits +1.
+    phase = 2 * parity.astype(rho.real.dtype) - 1
+    p_rho = phase[:, None] * jnp.take(rho, permutation, axis=-2, mode="clip")
+    rho_p = phase[None, :] * jnp.take(rho, permutation, axis=-1, mode="clip")
+    p_rho_p = phase[None, :] * jnp.take(p_rho, permutation, axis=-1, mode="clip")
+    theta = jnp.asarray(theta, dtype=rho.real.dtype)
+    c, s = jnp.cos(0.5 * theta), jnp.sin(0.5 * theta)
+    return c * c * rho + s * s * p_rho_p + 1j * c * s * (rho_p - p_rho)
+
+
+def apply_rzz_density(rho, theta, wires, num_qubits=5):
+    """Apply exp(-i theta Z_a Z_b / 2) by row/column basis phases."""
+    rho = jnp.asarray(rho)
+    num_qubits, dimension = _basis_size(rho, num_qubits)
+    wires = tuple(wires)
+    if len(wires) != 2 or wires[0] == wires[1]:
+        raise ValueError("Rzz requires two distinct wires.")
+    mask_a = _wire_mask(wires[0], num_qubits)
+    mask_b = _wire_mask(wires[1], num_qubits)
+    basis = jnp.arange(dimension)
+    parity = ((basis & mask_a) != 0) ^ ((basis & mask_b) != 0)
+    zz_eigenvalue = 1 - 2 * parity.astype(rho.real.dtype)
+    theta = jnp.asarray(theta, dtype=rho.real.dtype)
+    phase = jnp.exp(-0.5j * theta * zz_eigenvalue)
+    return rho * phase[:, None] * jnp.conjugate(phase)[None, :]

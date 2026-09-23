@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 # coding: utf-8
-"""Draw optimized Unitary-PQC circuits from saved VQE results.
+"""Draw optimized U3-Cartan Unitary-PQC circuits.
 
-Run ``unitary_pqc_overparam_compute.py`` first. This script reads the saved
+Run ``unitary_pqc_overparam_vqe.py`` once if training is needed.
+This script reads
+the saved
 ``vqe_optimization_results.npz`` archive and writes circuit figures without
 rerunning VQE, QFIM, or any other numerical calculation.
 
@@ -16,6 +18,7 @@ Examples::
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import warnings
@@ -34,6 +37,14 @@ for _path in (_MODULE_DIR, _COMMON_DIR):
 
 
 import config_overparam as cfg
+from unitary_pqc_model import (
+    ANSATZ_NAME,
+    LAYER_PAIRS,
+    NUM_BLOCKS,
+    NUM_PARAMS_PER_LAYER,
+    OUTPUT_VARIANT,
+    PARAMS_PER_BLOCK,
+)
 
 
 # Configure noninteractive drawing before importing Matplotlib.
@@ -51,22 +62,15 @@ NP_REAL_DTYPE = np.float64
 DEFAULT_DRAW_DPI = min(int(SAVE_DPI), 100)
 
 NUM_QUBITS = 5
-NUM_BLOCKS = 4
-PARAMS_PER_BLOCK = 3
-N_PARAM_PER_LAYER = NUM_BLOCKS * PARAMS_PER_BLOCK
-ANCILLA_QUBIT = 4
-LAYER_PAIRS = (
-    (1, 3),
-    (2, 3),
-    (0, 2),
-    (0, ANCILLA_QUBIT),
-)
+N_PARAM_PER_LAYER = NUM_PARAMS_PER_LAYER
 
 PARAMETER_FREE_GATE_LABELS = {
     "rz": r"$R_z$",
     "rx": r"$R_x$",
     "ry": r"$R_y$",
     "rxx": r"$R_{xx}$",
+    "ryy": r"$R_{yy}$",
+    "rzz": r"$R_{zz}$",
     "crx": r"$CR_x$",
     "cry": r"$CR_y$",
     "crz": r"$CR_z$",
@@ -75,6 +79,16 @@ PARAMETER_FREE_GATE_LABELS = {
     "z": r"$Z$",
     "h": r"$H$",
 }
+
+
+def _finite_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise argparse.ArgumentTypeError("value must be a finite number") from exc
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("value must be a finite number")
+    return parsed
 
 
 def _positive_int(value: str) -> int:
@@ -91,35 +105,66 @@ def _circuit_fold(value: str) -> int:
     return parsed
 
 
-def _default_result_root() -> Path:
-    return _PROJECT_ROOT / "figs" / "unitary_pqc" / f"h_{cfg.H_PARAM}"
+def _default_result_root(h_param: float = cfg.H_PARAM) -> Path:
+    return (
+        _PROJECT_ROOT / "figs" / ANSATZ_NAME / OUTPUT_VARIANT
+        / f"h_{h_param}"
+    )
+
+
+def _validate_archive_variant(archive, archive_path: Path) -> None:
+    """Reject archives produced by a different ansatz or parameterization."""
+    required = ("ansatz", "num_params_per_layer")
+    missing = tuple(key for key in required if key not in archive.files)
+    if missing:
+        raise KeyError(
+            "VQE archive is missing variant metadata "
+            f"({', '.join(missing)}): {archive_path}"
+        )
+
+    ansatz = np.asarray(archive["ansatz"])
+    params_per_layer = np.asarray(archive["num_params_per_layer"])
+    if ansatz.size != 1 or str(ansatz.reshape(-1)[0]) != ANSATZ_NAME:
+        raise ValueError(
+            f"VQE archive ansatz does not match {ANSATZ_NAME!r}: {archive_path}"
+        )
+    if (
+        params_per_layer.size != 1
+        or not np.issubdtype(params_per_layer.dtype, np.integer)
+        or int(params_per_layer.reshape(-1)[0]) != N_PARAM_PER_LAYER
+    ):
+        raise ValueError(
+            "VQE archive num_params_per_layer does not match this drawer: "
+            f"{archive_path}"
+        )
 
 
 def _parse_cli_args(argv=None):
-    result_root = _default_result_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Draw optimized Unitary-PQC circuits from saved VQE results; "
+            "Draw optimized U3-Cartan Unitary-PQC circuits from "
+            "saved VQE results; "
             "no numerical calculation is performed."
         )
+    )
+    parser.add_argument(
+        "--h-param",
+        type=_finite_float,
+        default=float(cfg.H_PARAM),
+        help="Hamiltonian parameter h used for default result paths.",
     )
     parser.add_argument(
         "--input",
         "--archive",
         dest="input_path",
         type=Path,
-        default=(
-            result_root
-            / "numerical_results"
-            / "energy"
-            / "vqe_optimization_results.npz"
-        ),
+        default=None,
         help="Path to vqe_optimization_results.npz.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=result_root / "optimized_circuits",
+        default=None,
         help="Directory in which optimized_circuit_L*.png is written.",
     )
     parser.add_argument(
@@ -153,7 +198,15 @@ def _parse_cli_args(argv=None):
         action="store_true",
         help="Show optimized numerical gate parameters in the circuit figure.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    result_root = _default_result_root(args.h_param)
+    if args.input_path is None:
+        args.input_path = (
+            result_root / "numerical_results" / "energy" / "vqe_optimization_results.npz"
+        )
+    if args.output_dir is None:
+        args.output_dir = result_root / "optimized_circuits"
+    return args
 
 
 def qg_layer(
@@ -162,10 +215,22 @@ def qg_layer(
     q1: int,
     params: np.ndarray,
 ) -> None:
-    """Append one Unitary-PQC two-qubit block."""
-    circuit.rz(float(params[0]), q0)
-    circuit.rz(float(params[1]), q1)
-    circuit.rxx(float(params[2]), q0, q1)
+    """Append one independent 15-angle U3-Cartan two-qubit block.
+
+    Local U3 factors use Ry, Rz, Ry in application order, matching the
+    numerical model and reset DPQC parameter ordering.
+    """
+    for wire, start in ((q0, 0), (q1, 3)):
+        circuit.ry(float(params[start]), wire)
+        circuit.rz(float(params[start + 1]), wire)
+        circuit.ry(float(params[start + 2]), wire)
+    circuit.rxx(float(params[6]), q0, q1)
+    circuit.ryy(float(params[7]), q0, q1)
+    circuit.rzz(float(params[8]), q0, q1)
+    for wire, start in ((q0, 9), (q1, 12)):
+        circuit.ry(float(params[start]), wire)
+        circuit.rz(float(params[start + 1]), wire)
+        circuit.ry(float(params[start + 2]), wire)
 
 
 def create_unitary_pqc(theta: np.ndarray, num_layers: int) -> QuantumCircuit:
@@ -179,9 +244,13 @@ def create_unitary_pqc(theta: np.ndarray, num_layers: int) -> QuantumCircuit:
         )
 
     circuit = QuantumCircuit(NUM_QUBITS)
-    theta_layers = theta_array.reshape(num_layers, NUM_BLOCKS, PARAMS_PER_BLOCK)
+    theta_layers = theta_array.reshape(num_layers, N_PARAM_PER_LAYER)
     for layer_theta in theta_layers:
-        for (q0, q1), params in zip(LAYER_PAIRS, layer_theta):
+        blocks = layer_theta.reshape(
+            NUM_BLOCKS,
+            PARAMS_PER_BLOCK,
+        )
+        for (q0, q1), params in zip(LAYER_PAIRS, blocks):
             qg_layer(circuit, q0, q1, params)
 
     return circuit
@@ -302,6 +371,7 @@ def load_best_theta_by_layer(
         raise FileNotFoundError(f"VQE archive was not found: {archive_path}")
 
     with np.load(archive_path, allow_pickle=False) as archive:
+        _validate_archive_variant(archive, archive_path)
         if "layers" not in archive.files:
             raise KeyError(f"Missing key 'layers' in {archive_path}")
 

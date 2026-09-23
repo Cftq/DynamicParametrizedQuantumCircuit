@@ -27,9 +27,13 @@ class HessianResultsTests(unittest.TestCase):
         self.results_dir = Path(self.temp_dir.name)
 
     @staticmethod
-    def matrix_fixture(*, layers=(1,), num_samples=2):
+    def matrix_fixture(*, layers=(1,), num_samples=2, output_family="dpqc_reset"):
+        parameters_per_layer, model_id, schema = {
+            "dpqc": (14, "dpqc_dynamic_channel", 2),
+            "dpqc_reset": (60, "dpqc_reset_u3_cartan_fixed_rx_pi", 3),
+        }[output_family]
         data = {
-            "schema_version": np.asarray(2),
+            "schema_version": np.asarray(schema),
             "h_param": np.asarray(0.1),
             "layers": np.asarray(layers, dtype=np.int64),
             "num_hessian_samples": np.asarray(num_samples),
@@ -38,14 +42,14 @@ class HessianResultsTests(unittest.TestCase):
                 "jax.random.uniform[-pi, pi), float64, "
                 "PRNGKey(hessian_sample_seed_base + layer)"
             ),
-            "parameters_per_layer": np.asarray(12),
+            "parameters_per_layer": np.asarray(parameters_per_layer),
             "hessian_method": np.asarray("chunked_forward_over_reverse_hvp"),
             "hvp_chunk_size": np.asarray(8),
-            "output_family": np.asarray("dpqc_reset"),
-            "model_id": np.asarray("dpqc_reset_fixed_rx_pi"),
+            "output_family": np.asarray(output_family),
+            "model_id": np.asarray(model_id),
         }
         for layer in layers:
-            size = 12 * layer
+            size = parameters_per_layer * layer
             data[f"L{layer}_hessian"] = np.zeros(
                 (num_samples, size, size), dtype=np.float64
             )
@@ -67,7 +71,7 @@ class HessianResultsTests(unittest.TestCase):
 
     def test_signed_spectrum_and_inclusive_absolute_threshold(self):
         data = self.matrix_fixture()
-        spectrum = np.asarray([-4.0, 2.0, 1e-12, -5e-13] + [0.0] * 8)
+        spectrum = np.asarray([-4.0, 2.0, 1e-12, -5e-13] + [0.0] * 56)
         data["L1_hessian"][0] = np.diag(spectrum)
         # A non-diagonal indefinite block catches accidental diagonal-only use.
         data["L1_hessian"][1, :2, :2] = [[0.0, 3.0], [3.0, 0.0]]
@@ -75,19 +79,19 @@ class HessianResultsTests(unittest.TestCase):
 
         result = self.load()
 
-        self.assertEqual(result["schema_version"], 2)
+        self.assertEqual(result["schema_version"], 3)
         self.assertEqual(result["num_samples"], 2)
         self.assertEqual(result["threshold"], 1e-12)
         np.testing.assert_array_equal(result["rank_by_layer"][1], [3, 2])
         np.testing.assert_allclose(result["condition_by_layer"][1], [4e12, 1.0])
         np.testing.assert_allclose(result["eigenvalues_by_layer"][1][0], np.sort(spectrum))
         np.testing.assert_allclose(
-            result["eigenvalues_by_layer"][1][1], [-3.0] + [0.0] * 10 + [3.0]
+            result["eigenvalues_by_layer"][1][1], [-3.0] + [0.0] * 58 + [3.0]
         )
 
     def test_same_saved_matrices_support_different_analysis_thresholds(self):
         data = self.matrix_fixture(num_samples=1)
-        data["L1_hessian"][0] = np.diag([-8.0, 2.0, 0.5] + [0.0] * 9)
+        data["L1_hessian"][0] = np.diag([-8.0, 2.0, 0.5] + [0.0] * 57)
         self.save(data)
 
         low = self.load(rank_threshold=0.5)
@@ -103,7 +107,7 @@ class HessianResultsTests(unittest.TestCase):
 
     def test_zero_and_entirely_inactive_spectra(self):
         data = self.matrix_fixture()
-        data["L1_hessian"][1] = np.diag([-5e-13, 5e-13] + [0.0] * 10)
+        data["L1_hessian"][1] = np.diag([-5e-13, 5e-13] + [0.0] * 58)
         self.save(data)
 
         result = self.load()
@@ -112,7 +116,7 @@ class HessianResultsTests(unittest.TestCase):
         self.assertTrue(np.isnan(result["condition_by_layer"][1]).all())
 
     def test_legacy_summaries_load_but_threshold_changes_require_recompute(self):
-        data = self.matrix_fixture()
+        data = self.matrix_fixture(output_family="dpqc")
         del data["L1_hessian"]
         del data["L1_theta"]
         data.update(
@@ -127,21 +131,21 @@ class HessianResultsTests(unittest.TestCase):
         )
         self.save(data)
 
-        result = self.load()
+        result = self.load(expected_output_family="dpqc")
 
         self.assertEqual(result["schema_version"], 1)
         np.testing.assert_array_equal(result["rank_by_layer"][1], [2, 0])
         np.testing.assert_allclose(result["condition_by_layer"][1], [4.0, np.nan])
         with self.assertRaisesRegex(ValueError, r"[Rr]ecompute|--hessian-only"):
-            self.load(rank_threshold=1e-6)
+            self.load(rank_threshold=1e-6, expected_output_family="dpqc")
 
     def test_reject_invalid_hessian_arrays(self):
         invalid_arrays = {
-            "wrong shape": np.zeros((2, 11, 11), dtype=np.float64),
-            "nonfinite": np.full((2, 12, 12), np.nan, dtype=np.float64),
-            "complex": np.zeros((2, 12, 12), dtype=np.complex128),
+            "wrong shape": np.zeros((2, 59, 59), dtype=np.float64),
+            "nonfinite": np.full((2, 60, 60), np.nan, dtype=np.float64),
+            "complex": np.zeros((2, 60, 60), dtype=np.complex128),
         }
-        asymmetric = np.zeros((2, 12, 12), dtype=np.float64)
+        asymmetric = np.zeros((2, 60, 60), dtype=np.float64)
         asymmetric[0, 0, 1] = 1.0
         invalid_arrays["asymmetric"] = asymmetric
         for label, invalid in invalid_arrays.items():
@@ -154,9 +158,9 @@ class HessianResultsTests(unittest.TestCase):
 
     def test_reject_invalid_saved_parameters(self):
         invalid_arrays = (
-            np.zeros((2, 11), dtype=np.float64),
-            np.full((2, 12), np.inf, dtype=np.float64),
-            np.zeros((2, 12), dtype=np.complex128),
+            np.zeros((2, 59), dtype=np.float64),
+            np.full((2, 60), np.inf, dtype=np.float64),
+            np.zeros((2, 60), dtype=np.complex128),
         )
         for invalid in invalid_arrays:
             with self.subTest(shape=invalid.shape, dtype=invalid.dtype):
@@ -185,9 +189,30 @@ class HessianResultsTests(unittest.TestCase):
 
         self.assertEqual(list(result["layers"]), [1, 3])
         self.assertEqual(set(result["rank_by_layer"]), {1, 3})
-        self.assertEqual(result["eigenvalues_by_layer"][3].shape, (2, 36))
+        self.assertEqual(result["eigenvalues_by_layer"][3].shape, (2, 180))
         with self.assertRaises(KeyError):
             self.load(requested_layers=[4])
+
+    def test_old_reset_model_is_rejected(self):
+        for key, value in (
+            ("schema_version", 2),
+            ("parameters_per_layer", 12),
+            ("model_id", "dpqc_reset_fixed_rx_pi"),
+        ):
+            with self.subTest(key=key):
+                data = self.matrix_fixture()
+                data[key] = np.asarray(value)
+                self.save(data)
+                with self.assertRaises(ValueError):
+                    self.load()
+
+    def test_original_dpqc_schema_two_still_loads(self):
+        self.save(self.matrix_fixture(output_family="dpqc"))
+
+        result = self.load(expected_output_family="dpqc")
+
+        self.assertEqual(result["schema_version"], 2)
+        self.assertEqual(result["theta_by_layer"][1].shape, (2, 14))
 
 
 if __name__ == "__main__":

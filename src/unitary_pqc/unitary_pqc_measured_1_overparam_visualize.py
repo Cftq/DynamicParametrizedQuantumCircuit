@@ -6,7 +6,7 @@ Train once with ``unitary_pqc_measured_1_overparam_vqe.py`` when needed, then
 calculate QFIM/HS and Hessian with their separate programs (or the default
 ``unitary_pqc_measured_1_overparam_compute.py`` analysis stage). This script loads
 saved .npz results under
-``figs/unitary_pqc_measured_1/h_<h_param>/numerical_results`` and generates
+``figs/unitary_pqc_measured_1/u3_cartan/h_<h_param>/numerical_results`` and generates
 numerical figures without recomputing VQE or QFIM quantities. Circuit drawings
 are handled independently by
 ``unitary_pqc_measured_1_overparam_draw_circuits.py``.
@@ -25,9 +25,22 @@ cutoff); the signed trace uses all eigenvalues. Sampled values and definitions
 are saved in ``figures/hessian/hessian_statistics_random_points.npz``.
 Use ``--hessian-only`` to render a saved Hessian archive independently of
 VQE/QFIM results, without importing JAX, Optax, or the compute program.
+Use ``--gap-normalized-only`` to beeswarm-plot saved final (E-E0)/Delta and
+plot success probabilities at epsilon = 1e-5 through 1e-10 using only the
+VQE energy archive.
+These figures are also included in normal visualization. No training or QFIM
+is recomputed; the gap is to the first excitation above the ground subspace.
+Use ``--qfim-logdet-only`` to plot mean log det(I + kappa F) from saved
+random-point QFIM spectra only. All eigenvalues are used without a rank cutoff,
+and ``--qfim-logdet-kappa`` sets the positive scale (default: 1).
+Random-point QFIM rank figures count all eigenvalues at or above the selected
+threshold (default: QFIM_EFFECTIVE_RANK_THRESHOLD) and show mean +/- SEM,
+minimum, and maximum. Use ``--qfim-rank-only`` to render them independently
+of VQE, HS, Hessian, and optimization-path results from the saved raw spectra.
 
     python src/unitary_pqc/unitary_pqc_measured_1_overparam_visualize.py --h-param 0.1
     python src/unitary_pqc/unitary_pqc_measured_1_overparam_visualize.py --h-param 0.1 --hessian-only
+    python src/unitary_pqc/unitary_pqc_measured_1_overparam_visualize.py --h-param 0.1 --gap-normalized-only
 """
 from __future__ import annotations
 
@@ -49,6 +62,7 @@ for _path in (_MODULE_DIR, _COMMON_DIR):
 
 
 import config_overparam as cfg
+from unitary_pqc_measured_1_model import ANSATZ_NAME, NUM_PARAMS_PER_LAYER, OUTPUT_VARIANT
 
 
 def _finite_float(value: str) -> float:
@@ -98,9 +112,58 @@ def _parse_cli_args(argv=None):
             "(default: 1.0)."
         ),
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--hessian-only", action="store_true",
         help="Render only saved random-point Hessian statistics; no recomputation.",
+    )
+    mode.add_argument(
+        "--gap-normalized-only", action="store_true",
+        help=(
+            "Render final (E-E0)/gap and strict success probabilities from "
+            "saved VQE energies only; no training, QFIM, or Hessian required."
+        ),
+    )
+    mode.add_argument(
+        "--qfim-logdet-only", action="store_true",
+        help="Render mean log det(I + kappa F) from saved random QFIM spectra only.",
+    )
+    mode.add_argument(
+        "--qfim-rank-only", action="store_true",
+        help="Render QFIM rank mean/SEM/min/max from saved random QFIM spectra only.",
+    )
+    parser.add_argument(
+        "--qfim-rank-threshold", type=_positive_float,
+        default=float(cfg.QFIM_EFFECTIVE_RANK_THRESHOLD),
+        help="Inclusive QFIM rank cutoff (default: QFIM_EFFECTIVE_RANK_THRESHOLD).",
+    )
+    parser.add_argument(
+        "--qfim-rank-results-dir", type=Path, default=None,
+        help="Directory containing canonical random QFIM archives for --qfim-rank-only.",
+    )
+    parser.add_argument(
+        "--qfim-rank-figures-dir", type=Path, default=None,
+        help="Optional PDF/statistics output directory for --qfim-rank-only.",
+    )
+    parser.add_argument(
+        "--qfim-logdet-kappa", type=_positive_float, default=1.0,
+        help="Positive finite kappa for the QFIM log-determinant (default: 1).",
+    )
+    parser.add_argument(
+        "--qfim-logdet-results-dir", type=Path, default=None,
+        help="Directory containing random-point QFIM archives for --qfim-logdet-only.",
+    )
+    parser.add_argument(
+        "--qfim-logdet-figures-dir", type=Path, default=None,
+        help="Optional PDF/statistics output directory for --qfim-logdet-only.",
+    )
+    parser.add_argument(
+        "--gap-results-dir", type=Path, default=None,
+        help="Optional VQE energy-results directory for --gap-normalized-only.",
+    )
+    parser.add_argument(
+        "--gap-figures-dir", type=Path, default=None,
+        help="Optional figure output directory for --gap-normalized-only.",
     )
     parser.add_argument(
         "--hessian-results-dir", type=Path, default=None,
@@ -115,6 +178,20 @@ def _parse_cli_args(argv=None):
         args.hessian_results_dir is not None or args.hessian_figures_dir is not None
     ):
         parser.error("Hessian directory overrides require --hessian-only.")
+    if not args.gap_normalized_only and (
+        args.gap_results_dir is not None or args.gap_figures_dir is not None
+    ):
+        parser.error("Gap directory overrides require --gap-normalized-only.")
+    if not args.qfim_logdet_only and (
+        args.qfim_logdet_results_dir is not None
+        or args.qfim_logdet_figures_dir is not None
+    ):
+        parser.error("QFIM logdet directory overrides require --qfim-logdet-only.")
+    if not args.qfim_rank_only and (
+        args.qfim_rank_results_dir is not None
+        or args.qfim_rank_figures_dir is not None
+    ):
+        parser.error("QFIM rank directory overrides require --qfim-rank-only.")
     return args
 
 
@@ -179,7 +256,9 @@ def run_unitary_hessian_visualization(
     from unitary_hessian_results import load_measured_unitary_hessian_result
 
     selected_h = _finite_float(str(cfg.H_PARAM if h_param is None else h_param))
-    save_dir = _SRC_DIR.parent / "figs" / "unitary_pqc_measured_1" / f"h_{selected_h}"
+    save_dir = (
+        _SRC_DIR.parent / "figs" / ANSATZ_NAME / OUTPUT_VARIANT / f"h_{selected_h}"
+    )
     results_dir = (
         save_dir / "numerical_results" / "hessian" if results_dir is None
         else Path(results_dir).expanduser().resolve()
@@ -199,12 +278,205 @@ def run_unitary_hessian_visualization(
     return output
 
 
+def run_unitary_gap_normalized_visualization(
+    *, h_param=None, results_dir=None, figures_dir=None,
+):
+    """Plot archived outcome-1 energies without importing a quantum runtime."""
+    import numpy as np
+    from gap_normalized_energy import (
+        save_gap_normalized_energy_outputs, spectral_gap_from_hamiltonian,
+    )
+    from hessian_curvature import hamiltonian_matrix_numpy
+    from unitary_pqc_measured_1_energy_results import load_measured_unitary_final_energies
+
+    selected_h = _finite_float(str(cfg.H_PARAM if h_param is None else h_param))
+    save_dir = (
+        _SRC_DIR.parent / "figs" / ANSATZ_NAME / OUTPUT_VARIANT / f"h_{selected_h}"
+    )
+    results_dir = (
+        save_dir / "numerical_results" / "energy" if results_dir is None
+        else Path(results_dir).expanduser().resolve()
+    )
+    figures_dir = (
+        save_dir / "figures" / "energy" if figures_dir is None
+        else Path(figures_dir).expanduser().resolve()
+    )
+    energies, saved_ground, metadata = load_measured_unitary_final_energies(
+        results_dir / "vqe_optimization_results.npz", expected_h_param=selected_h,
+    )
+    matrix = hamiltonian_matrix_numpy(selected_h)
+    spectrum = spectral_gap_from_hamiltonian(matrix)
+    ground_tolerance = (
+        128 * np.finfo(np.float64).eps * max(1.0, np.linalg.norm(matrix, ord=2))
+    )
+    if abs(saved_ground - spectrum["ground_energy"]) > ground_tolerance:
+        raise ValueError("Saved VQE ground energy does not match the selected Hamiltonian.")
+    metadata.update(output_family=ANSATZ_NAME, saved_ground_energy=saved_ground)
+    result = save_gap_normalized_energy_outputs(
+        energies,
+        h_param=selected_h,
+        hamiltonian_matrix=matrix,
+        figures_dir=figures_dir,
+        statistics_outpath=results_dir / "gap_normalized_energy_statistics.npz",
+        metadata=metadata,
+    )
+    result.update(save_dir=save_dir, energy_fig_dir=figures_dir)
+    print(f"Spectral gap above the ground subspace: {result['spectral_gap']:.12g}")
+    return result
+
+
+def _load_unitary_random_qfim_spectra(*, h_param, results_dir):
+    """Validate both canonical outcome-1 spectra without quantum dependencies."""
+    import numpy as np
+    from qfim_logdet import load_random_qfim_spectra
+
+    loaded = {}
+    for keep_key, keep_wires, representation in (
+        ("keep0123", (0, 1, 2, 3), "reduced_mixed"),
+        ("keep01234", (0, 1, 2, 3, 4), "pure_full"),
+    ):
+        loaded[keep_key] = load_random_qfim_spectra(
+            Path(results_dir) / f"qfim_random_points_{keep_key}.npz",
+            expected_h_param=h_param,
+            parameters_per_layer=NUM_PARAMS_PER_LAYER,
+            required_metadata={
+                "schema_version": 1,
+                "ansatz": ANSATZ_NAME,
+                "measurement_outcome": 1,
+                "num_total_qubits": 5,
+                "num_params_per_layer": NUM_PARAMS_PER_LAYER,
+                "analysis_kind": "random_points",
+                "keep_key": keep_key,
+                "keep_wires": np.asarray(keep_wires, dtype=np.int64),
+                "traced_wires": np.asarray(
+                    [wire for wire in range(5) if wire not in keep_wires], dtype=np.int64,
+                ),
+                "representation": representation,
+                "qfim_definition": "SLD_QFIM",
+                "eigenvalue_order": "descending",
+                "eigenvalues_threshold_masked": False,
+            },
+        )
+    return loaded
+
+
+def run_unitary_qfim_logdet_visualization(
+    *, h_param=None, results_dir=None, figures_dir=None, kappa=1.0,
+):
+    """Average saved sample log determinants without importing a quantum runtime.
+
+    ``results_dir`` contains the canonical random-point QFIM archives directly.
+    Layers and sample counts come from those archives, independent of current
+    analysis configuration. No optimization-path samples or rank cutoff enter
+    this expectation over the archived parameter samples.
+    """
+    from qfim_logdet import compute_qfim_logdet, save_qfim_logdet_outputs
+
+    selected_h = _finite_float(str(cfg.H_PARAM if h_param is None else h_param))
+    kappa = _positive_float(str(kappa))
+    save_dir = (
+        _SRC_DIR.parent / "figs" / ANSATZ_NAME / OUTPUT_VARIANT / f"h_{selected_h}"
+    )
+    results_dir = (
+        save_dir / "numerical_results" / "qfim" if results_dir is None
+        else Path(results_dir).expanduser().resolve()
+    )
+    figures_dir = (
+        save_dir / "figures" / "qfim" / "logdet" if figures_dir is None
+        else Path(figures_dir).expanduser().resolve()
+    )
+    archives = _load_unitary_random_qfim_spectra(
+        h_param=selected_h, results_dir=results_dir,
+    )
+    loaded = {
+        keep_key: (
+            archive, compute_qfim_logdet(archive["eigenvalues_by_layer"], kappa=kappa),
+        )
+        for keep_key, archive in archives.items()
+    }
+
+    # Validate both states before writing any files.
+    outputs = {}
+    for keep_key, (archive, statistics) in loaded.items():
+        metadata = dict(archive["metadata"])
+        metadata["output_family"] = ANSATZ_NAME
+        if "sampling_distribution" not in metadata:
+            metadata["sampling_distribution"] = "independent_uniform[-pi,pi)"
+            metadata["sampling_distribution_source"] = (
+                "unitary_pqc_measured_1_overparam_qfim.py random-point sampler"
+            )
+        outputs[keep_key] = {
+            "statistics": statistics,
+            **save_qfim_logdet_outputs(
+                statistics, figures_dir, keep_key=keep_key,
+                title=f"Measured 1: {keep_key}, h={selected_h:g}",
+                source_path=archive["source_path"], metadata=metadata,
+            ),
+        }
+    print(f"Saved random-point QFIM logdet figures to: {figures_dir}")
+    return {
+        "h_param": selected_h, "kappa": kappa, "save_dir": save_dir,
+        "qfim_logdet_fig_dir": figures_dir, "outputs": outputs,
+    }
+
+
+def run_unitary_qfim_rank_visualization(
+    *, h_param=None, results_dir=None, figures_dir=None, rank_threshold=None,
+):
+    """Plot DPQC-style inclusive threshold rank from saved outcome-1 spectra."""
+    from qfim_rank import compute_qfim_rank, save_qfim_rank_outputs
+
+    selected_h = _finite_float(str(cfg.H_PARAM if h_param is None else h_param))
+    threshold = _positive_float(str(
+        cfg.QFIM_EFFECTIVE_RANK_THRESHOLD if rank_threshold is None else rank_threshold
+    ))
+    save_dir = (
+        _SRC_DIR.parent / "figs" / ANSATZ_NAME / OUTPUT_VARIANT / f"h_{selected_h}"
+    )
+    results_dir = (
+        save_dir / "numerical_results" / "qfim" if results_dir is None
+        else Path(results_dir).expanduser().resolve()
+    )
+    figures_dir = (
+        save_dir / "figures" / "qfim" / "rank" / "random_points"
+        if figures_dir is None else Path(figures_dir).expanduser().resolve()
+    )
+    archives = _load_unitary_random_qfim_spectra(
+        h_param=selected_h, results_dir=results_dir,
+    )
+    # Validate/compute both kept states before creating output files.
+    statistics_by_keep = {
+        keep_key: compute_qfim_rank(archive["eigenvalues_by_layer"], threshold=threshold)
+        for keep_key, archive in archives.items()
+    }
+    outputs = {}
+    for keep_key, archive in archives.items():
+        statistics = statistics_by_keep[keep_key]
+        metadata = dict(archive["metadata"])
+        metadata["output_family"] = ANSATZ_NAME
+        outputs[keep_key] = {
+            "statistics": statistics,
+            **save_qfim_rank_outputs(
+                statistics, figures_dir, keep_key=keep_key,
+                title=f"Measured 1 QFIM rank: {keep_key}, h={selected_h:g}",
+                source_path=archive["source_path"], metadata=metadata,
+            ),
+        }
+    print(f"Saved random-point QFIM rank figures to: {figures_dir}")
+    return {
+        "h_param": selected_h, "rank_threshold": threshold, "save_dir": save_dir,
+        "qfim_rank_fig_dir": figures_dir, "outputs": outputs,
+    }
+
+
 if __name__ == "__main__":
     _CLI_ARGS = _parse_cli_args()
 else:
     _CLI_ARGS = argparse.Namespace(
         h_param=float(cfg.H_PARAM),
         convergence_tolerances=None,
+        qfim_logdet_kappa=1.0,
+        qfim_rank_threshold=float(cfg.QFIM_EFFECTIVE_RANK_THRESHOLD),
     )
 
 _SELECTED_H_PARAM = float(_CLI_ARGS.h_param)
@@ -212,6 +484,35 @@ if not math.isfinite(_SELECTED_H_PARAM):
     raise ValueError("h_param must be a finite number.")
 
 # Exit before importing the compute module or any quantum/optimizer runtime.
+if __name__ == "__main__" and _CLI_ARGS.qfim_rank_only:
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    run_unitary_qfim_rank_visualization(
+        h_param=_CLI_ARGS.h_param, results_dir=_CLI_ARGS.qfim_rank_results_dir,
+        figures_dir=_CLI_ARGS.qfim_rank_figures_dir,
+        rank_threshold=_CLI_ARGS.qfim_rank_threshold,
+    )
+    raise SystemExit(0)
+
+
+if __name__ == "__main__" and _CLI_ARGS.qfim_logdet_only:
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    run_unitary_qfim_logdet_visualization(
+        h_param=_CLI_ARGS.h_param, results_dir=_CLI_ARGS.qfim_logdet_results_dir,
+        figures_dir=_CLI_ARGS.qfim_logdet_figures_dir,
+        kappa=_CLI_ARGS.qfim_logdet_kappa,
+    )
+    raise SystemExit(0)
+
+
+if __name__ == "__main__" and _CLI_ARGS.gap_normalized_only:
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    run_unitary_gap_normalized_visualization(
+        h_param=_CLI_ARGS.h_param, results_dir=_CLI_ARGS.gap_results_dir,
+        figures_dir=_CLI_ARGS.gap_figures_dir,
+    )
+    raise SystemExit(0)
+
+
 if __name__ == "__main__" and _CLI_ARGS.hessian_only:
     os.environ.setdefault("MPLBACKEND", "Agg")
     _hessian_output = run_unitary_hessian_visualization(
@@ -239,7 +540,8 @@ FINAL_ENERGY_ERROR_DETAIL_THRESHOLD = NP_REAL_DTYPE(
     getattr(cfg, "FINAL_ENERGY_ERROR_DETAIL_THRESHOLD", 6e-1)
 )
 SUCCESS_PROBABILITY_FIGURE_THRESHOLDS = np.asarray(
-    cfg.SUCCESS_PROBABILITY_FIGURE_THRESHOLDS,
+    # Plot-only tolerances, evaluated from saved final energies.
+    (1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10),
     dtype=NP_REAL_DTYPE,
 )
 
@@ -954,8 +1256,17 @@ def _plot_vqe_ground_truth_error_results() -> dict:
             "success_probability_multiple_tolerances.pdf",
         ),
     )
+    # Keep the separate delta=1 figure independent of the six tighter
+    # tolerances used by success_probability_multiple_tolerances.pdf.
+    delta_one_statistics = _multiple_tolerance_success_statistics(
+        final_energies_by_layer,
+        layers,
+        ground_energy=ground_energy,
+        num_trials=num_trials,
+        thresholds=(1.0,),
+    )
     _plot_success_probability_multiple_tolerances(
-        success_statistics,
+        delta_one_statistics,
         outpath=os.path.join(
             energy_dir,
             "success_probability_delta_1.pdf",
@@ -2134,7 +2445,12 @@ def _load_random_qfim_results() -> None:
     )
 
 
-def _plot_random_qfim_results() -> None:
+def _plot_random_qfim_results(*, rank_threshold=None) -> None:
+    upqc.qfim_rank_result = run_unitary_qfim_rank_visualization(
+        h_param=upqc.h_param, results_dir=upqc.qfim_results_dir,
+        figures_dir=Path(upqc.qfim_fig_dir) / "rank" / "random_points",
+        rank_threshold=rank_threshold,
+    )
     hs_eigs_reduced_0123_dir = upqc.hs_eigs_reduced_0123_dir
     qfim_trace_dir = os.path.join(upqc.qfim_fig_dir, "trace")
     qfim_shannon_entropy_dir = os.path.join(
@@ -2430,6 +2746,8 @@ def run_unitary_pqc_visualization(
     *,
     h_param: Optional[float] = None,
     convergence_tolerances: Optional[Sequence[float]] = None,
+    qfim_logdet_kappa: float = 1.0,
+    qfim_rank_threshold: Optional[float] = None,
 ) -> dict:
     selected_h_param = _finite_float(
         str(_SELECTED_H_PARAM if h_param is None else h_param)
@@ -2453,6 +2771,10 @@ def run_unitary_pqc_visualization(
 
     upqc.configure_unitary_pqc_overparam(h_value=selected_h_param)
     _load_unitary_vqe_results(vqe_result)
+    gap_normalized_energy = run_unitary_gap_normalized_visualization(
+        h_param=selected_h_param, results_dir=upqc.energy_results_dir,
+        figures_dir=upqc.energy_fig_dir,
+    )
     generate_convergence_time_outputs(
         upqc.energy_traces_by_layer,
         upqc.layer_list,
@@ -2478,18 +2800,28 @@ def run_unitary_pqc_visualization(
     _plot_vqe_ground_truth_error_results()
 
     _load_random_qfim_results()
-    _plot_random_qfim_results()
+    _plot_random_qfim_results(rank_threshold=qfim_rank_threshold)
+    qfim_logdet = run_unitary_qfim_logdet_visualization(
+        h_param=selected_h_param, results_dir=upqc.qfim_results_dir,
+        kappa=qfim_logdet_kappa,
+    )
 
     _load_optimization_path_results()
     _plot_optimization_path_results()
 
-    return upqc.collect_unitary_pqc_result()
+    result = upqc.collect_unitary_pqc_result()
+    result["gap_normalized_energy"] = gap_normalized_energy
+    result["qfim_logdet"] = qfim_logdet
+    result["qfim_rank"] = upqc.qfim_rank_result
+    return result
 
 
 if __name__ == "__main__":
     visualization_result = run_unitary_pqc_visualization(
         h_param=_CLI_ARGS.h_param,
         convergence_tolerances=_CLI_ARGS.convergence_tolerances,
+        qfim_logdet_kappa=_CLI_ARGS.qfim_logdet_kappa,
+        qfim_rank_threshold=_CLI_ARGS.qfim_rank_threshold,
     )
     print(
         "Visualized Hamiltonian parameter h: "

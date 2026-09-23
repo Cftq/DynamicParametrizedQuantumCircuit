@@ -116,7 +116,7 @@ class DPQCDensityIntegrationTests(unittest.TestCase):
         if reset:
             model = importlib.import_module("dpqc_reset_model")
             model._install_reset_model(self.module)
-            self.assertEqual(self.module.n_param_per_layer, 12)
+            self.assertEqual(self.module.n_param_per_layer, 60)
         else:
             self.assertEqual(self.module.n_param_per_layer, 14)
 
